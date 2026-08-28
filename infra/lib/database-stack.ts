@@ -28,7 +28,7 @@ export class DatabaseStack extends cdk.Stack {
     });
 
     this.cluster = new rds.DatabaseCluster(this, "ProductMasterCluster", {
-      engine: rds.DatabaseClusterEngine.auroraPostgres({ version: rds.AuroraPostgresEngineVersion.VER_15_8 }),
+      engine: rds.DatabaseClusterEngine.auroraPostgres({ version: rds.AuroraPostgresEngineVersion.VER_17_9 }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       writer: rds.ClusterInstance.serverlessV2("writer"),
