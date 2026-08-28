@@ -32,8 +32,11 @@ export class QueueStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    this.aiGenerate = makeQueuePair(this, "AiGenerate", 60);
-    this.ebaySync = makeQueuePair(this, "EbaySync", 30);
-    this.inventorySync = makeQueuePair(this, "InventorySync", 30);
+    // Visibility timeout must be >= the consuming Lambda's timeout (all three consumer
+    // functions run at 2 minutes — see lambda-stack.ts); AWS recommends >= 6x the
+    // function timeout so a message isn't redelivered mid-processing.
+    this.aiGenerate = makeQueuePair(this, "AiGenerate", 12 * 60);
+    this.ebaySync = makeQueuePair(this, "EbaySync", 12 * 60);
+    this.inventorySync = makeQueuePair(this, "InventorySync", 12 * 60);
   }
 }
