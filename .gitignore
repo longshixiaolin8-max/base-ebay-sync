@@ -12,3 +12,4 @@ cdk.out/
 coverage/
 *.log
 .pnpm-store/
+infra/cdk.context.json
