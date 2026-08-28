@@ -71,7 +71,10 @@ export class BedrockModelClient implements AIModelClient {
     const { BedrockRuntimeClient, InvokeModelCommand } = await import("@aws-sdk/client-bedrock-runtime");
     const client = new BedrockRuntimeClient({ region: this.config.region });
     const command = new InvokeModelCommand({
-      modelId: this.config.modelId ?? "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      // Cross-region inference profile ID, not a bare model ID: several current Claude
+      // models on Bedrock only support on-demand invocation through an inference
+      // profile (verified against a live account — a raw model ID here 400s).
+      modelId: this.config.modelId ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       contentType: "application/json",
       accept: "application/json",
       body: JSON.stringify({
