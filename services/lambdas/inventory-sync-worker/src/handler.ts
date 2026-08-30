@@ -1,8 +1,8 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { EbayAdapter } from "@ai-ec/adapter-ebay";
 import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
 import { applySale, channelListings, productMaster } from "@ai-ec/db";
 import {
+  createEbayAdapter,
   getAppCredentials,
   getDb,
   getIdempotencyStore,
@@ -10,6 +10,7 @@ import {
   listConnectedAccountIds,
   recordAuditLog,
   recordSyncError,
+  type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
@@ -28,15 +29,10 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
   const idempotencyStore = getIdempotencyStore();
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-  const ebayCreds = await getAppCredentials<{
-    clientId: string;
-    clientSecret: string;
-    ruName: string;
-    merchantLocationKey: string;
-  }>("ebay");
+  const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
   const adapters: Record<ChannelType, ChannelAdapter> = {
     base: new BaseAdapter(baseCreds),
-    ebay: new EbayAdapter(ebayCreds),
+    ebay: createEbayAdapter(ebayCreds),
     shopify: notImplementedAdapter("shopify"),
     amazon: notImplementedAdapter("amazon"),
     rakuten: notImplementedAdapter("rakuten"),

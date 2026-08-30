@@ -1,7 +1,15 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { EbayAdapter } from "@ai-ec/adapter-ebay";
 import type { ChannelAdapter, SaleEvent } from "@ai-ec/core";
-import { enqueue, getAppCredentials, getDb, getQueueUrls, getValidAccessToken, listConnectedAccountIds } from "@ai-ec/lambda-shared";
+import {
+  createEbayAdapter,
+  enqueue,
+  getAppCredentials,
+  getDb,
+  getQueueUrls,
+  getValidAccessToken,
+  listConnectedAccountIds,
+  type EbayAppCredentials,
+} from "@ai-ec/lambda-shared";
 
 /**
  * Scheduled (EventBridge) poller: asks each connected channel for orders placed
@@ -17,13 +25,8 @@ export async function handler(): Promise<void> {
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
   await pollChannel(new BaseAdapter(baseCreds), since, db, queues.inventorySync);
 
-  const ebayCreds = await getAppCredentials<{
-    clientId: string;
-    clientSecret: string;
-    ruName: string;
-    merchantLocationKey: string;
-  }>("ebay");
-  await pollChannel(new EbayAdapter(ebayCreds), since, db, queues.inventorySync);
+  const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
+  await pollChannel(createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
 }
 
 async function pollChannel(

@@ -1,7 +1,8 @@
-import { EbayAdapter } from "@ai-ec/adapter-ebay";
+import type { EbayAdapter } from "@ai-ec/adapter-ebay";
 import { buildIdempotencyKey, withIdempotency } from "@ai-ec/core";
 import { aiListingDraft, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
 import {
+  createEbayAdapter,
   getAppCredentials,
   getDb,
   getIdempotencyStore,
@@ -9,6 +10,7 @@ import {
   listConnectedAccountIds,
   recordAuditLog,
   recordSyncError,
+  type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { desc, eq, and } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
@@ -18,20 +20,13 @@ interface EbaySyncMessage {
   productId: string;
 }
 
-interface EbayAppCredentials {
-  clientId: string;
-  clientSecret: string;
-  ruName: string;
-  merchantLocationKey: string;
-}
-
 const USD_PER_JPY_FALLBACK = 0.0067; // used only if the AI draft has no suggestedPriceUsd
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
   const idempotencyStore = getIdempotencyStore();
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapter = new EbayAdapter(creds);
+  const adapter = createEbayAdapter(creds);
   const [accountId] = await listConnectedAccountIds(db, "ebay");
 
   const failures: { itemIdentifier: string }[] = [];

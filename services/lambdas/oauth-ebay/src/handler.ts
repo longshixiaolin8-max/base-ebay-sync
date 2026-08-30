@@ -1,23 +1,19 @@
-import { EbayAdapter } from "@ai-ec/adapter-ebay";
-import { getAppCredentials, getDb, recordAuditLog, saveOAuthToken, signState, verifyState } from "@ai-ec/lambda-shared";
+import {
+  createEbayAdapter,
+  getAppCredentials,
+  getDb,
+  recordAuditLog,
+  saveOAuthToken,
+  signState,
+  verifyState,
+  type EbayAppCredentials,
+} from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-
-interface EbayAppCredentials {
-  clientId: string;
-  clientSecret: string;
-  ruName: string;
-  merchantLocationKey: string;
-}
-
-async function createAdapter(): Promise<EbayAdapter> {
-  const creds = await getAppCredentials<EbayAppCredentials>("ebay");
-  return new EbayAdapter(creds);
-}
 
 /** GET /oauth/ebay/authorize — redirects the admin operator to eBay's consent screen. */
 export async function authorize(): Promise<APIGatewayProxyResultV2> {
-  const adapter = await createAdapter();
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+  const adapter = createEbayAdapter(creds);
   const state = signState(creds.clientSecret);
   const url = adapter.getAuthorizationUrl(state, creds.ruName);
   return { statusCode: 302, headers: { Location: url } };
@@ -38,7 +34,7 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
     return { statusCode: 400, body: `Invalid OAuth state: ${(err as Error).message}` };
   }
 
-  const adapter = new EbayAdapter(creds);
+  const adapter = createEbayAdapter(creds);
   const tokens = await adapter.exchangeCodeForToken(code);
 
   const externalAccountId = process.env.EBAY_SELLER_ID ?? "default";

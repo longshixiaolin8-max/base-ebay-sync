@@ -12,6 +12,8 @@ export interface EbayAdapterConfig {
 
 export const EBAY_API_DEFAULT_HOST = "https://api.ebay.com";
 export const EBAY_AUTH_DEFAULT_HOST = "https://auth.ebay.com";
+export const EBAY_API_SANDBOX_HOST = "https://api.sandbox.ebay.com";
+export const EBAY_AUTH_SANDBOX_HOST = "https://auth.sandbox.ebay.com";
 
 /**
  * NOTE: verify scope identifiers against the current eBay API reference
