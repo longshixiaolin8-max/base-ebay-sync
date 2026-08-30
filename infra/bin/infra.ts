@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "source-map-support/register.js";
 import * as cdk from "aws-cdk-lib";
+import { ApiCoreStack } from "../lib/api-core-stack.js";
 import { ApiStack } from "../lib/api-stack.js";
 import { AuthStack } from "../lib/auth-stack.js";
 import { DatabaseStack } from "../lib/database-stack.js";
@@ -49,6 +50,7 @@ const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags });
 const storage = new StorageStack(app, `${stackPrefix}-Storage`, config, { env, tags });
 const auth = new AuthStack(app, `${stackPrefix}-Auth`, config, { env, tags });
 const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });
+const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags });
 
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
@@ -62,6 +64,7 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     openai: secrets.openAiApiKey,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
+  apiUrl: apiCore.api.apiEndpoint,
   queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
   productImagesBucket: storage.productImagesBucket,
 });
@@ -69,10 +72,12 @@ lambdas.addStackDependency(database);
 lambdas.addStackDependency(secrets);
 lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
+lambdas.addStackDependency(apiCore);
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
   tags,
+  api: apiCore.api,
   userPool: auth.userPool,
   userPoolClient: auth.userPoolClient,
   adminApiFn: lambdas.adminApiFn,
@@ -83,6 +88,7 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
+api.addStackDependency(apiCore);
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,

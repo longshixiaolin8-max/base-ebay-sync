@@ -29,6 +29,7 @@ export interface LambdaStackProps extends cdk.StackProps {
     openai: secretsmanager.Secret;
   };
   oauthTokenSecretArnPattern: string;
+  apiUrl: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
@@ -106,13 +107,13 @@ export class LambdaStack extends cdk.Stack {
       "OauthBaseAuthorize",
       "services/lambdas/oauth-base/src/handler.ts",
       "authorize",
-      { BASE_OAUTH_REDIRECT_URI: "REPLACE_WITH_API_URL/oauth/base/callback" },
+      { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
     );
     this.oauthBaseCallbackFn = makeFn(
       "OauthBaseCallback",
       "services/lambdas/oauth-base/src/handler.ts",
       "callback",
-      { BASE_OAUTH_REDIRECT_URI: "REPLACE_WITH_API_URL/oauth/base/callback" },
+      { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
     );
     this.oauthEbayAuthorizeFn = makeFn("OauthEbayAuthorize", "services/lambdas/oauth-ebay/src/handler.ts", "authorize");
     this.oauthEbayCallbackFn = makeFn("OauthEbayCallback", "services/lambdas/oauth-ebay/src/handler.ts", "callback");

@@ -7,6 +7,7 @@ import type * as nodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import type { Construct } from "constructs";
 
 export interface ApiStackProps extends cdk.StackProps {
+  api: apigwv2.HttpApi;
   userPool: cognito.UserPool;
   userPoolClient: cognito.UserPoolClient;
   adminApiFn: nodejs.NodejsFunction;
@@ -16,70 +17,84 @@ export interface ApiStackProps extends cdk.StackProps {
   oauthEbayCallbackFn: nodejs.NodejsFunction;
 }
 
+/**
+ * Adds routes to the HttpApi created in ApiCoreStack. Routes are built via the `HttpRoute`
+ * construct directly (rather than the `api.addRoutes()` convenience method) so they are
+ * explicitly parented to *this* stack: `addRoutes()` parents its Route/Integration
+ * constructs under the HttpApi construct itself, which lives in ApiCoreStack — that would
+ * make ApiCoreStack reference these Lambda ARNs, creating a cycle with LambdaStack's own
+ * dependency on ApiCoreStack's apiEndpoint (used for the BASE OAuth redirect_uri).
+ */
 export class ApiStack extends cdk.Stack {
-  readonly api: apigwv2.HttpApi;
-
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    this.api = new apigwv2.HttpApi(this, "PlatformApi", {
-      corsPreflight: {
-        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST],
-        allowOrigins: ["*"], // tightened to the Amplify-hosted admin origin post-deploy
-        allowHeaders: ["Authorization", "Content-Type"],
-      },
-    });
+    const api = props.api;
 
     const authorizer = new HttpJwtAuthorizer("AdminAuthorizer", `https://cognito-idp.${this.region}.amazonaws.com/${props.userPool.userPoolId}`, {
       jwtAudience: [props.userPoolClient.userPoolClientId],
     });
 
     const adminIntegration = new HttpLambdaIntegration("AdminApiIntegration", props.adminApiFn);
-    const authOptions = { authorizer };
 
-    for (const routeKey of [
-      "GET /admin/products",
-      "GET /admin/products/{id}",
-      "POST /admin/products/{id}/approve-ebay-listing",
-      "GET /admin/sync-errors",
-      "POST /admin/sync-errors/{id}/retry",
-      "GET /admin/audit-log",
-    ]) {
-      const [method, path] = routeKey.split(" ") as [string, string];
-      this.api.addRoutes({
-        path,
-        methods: [method as apigwv2.HttpMethod],
-        integration: adminIntegration,
-        ...authOptions,
+    const addRoute = (
+      routeId: string,
+      method: apigwv2.HttpMethod,
+      path: string,
+      integration: apigwv2.HttpRouteIntegration,
+      withAuth: boolean,
+    ) => {
+      new apigwv2.HttpRoute(this, routeId, {
+        httpApi: api,
+        routeKey: apigwv2.HttpRouteKey.with(path, method),
+        integration,
+        authorizer: withAuth ? authorizer : undefined,
       });
-    }
+    };
+
+    addRoute("GetProducts", apigwv2.HttpMethod.GET, "/admin/products", adminIntegration, true);
+    addRoute("GetProduct", apigwv2.HttpMethod.GET, "/admin/products/{id}", adminIntegration, true);
+    addRoute(
+      "ApproveEbayListing",
+      apigwv2.HttpMethod.POST,
+      "/admin/products/{id}/approve-ebay-listing",
+      adminIntegration,
+      true,
+    );
+    addRoute("GetSyncErrors", apigwv2.HttpMethod.GET, "/admin/sync-errors", adminIntegration, true);
+    addRoute("RetrySyncError", apigwv2.HttpMethod.POST, "/admin/sync-errors/{id}/retry", adminIntegration, true);
+    addRoute("GetAuditLog", apigwv2.HttpMethod.GET, "/admin/audit-log", adminIntegration, true);
 
     // /authorize kicks off the OAuth consent flow and must only be triggerable by a
     // signed-in admin operator; /callback is hit by BASE/eBay's own redirect (no
     // Cognito session), so it relies on the signed `state` param for CSRF protection.
-    this.api.addRoutes({
-      path: "/oauth/base/authorize",
-      methods: [apigwv2.HttpMethod.GET],
-      integration: new HttpLambdaIntegration("OauthBaseAuthorizeIntegration", props.oauthBaseAuthorizeFn),
-      authorizer,
-    });
-    this.api.addRoutes({
-      path: "/oauth/base/callback",
-      methods: [apigwv2.HttpMethod.GET],
-      integration: new HttpLambdaIntegration("OauthBaseCallbackIntegration", props.oauthBaseCallbackFn),
-    });
-    this.api.addRoutes({
-      path: "/oauth/ebay/authorize",
-      methods: [apigwv2.HttpMethod.GET],
-      integration: new HttpLambdaIntegration("OauthEbayAuthorizeIntegration", props.oauthEbayAuthorizeFn),
-      authorizer,
-    });
-    this.api.addRoutes({
-      path: "/oauth/ebay/callback",
-      methods: [apigwv2.HttpMethod.GET],
-      integration: new HttpLambdaIntegration("OauthEbayCallbackIntegration", props.oauthEbayCallbackFn),
-    });
-
-    new cdk.CfnOutput(this, "ApiUrl", { value: this.api.apiEndpoint });
+    addRoute(
+      "OauthBaseAuthorize",
+      apigwv2.HttpMethod.GET,
+      "/oauth/base/authorize",
+      new HttpLambdaIntegration("OauthBaseAuthorizeIntegration", props.oauthBaseAuthorizeFn),
+      true,
+    );
+    addRoute(
+      "OauthBaseCallback",
+      apigwv2.HttpMethod.GET,
+      "/oauth/base/callback",
+      new HttpLambdaIntegration("OauthBaseCallbackIntegration", props.oauthBaseCallbackFn),
+      false,
+    );
+    addRoute(
+      "OauthEbayAuthorize",
+      apigwv2.HttpMethod.GET,
+      "/oauth/ebay/authorize",
+      new HttpLambdaIntegration("OauthEbayAuthorizeIntegration", props.oauthEbayAuthorizeFn),
+      true,
+    );
+    addRoute(
+      "OauthEbayCallback",
+      apigwv2.HttpMethod.GET,
+      "/oauth/ebay/callback",
+      new HttpLambdaIntegration("OauthEbayCallbackIntegration", props.oauthEbayCallbackFn),
+      false,
+    );
   }
 }
