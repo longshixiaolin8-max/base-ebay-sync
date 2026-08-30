@@ -42,7 +42,7 @@ export async function handler(): Promise<void> {
   }
 }
 
-async function upsertProduct(
+export async function upsertProduct(
   db: Database,
   queues: ReturnType<typeof getQueueUrls>,
   item: ExternalProduct,
