@@ -23,7 +23,7 @@ interface BaseItem {
   detail: string;
   price: number;
   stock: number;
-  images: Array<{ url: string }>;
+  images?: Array<{ url: string }> | null;
   updated: string;
 }
 
@@ -217,7 +217,7 @@ function mapBaseItem(item: BaseItem): ExternalProduct {
     descriptionHtml: item.detail,
     priceJpy: item.price,
     quantity: item.stock,
-    images: item.images.map((i) => i.url),
+    images: (item.images ?? []).map((i) => i.url),
     updatedAt: new Date(item.updated),
   };
 }

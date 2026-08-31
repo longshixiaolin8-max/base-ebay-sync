@@ -78,6 +78,30 @@ describe("BaseAdapter", () => {
     expect(result.nextCursor).toBeUndefined();
   });
 
+  it("maps BASE items with no images field to an empty images array", async () => {
+    const fetchMock = mockFetchOnce({
+      items: [
+        {
+          item_id: "item-2",
+          title: "No Photo Yet",
+          detail: "<p>desc</p>",
+          price: 1500,
+          stock: 1,
+          updated: "2026-08-31T00:00:00Z",
+        },
+      ],
+      offset: 0,
+      limit: 100,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const result = await adapter.listProducts("token", {});
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.images).toEqual([]);
+  });
+
   it("refuses createListing since BASE is always the source, not a sync target", async () => {
     const adapter = new BaseAdapter(config);
     await expect(adapter.createListing("token", {} as never)).rejects.toThrow(/not supported/);
