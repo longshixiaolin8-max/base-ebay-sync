@@ -76,7 +76,10 @@ export class BaseAdapter implements ChannelAdapter {
     const url = new URL(`${this.apiBaseUrl}/1/oauth/authorize`);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", this.config.clientId);
-    url.searchParams.set("redirect_uri", redirectUri);
+    // BASE's API uses the non-standard "redirect_url" param name (not the OAuth-standard
+    // "redirect_uri") — confirmed against real integration write-ups; sending "redirect_uri"
+    // causes BASE's server to ignore it and misroute the consent redirect entirely.
+    url.searchParams.set("redirect_url", redirectUri);
     url.searchParams.set("scope", BASE_OAUTH_SCOPES.join(","));
     url.searchParams.set("state", state);
     return url.toString();
@@ -86,7 +89,7 @@ export class BaseAdapter implements ChannelAdapter {
     return this.requestToken({
       grant_type: "authorization_code",
       code,
-      redirect_uri: redirectUri,
+      redirect_url: redirectUri,
     });
   }
 
