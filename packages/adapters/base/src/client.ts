@@ -17,14 +17,22 @@ interface BaseTokenResponse {
   scope?: string;
 }
 
+/**
+ * BASE's real /1/items response has no "images" array and no "updated" field — verified
+ * against a live production item. Photos come as up to 20 flat img1_origin..img20_origin
+ * fields (absent/null for unused slots), and the modification time is "modified", a Unix
+ * epoch in seconds.
+ */
+const BASE_IMAGE_SLOT_COUNT = 20;
+
 interface BaseItem {
   item_id: string;
   title: string;
   detail: string;
   price: number;
   stock: number;
-  images?: Array<{ url: string }> | null;
-  updated: string;
+  modified: number;
+  [imgSlot: `img${number}_origin`]: string | null | undefined;
 }
 
 interface BaseItemsResponse {
@@ -141,7 +149,7 @@ export class BaseAdapter implements ChannelAdapter {
     const res = await this.authedFetch(accessToken, `/1/items?${search.toString()}`);
     const json = (await res.json()) as BaseItemsResponse;
     const items = json.items
-      .filter((item) => !params.since || new Date(item.updated) >= params.since)
+      .filter((item) => !params.since || new Date(item.modified * 1000) >= params.since)
       .map(mapBaseItem);
     return {
       items,
@@ -210,6 +218,15 @@ export class BaseAdapter implements ChannelAdapter {
   }
 }
 
+function extractImages(item: BaseItem): string[] {
+  const images: string[] = [];
+  for (let i = 1; i <= BASE_IMAGE_SLOT_COUNT; i++) {
+    const url = item[`img${i}_origin`];
+    if (url) images.push(url);
+  }
+  return images;
+}
+
 function mapBaseItem(item: BaseItem): ExternalProduct {
   return {
     externalId: item.item_id,
@@ -217,7 +234,7 @@ function mapBaseItem(item: BaseItem): ExternalProduct {
     descriptionHtml: item.detail,
     priceJpy: item.price,
     quantity: item.stock,
-    images: (item.images ?? []).map((i) => i.url),
-    updatedAt: new Date(item.updated),
+    images: extractImages(item),
+    updatedAt: new Date(item.modified * 1000),
   };
 }

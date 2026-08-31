@@ -46,7 +46,9 @@ describe("BaseAdapter", () => {
     );
   });
 
-  it("maps BASE items to ExternalProduct", async () => {
+  it("maps BASE items to ExternalProduct, reading photos from imgN_origin fields", async () => {
+    // Shape verified against a live BASE item: no "images" array, no "updated" field —
+    // photos are flat img1_origin.. fields and the timestamp is "modified" (Unix seconds).
     const fetchMock = mockFetchOnce({
       items: [
         {
@@ -55,8 +57,10 @@ describe("BaseAdapter", () => {
           detail: "<p>desc</p>",
           price: 3000,
           stock: 5,
-          images: [{ url: "https://img.example/1.jpg" }],
-          updated: "2026-08-01T00:00:00Z",
+          modified: 1788157953,
+          img1_origin: "https://img.example/1.jpg",
+          img2_origin: "https://img.example/2.jpg",
+          img3_origin: null,
         },
       ],
       offset: 0,
@@ -73,12 +77,13 @@ describe("BaseAdapter", () => {
       title: "T-Shirt",
       priceJpy: 3000,
       quantity: 5,
-      images: ["https://img.example/1.jpg"],
+      images: ["https://img.example/1.jpg", "https://img.example/2.jpg"],
     });
+    expect(result.items[0]?.updatedAt).toEqual(new Date(1788157953 * 1000));
     expect(result.nextCursor).toBeUndefined();
   });
 
-  it("maps BASE items with no images field to an empty images array", async () => {
+  it("maps BASE items with no img*_origin fields to an empty images array", async () => {
     const fetchMock = mockFetchOnce({
       items: [
         {
@@ -87,7 +92,7 @@ describe("BaseAdapter", () => {
           detail: "<p>desc</p>",
           price: 1500,
           stock: 1,
-          updated: "2026-08-31T00:00:00Z",
+          modified: 1788157953,
         },
       ],
       offset: 0,
