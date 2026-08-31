@@ -8,15 +8,10 @@ export interface BaseAdapterConfig {
 export const BASE_API_DEFAULT_HOST = "https://api.thebase.in";
 
 /**
- * BASE OAuth scopes required by this platform.
- * NOTE: verify the exact scope identifiers against the current BASE API reference
- * (https://docs.thebase.in) for the merchant's app registration before go-live —
- * BASE occasionally renames scopes between API versions.
+ * BASE OAuth scopes required by this platform. Verified against BASE's real scope list
+ * (read_users[_mail], read_items, read_orders, read_savings, write_items, write_orders —
+ * there is no separate "*_items_stock" scope; stock is a field on the item update call,
+ * covered by write_items). Confirmed live: BASE rejects an unknown scope as
+ * "invalid_request" and expects the list space-separated, not comma-separated.
  */
-export const BASE_OAUTH_SCOPES = [
-  "read_items",
-  "write_items",
-  "read_items_stock",
-  "write_items_stock",
-  "read_orders",
-] as const;
+export const BASE_OAUTH_SCOPES = ["read_items", "write_items", "read_orders"] as const;

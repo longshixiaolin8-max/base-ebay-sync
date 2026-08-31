@@ -23,7 +23,7 @@ describe("BaseAdapter", () => {
     expect(url.origin + url.pathname).toBe("https://api.example-base.test/1/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("cid");
     expect(url.searchParams.get("state")).toBe("state123");
-    expect(url.searchParams.get("scope")).toContain("write_items_stock");
+    expect(url.searchParams.get("scope")).toBe("read_items write_items read_orders");
   });
 
   it("exchanges an authorization code for tokens", async () => {

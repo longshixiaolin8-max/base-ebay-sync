@@ -80,7 +80,7 @@ export class BaseAdapter implements ChannelAdapter {
     // "redirect_uri") — confirmed against real integration write-ups; sending "redirect_uri"
     // causes BASE's server to ignore it and misroute the consent redirect entirely.
     url.searchParams.set("redirect_url", redirectUri);
-    url.searchParams.set("scope", BASE_OAUTH_SCOPES.join(","));
+    url.searchParams.set("scope", BASE_OAUTH_SCOPES.join(" "));
     url.searchParams.set("state", state);
     return url.toString();
   }
