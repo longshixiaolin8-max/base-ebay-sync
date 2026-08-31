@@ -74,7 +74,9 @@ export class BaseAdapter implements ChannelAdapter {
 
   getAuthorizationUrl(state: string, redirectUri: string): string {
     const url = new URL(`${this.apiBaseUrl}/1/oauth/authorize`);
-    url.searchParams.set("response_type", "code");
+    // BASE's authorize endpoint does not take "response_type" — real working examples
+    // only ever show client_id/redirect_url/scope(/state). Sending an extra unrecognized
+    // param appears to trip BASE's strict validation ("invalid_request: 不正なパラメーターです").
     url.searchParams.set("client_id", this.config.clientId);
     // BASE's API uses the non-standard "redirect_url" param name (not the OAuth-standard
     // "redirect_uri") — confirmed against real integration write-ups; sending "redirect_uri"
