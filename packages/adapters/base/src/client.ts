@@ -74,14 +74,12 @@ export class BaseAdapter implements ChannelAdapter {
 
   getAuthorizationUrl(state: string, redirectUri: string): string {
     const url = new URL(`${this.apiBaseUrl}/1/oauth/authorize`);
-    // BASE's authorize endpoint does not take "response_type" — real working examples
-    // only ever show client_id/redirect_url/scope(/state). Sending an extra unrecognized
-    // param appears to trip BASE's strict validation ("invalid_request: 不正なパラメーターです").
+    // Verified against BASE's official reference (docs.thebase.in/api/oauth/authorize):
+    // response_type=code and redirect_uri (the OAuth-standard name) are both required.
+    // scope must be space-separated using BASE's real scope names (see config.ts).
+    url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", this.config.clientId);
-    // BASE's API uses the non-standard "redirect_url" param name (not the OAuth-standard
-    // "redirect_uri") — confirmed against real integration write-ups; sending "redirect_uri"
-    // causes BASE's server to ignore it and misroute the consent redirect entirely.
-    url.searchParams.set("redirect_url", redirectUri);
+    url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("scope", BASE_OAUTH_SCOPES.join(" "));
     url.searchParams.set("state", state);
     return url.toString();
@@ -91,7 +89,7 @@ export class BaseAdapter implements ChannelAdapter {
     return this.requestToken({
       grant_type: "authorization_code",
       code,
-      redirect_url: redirectUri,
+      redirect_uri: redirectUri,
     });
   }
 
