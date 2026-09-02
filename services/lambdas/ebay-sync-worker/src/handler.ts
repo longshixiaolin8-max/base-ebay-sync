@@ -1,6 +1,6 @@
 import type { EbayAdapter } from "@ai-ec/adapter-ebay";
 import { buildIdempotencyKey, withIdempotency } from "@ai-ec/core";
-import { aiListingDraft, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
+import { aiListingDraft, calculateChannelAvailableQuantity, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -79,7 +79,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
   return { batchItemFailures: failures };
 };
 
-async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, accessToken: string, productId: string) {
+export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, accessToken: string, productId: string) {
   const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
   if (!product) throw new Error(`product not found: ${productId}`);
 
@@ -97,13 +97,20 @@ async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, acces
   const primaryCategory = draft.categoryCandidates[0];
   if (!primaryCategory) throw new Error(`AI draft for product ${productId} has no category candidate`);
 
+  const availableQuantity = calculateChannelAvailableQuantity(
+    inventory?.quantity ?? 0,
+    inventory?.safetyStockBuffer ?? 0,
+    "ebay",
+    product.sourceChannel,
+  );
+
   const { externalId } = await adapter.createListing(accessToken, {
     productId,
     sku: product.sku,
     titleEn: draft.titleEn,
     descriptionHtmlEn: draft.descriptionHtmlEn,
     priceUsd: Math.round(priceUsd * 100) / 100,
-    quantity: inventory?.quantity ?? 0,
+    quantity: availableQuantity,
     images: product.images,
     categoryId: primaryCategory.ebayCategoryId,
     itemSpecifics: draft.itemSpecifics,
@@ -125,7 +132,7 @@ async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, acces
   });
 }
 
-async function update(
+export async function update(
   db: ReturnType<typeof getDb>,
   adapter: EbayAdapter,
   accessToken: string,
@@ -142,11 +149,20 @@ async function update(
     .orderBy(desc(aiListingDraft.createdAt))
     .limit(1);
 
+  // Also re-syncs quantity (with the safety-stock buffer applied) on every content update —
+  // previously only the initial publish ever pushed a quantity, so a BASE restock after
+  // publish never reached eBay at all.
+  const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+  const availableQuantity = inventory
+    ? calculateChannelAvailableQuantity(inventory.quantity, inventory.safetyStockBuffer, "ebay", product.sourceChannel)
+    : undefined;
+
   await adapter.updateListing(accessToken, externalId, {
     titleEn: draft?.titleEn,
     descriptionHtmlEn: draft?.descriptionHtmlEn,
     images: product.images,
     priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
+    quantity: availableQuantity,
   });
 
   await db

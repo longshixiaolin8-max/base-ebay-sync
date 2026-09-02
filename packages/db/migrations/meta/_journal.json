@@ -8,6 +8,13 @@
       "when": 1787904506615,
       "tag": "0000_third_vapor",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788335582222,
+      "tag": "0001_violet_meteorite",
+      "breakpoints": true
     }
   ]
 }

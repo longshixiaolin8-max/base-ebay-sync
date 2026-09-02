@@ -72,6 +72,13 @@ export const inventoryMaster = pgTable("inventory_master", {
   quantity: integer("quantity").notNull().default(0),
   version: integer("version").notNull().default(0),
   soldOut: boolean("sold_out").notNull().default(false),
+  /**
+   * Units of true `quantity` withheld from every secondary (non-source) channel's
+   * advertised availability, to shrink — not eliminate — the window where the same last
+   * unit could be bought on two channels during sync lag. Never applied to the source
+   * channel (BASE), which always reflects true stock; see calculateChannelAvailableQuantity.
+   */
+  safetyStockBuffer: integer("safety_stock_buffer").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

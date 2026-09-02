@@ -354,7 +354,12 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async updateListing(accessToken: string, externalId: string, input: UpdateListingInput): Promise<void> {
-    if (input.titleEn !== undefined || input.descriptionHtmlEn !== undefined || input.images !== undefined) {
+    if (
+      input.titleEn !== undefined ||
+      input.descriptionHtmlEn !== undefined ||
+      input.images !== undefined ||
+      input.quantity !== undefined
+    ) {
       const current = await this.getProduct(accessToken, externalId);
       await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
         method: "PUT",

@@ -67,3 +67,25 @@ export async function applySale(
 
   throw new ConcurrentInventoryUpdateError(productId);
 }
+
+/**
+ * Availability advertised to a channel, after safety-stock withholding. Reduces — never
+ * eliminates — the window where the same physical last unit could be sold on two channels
+ * at once during sync lag: with `trueQuantity=3, safetyStockBuffer=1`, a secondary channel
+ * only ever shows 2 as available, so it takes 3 near-simultaneous sales (2 there, 1 on the
+ * source channel) to actually run out, not 2. It cannot help once trueQuantity is already
+ * at or below the buffer (most visibly at trueQuantity=1) — that residual risk is what the
+ * faster polling / webhook work (item #1) addresses instead.
+ *
+ * Only ever applied to a *secondary* channel; the source channel (BASE, where sourceChannel
+ * originates) always sees true stock, since BASE itself is never told to withhold anything.
+ */
+export function calculateChannelAvailableQuantity(
+  trueQuantity: number,
+  safetyStockBuffer: number,
+  channel: string,
+  sourceChannel: string,
+): number {
+  if (channel === sourceChannel) return trueQuantity;
+  return Math.max(0, trueQuantity - safetyStockBuffer);
+}

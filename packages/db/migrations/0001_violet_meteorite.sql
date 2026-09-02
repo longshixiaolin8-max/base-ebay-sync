@@ -1,0 +1,1 @@
+ALTER TABLE "inventory_master" ADD COLUMN "safety_stock_buffer" integer DEFAULT 0 NOT NULL;

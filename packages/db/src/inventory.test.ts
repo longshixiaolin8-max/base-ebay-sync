@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { Database } from "./client.js";
-import { applySale, ConcurrentInventoryUpdateError } from "./inventory.js";
+import { applySale, calculateChannelAvailableQuantity, ConcurrentInventoryUpdateError } from "./inventory.js";
+
+describe("calculateChannelAvailableQuantity", () => {
+  it("shows the source channel (BASE) full true stock, unbuffered", () => {
+    expect(calculateChannelAvailableQuantity(5, 2, "base", "base")).toBe(5);
+  });
+
+  it("withholds the safety stock buffer from a secondary channel", () => {
+    expect(calculateChannelAvailableQuantity(5, 2, "ebay", "base")).toBe(3);
+  });
+
+  it("floors at 0 rather than going negative when the buffer exceeds true stock", () => {
+    expect(calculateChannelAvailableQuantity(1, 3, "ebay", "base")).toBe(0);
+  });
+
+  it("passes true stock straight through when no buffer is configured", () => {
+    expect(calculateChannelAvailableQuantity(4, 0, "ebay", "base")).toBe(4);
+  });
+});
 
 /**
  * A minimal in-memory stand-in for the single inventory_master row applySale() touches,

@@ -318,6 +318,42 @@ describe("EbayAdapter", () => {
     expect(body.merchantLocationStatus).toBe("ENABLED");
   });
 
+  it("updateListing pushes a quantity-only change even when no other field changed", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [] },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      ) // GET current (to merge unspecified fields)
+      .mockResolvedValueOnce(jsonResponse({})); // PUT inventory_item
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { quantity: 4 });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.example-ebay.test/sell/inventory/v1/inventory_item/SKU-1",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.availability.shipToLocationAvailability.quantity).toBe(4);
+    expect(body.product.title).toBe("Existing Title"); // unspecified fields merged from current
+  });
+
+  it("updateListing makes no inventory_item call when nothing relevant changed", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", {});
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("sets inventory quantity via PATCH", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
