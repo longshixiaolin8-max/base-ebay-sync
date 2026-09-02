@@ -14,6 +14,7 @@ import {
   EBAY_OAUTH_SCOPES,
   type EbayAdapterConfig,
 } from "./config.js";
+import type { EbayPublicKey } from "./notification.js";
 
 interface EbayTokenResponse {
   access_token: string;
@@ -121,6 +122,88 @@ export class EbayAdapter implements ChannelAdapter {
       scope: "https://api.ebay.com/oauth/api_scope",
     });
     return accessToken;
+  }
+
+  /** Lists real eBay Notification API topics (id, description, filterable) — used to find the
+   * correct topicId to subscribe to instead of guessing one. */
+  async listNotificationTopics(appAccessToken: string): Promise<unknown> {
+    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/topic?limit=100`, {
+      headers: { Authorization: `Bearer ${appAccessToken}` },
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /**
+   * One-time account-level setup required before any destination/subscription call will
+   * succeed (eBay rejects those with errorId 195003 "Please provide configurations required
+   * for notifications" until this is set).
+   */
+  async updateNotificationConfig(appAccessToken: string, alertEmail: string): Promise<void> {
+    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/config`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ alertEmail }),
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+  }
+
+  /**
+   * One-time webhook onboarding step: registers our endpoint with eBay. eBay immediately
+   * sends a GET ?challenge_code=... to the endpoint to verify ownership before this call
+   * returns, so the endpoint must already be deployed and able to answer it.
+   */
+  async createNotificationDestination(
+    appAccessToken: string,
+    name: string,
+    endpoint: string,
+    verificationToken: string,
+  ): Promise<{ destinationId: string }> {
+    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/destination`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        status: "ENABLED",
+        deliveryConfig: {
+          endpoint,
+          verificationToken,
+          deliveryProtocol: "HTTPS",
+          payloadVersion: "1.0",
+        },
+      }),
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const location = res.headers.get("Location");
+    const destinationId = location?.split("/").pop();
+    if (!destinationId) throw new Error("eBay createNotificationDestination did not return a destination id");
+    return { destinationId };
+  }
+
+  async createNotificationSubscription(
+    appAccessToken: string,
+    topicId: string,
+    destinationId: string,
+  ): Promise<{ subscriptionId: string }> {
+    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/subscription`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ topicId, destinationId, status: "ENABLED", payload: { format: "JSON", schemaVersion: "1.0" } }),
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const location = res.headers.get("Location");
+    const subscriptionId = location?.split("/").pop();
+    if (!subscriptionId) throw new Error("eBay createNotificationSubscription did not return a subscription id");
+    return { subscriptionId };
+  }
+
+  /** Fetches the public key used to verify an inbound notification's X-EBAY-SIGNATURE header. */
+  async getNotificationPublicKey(appAccessToken: string, keyId: string): Promise<EbayPublicKey> {
+    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/public_key/${keyId}`, {
+      headers: { Authorization: `Bearer ${appAccessToken}` },
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    return res.json() as Promise<EbayPublicKey>;
   }
 
   /**

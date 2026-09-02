@@ -85,6 +85,7 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   oauthBaseCallbackFn: lambdas.oauthBaseCallbackFn,
   oauthEbayAuthorizeFn: lambdas.oauthEbayAuthorizeFn,
   oauthEbayCallbackFn: lambdas.oauthEbayCallbackFn,
+  ebayWebhookFn: lambdas.ebayWebhookFn,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);

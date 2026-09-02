@@ -15,6 +15,7 @@ export interface ApiStackProps extends cdk.StackProps {
   oauthBaseCallbackFn: nodejs.NodejsFunction;
   oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   oauthEbayCallbackFn: nodejs.NodejsFunction;
+  ebayWebhookFn: nodejs.NodejsFunction;
 }
 
 /**
@@ -96,5 +97,12 @@ export class ApiStack extends cdk.Stack {
       new HttpLambdaIntegration("OauthEbayCallbackIntegration", props.oauthEbayCallbackFn),
       false,
     );
+
+    // Hit directly by eBay's Notification API (endpoint-ownership challenge on GET,
+    // event delivery on POST) — no Cognito session exists on either call, so authenticity
+    // relies on the X-EBAY-SIGNATURE verification inside the handler itself, not this gate.
+    const ebayWebhookIntegration = new HttpLambdaIntegration("EbayWebhookIntegration", props.ebayWebhookFn);
+    addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
+    addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
   }
 }

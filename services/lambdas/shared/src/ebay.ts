@@ -5,6 +5,12 @@ export interface EbayAppCredentials {
   clientSecret: string;
   ruName: string;
   merchantLocationKey: string;
+  fulfillmentPolicyId?: string;
+  paymentPolicyId?: string;
+  returnPolicyId?: string;
+  /** Shared secret used both to register our Notification API destination and to answer
+   * eBay's endpoint-ownership challenge (see EbayAdapter.createNotificationDestination). */
+  webhookVerificationToken?: string;
   /** True while testing against eBay's Sandbox environment instead of production. */
   sandbox?: boolean;
 }

@@ -1,0 +1,20 @@
+{
+  "name": "@ai-ec/lambda-ebay-webhook",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@ai-ec/adapter-ebay": "workspace:*",
+    "@ai-ec/lambda-shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

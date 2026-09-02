@@ -30,4 +30,7 @@ export const EBAY_OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account",
+  // Required to subscribe to the Notification API's LISTING topic (a USER-scoped topic,
+  // verified live via getTopics — its authorizationScopes are sell.listing[.read]).
+  "https://api.ebay.com/oauth/api_scope/sell.listing.read",
 ] as const;

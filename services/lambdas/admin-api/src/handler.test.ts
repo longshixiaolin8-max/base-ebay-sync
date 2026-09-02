@@ -29,6 +29,9 @@ const optInToBusinessPoliciesMock = vi.fn().mockResolvedValue(undefined);
 const createFulfillmentPolicyMock = vi.fn().mockResolvedValue("fp-1");
 const createPaymentPolicyMock = vi.fn().mockResolvedValue("pp-1");
 const createReturnPolicyMock = vi.fn().mockResolvedValue("rp-1");
+const createNotificationDestinationMock = vi.fn().mockResolvedValue({ destinationId: "dest-1" });
+const createNotificationSubscriptionMock = vi.fn().mockResolvedValue({ subscriptionId: "sub-1" });
+const updateNotificationConfigMock = vi.fn().mockResolvedValue(undefined);
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
@@ -37,6 +40,9 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createFulfillmentPolicy: createFulfillmentPolicyMock,
   createPaymentPolicy: createPaymentPolicyMock,
   createReturnPolicy: createReturnPolicyMock,
+  createNotificationDestination: createNotificationDestinationMock,
+  createNotificationSubscription: createNotificationSubscriptionMock,
+  updateNotificationConfig: updateNotificationConfigMock,
 }));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
@@ -215,6 +221,40 @@ describe("admin-api handler", () => {
         merchantLocationKey: "osaka-main",
         address: { addressLine1: "a", city: "b", stateOrProvince: "c", postalCode: "d", country: "JP" },
       }),
+    );
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("POST /admin/ebay/webhook-setup creates a destination and subscription", async () => {
+    process.env.EBAY_WEBHOOK_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/notifications";
+    getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", webhookVerificationToken: "verify-me" });
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/webhook-setup", {}, { topicId: "LISTING", alertEmail: "ops@example.com" }),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body!)).toEqual({ destinationId: "dest-1", subscriptionId: "sub-1" });
+    expect(updateNotificationConfigMock).toHaveBeenCalledWith("token", "ops@example.com");
+    expect(createNotificationDestinationMock).toHaveBeenCalledWith(
+      "token",
+      "AI EC Platform",
+      "https://api.example.com/webhooks/ebay/notifications",
+      "verify-me",
+    );
+    expect(createNotificationSubscriptionMock).toHaveBeenCalledWith("token", "LISTING", "dest-1");
+  });
+
+  it("POST /admin/ebay/webhook-setup returns 400 without a topicId or alertEmail", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/webhook-setup", {}, {}));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("POST /admin/ebay/webhook-setup returns 409 when no verification token is configured", async () => {
+    getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid" });
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/webhook-setup", {}, { topicId: "LISTING", alertEmail: "ops@example.com" }),
     );
     expect(res.statusCode).toBe(409);
   });

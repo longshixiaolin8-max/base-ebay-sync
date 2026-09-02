@@ -14,6 +14,16 @@ function jsonResponse(body: unknown, status = 200) {
   return { ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) };
 }
 
+function createdResponse(locationId: string) {
+  return {
+    ok: true,
+    status: 201,
+    json: async () => ({}),
+    text: async () => "",
+    headers: { get: (name: string) => (name === "Location" ? `https://api.example-ebay.test/x/${locationId}` : null) },
+  };
+}
+
 describe("EbayAdapter", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -155,6 +165,64 @@ describe("EbayAdapter", () => {
     expect(suggestions).toEqual([{ ebayCategoryId: "10364", label: "Bracelets" }]);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=silver"),
+      expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
+    );
+  });
+
+  it("creates a notification destination and returns its id from the Location header", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(createdResponse("dest-123"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const result = await adapter.createNotificationDestination(
+      "app-token",
+      "AI EC Platform",
+      "https://api.example.com/webhooks/ebay/notifications",
+      "verify-me",
+    );
+
+    expect(result).toEqual({ destinationId: "dest-123" });
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body.deliveryConfig.verificationToken).toBe("verify-me");
+  });
+
+  it("creates a notification subscription and returns its id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(createdResponse("sub-456"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const result = await adapter.createNotificationSubscription("app-token", "LISTING", "dest-123");
+
+    expect(result).toEqual({ subscriptionId: "sub-456" });
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body).toMatchObject({ topicId: "LISTING", destinationId: "dest-123" });
+  });
+
+  it("updates the notification config with an alert email", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 204, json: async () => ({}), text: async () => "" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateNotificationConfig("app-token", "ops@example.com");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/commerce/notification/v1/config",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body).toEqual({ alertEmail: "ops@example.com" });
+  });
+
+  it("fetches the notification public key by id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ algorithm: "ECDSA", digest: "SHA1", key: "abc" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const key = await adapter.getNotificationPublicKey("app-token", "key-1");
+
+    expect(key).toEqual({ algorithm: "ECDSA", digest: "SHA1", key: "abc" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/commerce/notification/v1/public_key/key-1",
       expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
     );
   });

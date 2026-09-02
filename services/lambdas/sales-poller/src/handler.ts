@@ -1,13 +1,10 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import type { ChannelAdapter, SaleEvent } from "@ai-ec/core";
 import {
   createEbayAdapter,
-  enqueue,
   getAppCredentials,
   getDb,
   getQueueUrls,
-  getValidAccessToken,
-  listConnectedAccountIds,
+  pollChannelSales,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 
@@ -16,6 +13,11 @@ import {
  * recently and forwards every line item as a "sale happened" event onto the inventory
  * sync queue. The lookback window intentionally overlaps between runs — duplicate
  * events are safe because inventory-sync-worker dedupes on (channel, orderId, sku).
+ *
+ * eBay's Notification API has no direct "item sold" topic (verified against eBay's live
+ * getTopics response) -- ebay-webhook triggers a narrower, faster version of this same
+ * poll when eBay's LISTING topic signals a quantity change, but this broad scheduled poll
+ * stays as the authoritative fallback for both channels.
  */
 export async function handler(): Promise<void> {
   const db = getDb();
@@ -23,29 +25,8 @@ export async function handler(): Promise<void> {
   const since = new Date(Date.now() - 15 * 60 * 1000); // 15 min lookback vs. a 5 min schedule
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-  await pollChannel(new BaseAdapter(baseCreds), since, db, queues.inventorySync);
+  await pollChannelSales(new BaseAdapter(baseCreds), since, db, queues.inventorySync);
 
   const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-  await pollChannel(createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
-}
-
-async function pollChannel(
-  adapter: ChannelAdapter,
-  since: Date,
-  db: ReturnType<typeof getDb>,
-  queueUrl: string,
-): Promise<void> {
-  const accountIds = await listConnectedAccountIds(db, adapter.channel);
-  for (const accountId of accountIds) {
-    const accessToken = await getValidAccessToken(db, adapter, accountId);
-    const sales = await adapter.listRecentSales(accessToken, since);
-    for (const sale of sales) {
-      await enqueueSale(queueUrl, sale);
-    }
-  }
-}
-
-async function enqueueSale(queueUrl: string, sale: SaleEvent): Promise<void> {
-  const dedupeId = `${sale.channel}:${sale.externalOrderId}:${sale.externalProductId}`;
-  await enqueue(queueUrl, { type: "sale_detected", sale }, dedupeId);
+  await pollChannelSales(createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
 }

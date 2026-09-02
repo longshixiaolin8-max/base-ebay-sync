@@ -52,6 +52,7 @@ export class LambdaStack extends cdk.Stack {
   readonly oauthBaseCallbackFn: nodejs.NodejsFunction;
   readonly oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   readonly oauthEbayCallbackFn: nodejs.NodejsFunction;
+  readonly ebayWebhookFn: nodejs.NodejsFunction;
   readonly productFetchFn: nodejs.NodejsFunction;
   readonly aiGenerateWorkerFn: nodejs.NodejsFunction;
   readonly ebaySyncWorkerFn: nodejs.NodejsFunction;
@@ -123,6 +124,16 @@ export class LambdaStack extends cdk.Stack {
     for (const fn of [this.oauthEbayAuthorizeFn, this.oauthEbayCallbackFn]) {
       props.appCredentialSecrets.ebay.grantRead(fn);
     }
+
+    this.ebayWebhookFn = makeFn(
+      "EbayWebhook",
+      "services/lambdas/ebay-webhook/src/handler.ts",
+      "handler",
+      { EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications` },
+      cdk.Duration.minutes(2),
+    );
+    props.appCredentialSecrets.ebay.grantRead(this.ebayWebhookFn);
+    props.queues.inventorySync.grantSendMessages(this.ebayWebhookFn);
 
     // --- Product / AI / eBay sync pipeline ---
     this.productFetchFn = makeFn(
@@ -221,8 +232,10 @@ export class LambdaStack extends cdk.Stack {
       "AdminApi",
       "services/lambdas/admin-api/src/handler.ts",
       "handler",
-      {},
-      cdk.Duration.seconds(15),
+      { EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications` },
+      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to
+      // our own endpoint during destination creation, so this needs more than the old 15s.
+      cdk.Duration.seconds(30),
     );
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);

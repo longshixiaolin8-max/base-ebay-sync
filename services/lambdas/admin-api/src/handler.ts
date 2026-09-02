@@ -187,6 +187,52 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { offer });
     }
 
+    if (method === "POST" && path === "/admin/ebay/webhook-setup") {
+      const body = JSON.parse(event.body ?? "{}") as { topicId?: string; alertEmail?: string };
+      if (!body.topicId || !body.alertEmail) return json(400, { error: "topicId_and_alertEmail_required" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      if (!creds.webhookVerificationToken) return json(409, { error: "webhookVerificationToken_not_configured" });
+
+      const endpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
+      if (!endpoint) return json(500, { error: "EBAY_WEBHOOK_ENDPOINT_URL_not_configured" });
+
+      const adapter = createEbayAdapter(creds);
+      // LISTING (and other USER-scoped topics) require the connected seller's own OAuth
+      // token carrying sell.listing[.read] -- an app-level client_credentials token gets a
+      // generic "Internal error" (errorId 2003) instead of a clear scope-denied response.
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const userAccessToken = await getValidAccessToken(db, adapter, accountId);
+
+      await adapter.updateNotificationConfig(userAccessToken, body.alertEmail);
+      const { destinationId } = await adapter.createNotificationDestination(
+        userAccessToken,
+        "AI EC Platform",
+        endpoint,
+        creds.webhookVerificationToken,
+      );
+      const { subscriptionId } = await adapter.createNotificationSubscription(userAccessToken, body.topicId, destinationId);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "ebay_webhook_subscribed",
+        entityType: "ebay_account",
+        entityId: destinationId,
+        after: { topicId: body.topicId, subscriptionId },
+      });
+
+      return json(201, { destinationId, subscriptionId });
+    }
+
+    if (method === "GET" && path === "/admin/ebay/notification-topics") {
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const appAccessToken = await adapter.getApplicationAccessToken();
+      const topics = await adapter.listNotificationTopics(appAccessToken);
+      return json(200, { topics });
+    }
+
     if (method === "GET" && path === "/admin/ebay/category-suggestions") {
       const q = event.queryStringParameters?.q;
       if (!q) return json(400, { error: "q_required" });
