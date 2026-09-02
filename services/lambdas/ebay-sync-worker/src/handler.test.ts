@@ -49,24 +49,52 @@ const draft = {
 describe("publish", () => {
   beforeEach(() => recordAuditLogMock.mockClear());
 
+  function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      createListing: vi.fn().mockResolvedValue({ externalId: "base-1" }),
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+      ...overrides,
+    } as unknown as EbayAdapter;
+  }
+
   it("withholds the safety stock buffer from the quantity pushed to eBay", async () => {
     const inventory = { quantity: 5, safetyStockBuffer: 2 };
-    const createListing = vi.fn().mockResolvedValue({ externalId: "base-1" });
-    const adapter = { createListing } as unknown as EbayAdapter;
+    const adapter = ebayAdapter();
 
     await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
 
-    expect(createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 3 }));
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 3 }));
   });
 
   it("pushes 0 rather than negative when the buffer exceeds true stock", async () => {
     const inventory = { quantity: 1, safetyStockBuffer: 5 };
-    const createListing = vi.fn().mockResolvedValue({ externalId: "base-1" });
-    const adapter = { createListing } as unknown as EbayAdapter;
+    const adapter = ebayAdapter();
 
     await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
 
-    expect(createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 0 }));
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 0 }));
+  });
+
+  it("blocks the publish before calling createListing when eBay-required item specifics are missing", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
+    // draft.itemSpecifics is {} — neither Brand nor Type is set.
+
+    await expect(publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
+      /Brand, Type/,
+    );
+    expect(adapter.createListing).not.toHaveBeenCalled();
+  });
+
+  it("publishes once every eBay-required item specific is present", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const draftWithSpecifics = { ...draft, itemSpecifics: { Brand: "Unbranded", Type: "Bracelet" } };
+    const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
+
+    await publish(createFakeDb([[product], [draftWithSpecifics], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
 });
 

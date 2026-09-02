@@ -1,5 +1,5 @@
 import type { EbayAdapter } from "@ai-ec/adapter-ebay";
-import { buildIdempotencyKey, withIdempotency } from "@ai-ec/core";
+import { buildIdempotencyKey, findMissingRequiredAspects, withIdempotency } from "@ai-ec/core";
 import { aiListingDraft, calculateChannelAvailableQuantity, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -103,6 +103,20 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     "ebay",
     product.sourceChannel,
   );
+
+  // Verify the draft's itemSpecifics against eBay's own real, per-category required aspects
+  // before spending a publish attempt on it — the check itself is a live API call, never a
+  // guessed/hardcoded requirements list, consistent with this platform's "never assert
+  // unverified facts" principle applied to our own preflight logic too.
+  const appAccessToken = await adapter.getApplicationAccessToken();
+  const requiredAspects = await adapter.getRequiredItemAspects(appAccessToken, primaryCategory.ebayCategoryId);
+  const missingAspects = findMissingRequiredAspects(draft.itemSpecifics, requiredAspects);
+  if (missingAspects.length > 0) {
+    throw new Error(
+      `AI draft for product ${productId} is missing eBay-required item specifics for category ` +
+        `${primaryCategory.ebayCategoryId} (${primaryCategory.label}): ${missingAspects.join(", ")}`,
+    );
+  }
 
   const { externalId } = await adapter.createListing(accessToken, {
     productId,

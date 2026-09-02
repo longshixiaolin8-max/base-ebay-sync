@@ -40,6 +40,19 @@ export const AIGeneratedListing = z.object({
 });
 export type AIGeneratedListing = z.infer<typeof AIGeneratedListing>;
 
+/**
+ * Consistency check between an AI-drafted listing's itemSpecifics and eBay's real,
+ * per-category required aspects (fetched live via EbayAdapter.getRequiredItemAspects —
+ * never guessed). A missing aspect here means an eBay publish attempt is *known* to fail
+ * before spending the API call on it, rather than surfacing only as a live 400.
+ */
+export function findMissingRequiredAspects(
+  itemSpecifics: Record<string, string | null>,
+  requiredAspectNames: string[],
+): string[] {
+  return requiredAspectNames.filter((name) => !itemSpecifics[name]);
+}
+
 export const InquiryReplyDraft = z.object({
   replyEn: z.string().min(1),
   replyJa: z.string().min(1),

@@ -169,6 +169,29 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("returns only the required aspects for a category, ignoring optional/recommended ones", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        aspects: [
+          { localizedAspectName: "Brand", aspectConstraint: { aspectRequired: true } },
+          { localizedAspectName: "Type", aspectConstraint: { aspectRequired: true } },
+          { localizedAspectName: "Color", aspectConstraint: { aspectRequired: false } },
+          { localizedAspectName: "Occasion" }, // aspectConstraint entirely absent — treat as not required
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const required = await adapter.getRequiredItemAspects("app-token", "262003");
+
+    expect(required).toEqual(["Brand", "Type"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=262003"),
+      expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
+    );
+  });
+
   it("creates a notification destination and returns its id from the Location header", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(createdResponse("dest-123"));
     vi.stubGlobal("fetch", fetchMock);

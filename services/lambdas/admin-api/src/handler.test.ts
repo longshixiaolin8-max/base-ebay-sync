@@ -33,6 +33,7 @@ const createNotificationDestinationMock = vi.fn().mockResolvedValue({ destinatio
 const createNotificationSubscriptionMock = vi.fn().mockResolvedValue({ subscriptionId: "sub-1" });
 const updateNotificationConfigMock = vi.fn().mockResolvedValue(undefined);
 const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
+const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
@@ -45,6 +46,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createNotificationSubscription: createNotificationSubscriptionMock,
   updateNotificationConfig: updateNotificationConfigMock,
   listProducts: listProductsMock,
+  getRequiredItemAspects: getRequiredItemAspectsMock,
 }));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
@@ -333,6 +335,19 @@ describe("admin-api handler", () => {
       makeEvent("POST", "/admin/products/product-1/link-ebay-listing", {}, { externalId: "sku-1" }),
     );
     expect(res.statusCode).toBe(409);
+  });
+
+  it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {
+    getRequiredItemAspectsMock.mockResolvedValueOnce(["Brand", "Type"]);
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/required-aspects", { categoryId: "262003" }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ categoryId: "262003", requiredAspects: ["Brand", "Type"] });
+    expect(getRequiredItemAspectsMock).toHaveBeenCalledWith("app-token", "262003");
+  });
+
+  it("GET /admin/ebay/required-aspects returns 400 without a categoryId", async () => {
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/required-aspects"));
+    expect(res.statusCode).toBe(400);
   });
 
   it("GET /admin/ebay/category-suggestions returns eBay's real category suggestions", async () => {

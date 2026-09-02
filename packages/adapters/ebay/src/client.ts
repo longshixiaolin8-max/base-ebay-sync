@@ -228,6 +228,23 @@ export class EbayAdapter implements ChannelAdapter {
     }));
   }
 
+  /**
+   * Real, per-category required item-specifics (eBay's own "Item Specifics" requirements),
+   * used to verify an AI-drafted listing's aspects are actually publishable before spending
+   * a publish attempt on it, instead of only discovering a missing one from a live 400.
+   */
+  async getRequiredItemAspects(appAccessToken: string, categoryId: string): Promise<string[]> {
+    const res = await fetch(
+      `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`,
+      { headers: { Authorization: `Bearer ${appAccessToken}` } },
+    );
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const json = (await res.json()) as {
+      aspects?: Array<{ localizedAspectName: string; aspectConstraint?: { aspectRequired?: boolean } }>;
+    };
+    return (json.aspects ?? []).filter((a) => a.aspectConstraint?.aspectRequired).map((a) => a.localizedAspectName);
+  }
+
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);
