@@ -1,0 +1,120 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BaseAdapter } from "./client.js";
+
+const config = { clientId: "cid", clientSecret: "secret", apiBaseUrl: "https://api.example-base.test" };
+
+function mockFetchOnce(body: unknown, status = 200) {
+  return vi.fn().mockResolvedValueOnce({
+    ok: status < 400,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+}
+
+describe("BaseAdapter", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("builds the authorization URL with required scopes", () => {
+    const adapter = new BaseAdapter(config);
+    const url = new URL(adapter.getAuthorizationUrl("state123", "https://app.example/callback"));
+    expect(url.origin + url.pathname).toBe("https://api.example-base.test/1/oauth/authorize");
+    expect(url.searchParams.get("client_id")).toBe("cid");
+    expect(url.searchParams.get("state")).toBe("state123");
+    expect(url.searchParams.get("scope")).toBe("read_items write_items read_orders");
+  });
+
+  it("exchanges an authorization code for tokens", async () => {
+    const fetchMock = mockFetchOnce({
+      access_token: "at",
+      refresh_token: "rt",
+      expires_in: 3600,
+      scope: "read_items",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const tokens = await adapter.exchangeCodeForToken("code123", "https://app.example/callback");
+
+    expect(tokens.accessToken).toBe("at");
+    expect(tokens.refreshToken).toBe("rt");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-base.test/1/oauth/token",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("maps BASE items to ExternalProduct, reading photos from imgN_origin fields", async () => {
+    // Shape verified against a live BASE item: no "images" array, no "updated" field —
+    // photos are flat img1_origin.. fields and the timestamp is "modified" (Unix seconds).
+    const fetchMock = mockFetchOnce({
+      items: [
+        {
+          item_id: "item-1",
+          title: "T-Shirt",
+          detail: "<p>desc</p>",
+          price: 3000,
+          stock: 5,
+          modified: 1788157953,
+          img1_origin: "https://img.example/1.jpg",
+          img2_origin: "https://img.example/2.jpg",
+          img3_origin: null,
+        },
+      ],
+      offset: 0,
+      limit: 100,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const result = await adapter.listProducts("token", {});
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({
+      externalId: "item-1",
+      title: "T-Shirt",
+      priceJpy: 3000,
+      quantity: 5,
+      images: ["https://img.example/1.jpg", "https://img.example/2.jpg"],
+    });
+    expect(result.items[0]?.updatedAt).toEqual(new Date(1788157953 * 1000));
+    expect(result.nextCursor).toBeUndefined();
+  });
+
+  it("maps BASE items with no img*_origin fields to an empty images array", async () => {
+    const fetchMock = mockFetchOnce({
+      items: [
+        {
+          item_id: "item-2",
+          title: "No Photo Yet",
+          detail: "<p>desc</p>",
+          price: 1500,
+          stock: 1,
+          modified: 1788157953,
+        },
+      ],
+      offset: 0,
+      limit: 100,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const result = await adapter.listProducts("token", {});
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.images).toEqual([]);
+  });
+
+  it("refuses createListing since BASE is always the source, not a sync target", async () => {
+    const adapter = new BaseAdapter(config);
+    await expect(adapter.createListing("token", {} as never)).rejects.toThrow(/not supported/);
+  });
+
+  it("throws BaseApiError on a non-2xx response", async () => {
+    vi.stubGlobal("fetch", mockFetchOnce({ error: "unauthorized" }, 401));
+    const adapter = new BaseAdapter(config);
+    await expect(adapter.getInventory("token", "item-1")).rejects.toThrow(/BASE API error 401/);
+  });
+});

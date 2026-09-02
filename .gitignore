@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+.next/
+out/
+cdk.out/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+*.log
+.pnpm-store/
+infra/cdk.context.json

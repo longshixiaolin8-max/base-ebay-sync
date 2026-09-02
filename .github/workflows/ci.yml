@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm -r --if-present run lint
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      - name: Typecheck
+        run: pnpm -r --if-present run typecheck
+
+      - name: Test
+        run: pnpm -r --if-present run test
+
+      - name: CDK synth (template validation only, no AWS credentials used)
+        working-directory: infra
+        run: npx cdk synth --all --context githubRepo=${{ github.repository }} --context region=us-east-2 > /dev/null

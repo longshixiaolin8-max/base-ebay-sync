@@ -1,0 +1,56 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  id-token: write # required for OIDC — no static AWS keys are ever stored in GitHub
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # GitHub Environment protection rules (configured in repo Settings > Environments)
+    # gate this job: "prod" requires a human reviewer's approval before the job runs at
+    # all, satisfying "本番デプロイは人間承認必須". "dev" has no required reviewers.
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: CDK deploy
+        working-directory: infra
+        run: |
+          npx cdk deploy --all \
+            --context env=${{ inputs.environment }} \
+            --context region=${{ vars.AWS_REGION }} \
+            --context alarmEmail=${{ vars.ALARM_EMAIL }} \
+            --context githubRepo=${{ github.repository }} \
+            --require-approval never
