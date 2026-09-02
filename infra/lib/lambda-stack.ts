@@ -35,6 +35,11 @@ export interface LambdaStackProps extends cdk.StackProps {
     ebaySync: sqs.Queue;
     inventorySync: sqs.Queue;
   };
+  dlqs: {
+    aiGenerate: sqs.Queue;
+    ebaySync: sqs.Queue;
+    inventorySync: sqs.Queue;
+  };
   productImagesBucket: s3.Bucket;
 }
 
@@ -59,6 +64,7 @@ export class LambdaStack extends cdk.Stack {
   readonly salesPollerFn: nodejs.NodejsFunction;
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
+  readonly dlqRedriveFn: nodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
@@ -228,6 +234,42 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
+    });
+
+    // --- Automatic recovery after API failures (item #4) ---
+    this.dlqRedriveFn = makeFn(
+      "DlqRedrive",
+      "services/lambdas/dlq-redrive/src/handler.ts",
+      "handler",
+      {
+        AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
+        AI_GENERATE_DLQ_ARN: props.dlqs.aiGenerate.queueArn,
+        EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
+        EBAY_SYNC_DLQ_ARN: props.dlqs.ebaySync.queueArn,
+        INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
+        INVENTORY_SYNC_DLQ_ARN: props.dlqs.inventorySync.queueArn,
+      },
+      cdk.Duration.seconds(30),
+    );
+    // StartMessageMoveTask runs as an AWS-managed receive-from-DLQ / send-to-original-queue
+    // loop under the hood, so the caller's IAM identity needs permissions on both ends, not
+    // just the move-task control-plane actions on the DLQ.
+    for (const dlq of [props.dlqs.aiGenerate, props.dlqs.ebaySync, props.dlqs.inventorySync]) {
+      dlq.grant(
+        this.dlqRedriveFn,
+        "sqs:GetQueueAttributes",
+        "sqs:ListMessageMoveTasks",
+        "sqs:StartMessageMoveTask",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+      );
+    }
+    for (const queue of [props.queues.aiGenerate, props.queues.ebaySync, props.queues.inventorySync]) {
+      queue.grant(this.dlqRedriveFn, "sqs:SendMessage");
+    }
+    new events.Rule(this, "DlqRedriveSchedule", {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
     // --- Admin API ---

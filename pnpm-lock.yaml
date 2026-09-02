@@ -237,6 +237,22 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@20.19.43)
 
+  services/lambdas/dlq-redrive:
+    dependencies:
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
   services/lambdas/ebay-sync-worker:
     dependencies:
       '@ai-ec/adapter-ebay':

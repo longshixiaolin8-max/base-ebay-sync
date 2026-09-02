@@ -66,6 +66,7 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
   apiUrl: apiCore.api.apiEndpoint,
   queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
+  dlqs: { aiGenerate: queues.aiGenerate.dlq, ebaySync: queues.ebaySync.dlq, inventorySync: queues.inventorySync.dlq },
   productImagesBucket: storage.productImagesBucket,
 });
 lambdas.addStackDependency(database);
