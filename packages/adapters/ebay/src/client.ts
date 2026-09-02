@@ -321,7 +321,7 @@ export class EbayAdapter implements ChannelAdapter {
       method: "PUT",
       body: JSON.stringify({
         availability: { shipToLocationAvailability: { quantity: input.quantity } },
-        condition: "NEW",
+        condition: input.condition,
         product: {
           title: input.titleEn,
           description: input.descriptionHtmlEn,
@@ -375,20 +375,28 @@ export class EbayAdapter implements ChannelAdapter {
       input.titleEn !== undefined ||
       input.descriptionHtmlEn !== undefined ||
       input.images !== undefined ||
-      input.quantity !== undefined
+      input.quantity !== undefined ||
+      input.condition !== undefined
     ) {
-      const current = await this.getProduct(accessToken, externalId);
+      // Fetch the raw current item (not the mapped ExternalProduct) so we can carry over
+      // its real `condition` when the caller doesn't specify one -- never default a
+      // condition update to "NEW", which would silently overwrite a correct used/vintage
+      // condition already on file.
+      const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
+      const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
       await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
         method: "PUT",
         body: JSON.stringify({
           availability: {
-            shipToLocationAvailability: { quantity: input.quantity ?? current?.quantity ?? 0 },
+            shipToLocationAvailability: {
+              quantity: input.quantity ?? current.availability?.shipToLocationAvailability?.quantity ?? 0,
+            },
           },
-          condition: "NEW",
+          condition: input.condition ?? current.condition,
           product: {
-            title: input.titleEn ?? current?.title,
-            description: input.descriptionHtmlEn ?? current?.descriptionHtml,
-            imageUrls: input.images ?? current?.images,
+            title: input.titleEn ?? current.product?.title,
+            description: input.descriptionHtmlEn ?? current.product?.description,
+            imageUrls: input.images ?? current.product?.imageUrls,
             aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : undefined,
           },
         }),

@@ -17,8 +17,34 @@ export const AIConfidenceFlags = z.object({
   material: ConfidenceLevel,
   size: ConfidenceLevel,
   authenticity: ConfidenceLevel,
+  condition: ConfidenceLevel,
 });
 export type AIConfidenceFlags = z.infer<typeof AIConfidenceFlags>;
+
+/**
+ * eBay's own Sell Inventory API condition enum (ConditionEnum). Reusing eBay's own
+ * defined values here isn't guessing a fact about the product -- the model still has to
+ * pick which one the source text actually supports (see the prompt's condition rule) --
+ * it's just naming the closed set of values the downstream createListing/updateListing
+ * call is allowed to send.
+ */
+export const ItemCondition = z.enum([
+  "NEW",
+  "LIKE_NEW",
+  "NEW_OTHER",
+  "NEW_WITH_DEFECTS",
+  "CERTIFIED_REFURBISHED",
+  "EXCELLENT_REFURBISHED",
+  "VERY_GOOD_REFURBISHED",
+  "GOOD_REFURBISHED",
+  "SELLER_REFURBISHED",
+  "USED_EXCELLENT",
+  "USED_VERY_GOOD",
+  "USED_GOOD",
+  "USED_ACCEPTABLE",
+  "FOR_PARTS_OR_NOT_WORKING",
+]);
+export type ItemCondition = z.infer<typeof ItemCondition>;
 
 /**
  * Structured output the AI generation service must produce. Any field the model is not
@@ -33,6 +59,8 @@ export const AIGeneratedListing = z.object({
   itemSpecifics: z.record(z.string(), z.string().nullable()),
   seoKeywords: z.array(z.string()).default([]),
   suggestedPriceUsd: z.number().positive().nullable(),
+  /** Must be derived from what the source text actually says; see guardrail.ts. */
+  condition: ItemCondition,
   confidenceFlags: AIConfidenceFlags,
   /** True whenever any confidenceFlags entry is not "confirmed" — forces human review. */
   needsHumanReview: z.boolean(),

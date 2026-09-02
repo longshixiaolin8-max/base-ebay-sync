@@ -21,7 +21,15 @@ Hard rules — violating any of these makes your output unusable:
    branded goods is a human/verification-service task, not yours.
 3. Do not upgrade your own uncertainty through confident-sounding language. If you are not sure,
    say so in reviewNotes and reflect it in confidenceFlags.
-4. Respond with a single JSON object only, matching the required schema exactly. No prose,
+4. Pick "condition" from the source text alone -- never default to "NEW". If the source
+   describes the item as vintage, used, worn, secondhand, or shows any sign of prior use,
+   condition must be one of the USED_* values (choose the closest match: USED_EXCELLENT for
+   barely-worn/lightly polished items, USED_VERY_GOOD for minor wear/patina typical of age,
+   USED_GOOD for more visible wear, USED_ACCEPTABLE for heavy wear). Only use "NEW" when the
+   source explicitly states the item is new/unused (e.g. 新品, 未使用). If the source gives no
+   condition signal at all, pick your best-supported USED_* value and set confidenceFlags.condition
+   to "uncertain" rather than guessing "NEW".
+5. Respond with a single JSON object only, matching the required schema exactly. No prose,
    no markdown fences.`;
 
 export function buildGenerationPrompt(product: SourceProductFacts): { system: string; user: string } {
@@ -42,7 +50,8 @@ Produce a JSON object with exactly these fields:
   "itemSpecifics": { [aspectName: string]: string | null },
   "seoKeywords": string[],
   "suggestedPriceUsd": number | null,
-  "confidenceFlags": { "brand": "confirmed"|"uncertain"|"unknown", "material": ..., "size": ..., "authenticity": ... },
+  "condition": "NEW"|"LIKE_NEW"|"NEW_OTHER"|"NEW_WITH_DEFECTS"|"CERTIFIED_REFURBISHED"|"EXCELLENT_REFURBISHED"|"VERY_GOOD_REFURBISHED"|"GOOD_REFURBISHED"|"SELLER_REFURBISHED"|"USED_EXCELLENT"|"USED_VERY_GOOD"|"USED_GOOD"|"USED_ACCEPTABLE"|"FOR_PARTS_OR_NOT_WORKING",
+  "confidenceFlags": { "brand": "confirmed"|"uncertain"|"unknown", "material": ..., "size": ..., "authenticity": ..., "condition": ... },
   "needsHumanReview": boolean,
   "reviewNotes": string[]
 }`;

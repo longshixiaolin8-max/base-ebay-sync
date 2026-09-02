@@ -35,6 +35,8 @@ export const aiListingDraft = pgTable("ai_listing_draft", {
   itemSpecifics: jsonb("item_specifics").notNull().$type<Record<string, string | null>>(),
   seoKeywords: jsonb("seo_keywords").notNull().$type<string[]>().default([]),
   suggestedPriceUsd: integer("suggested_price_usd_cents"),
+  /** eBay ConditionEnum value, derived from the source text -- never defaulted to "NEW". */
+  condition: text("condition").notNull(),
   confidenceFlags: jsonb("confidence_flags").notNull().$type<Record<string, string>>(),
   needsHumanReview: boolean("needs_human_review").notNull().default(true),
   reviewNotes: jsonb("review_notes").notNull().$type<string[]>().default([]),

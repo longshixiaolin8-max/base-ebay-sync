@@ -128,6 +128,7 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     images: product.images,
     categoryId: primaryCategory.ebayCategoryId,
     itemSpecifics: draft.itemSpecifics,
+    condition: draft.condition,
   });
 
   await db
@@ -177,6 +178,7 @@ export async function update(
     images: product.images,
     priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
     quantity: availableQuantity,
+    condition: draft?.condition,
   });
 
   await db

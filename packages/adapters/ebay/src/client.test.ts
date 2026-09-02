@@ -56,6 +56,7 @@ describe("EbayAdapter", () => {
       images: ["https://img.example/1.jpg"],
       categoryId: "12345",
       itemSpecifics: { Brand: "Unknown", Size: null },
+      condition: "USED_GOOD",
     });
 
     expect(result.externalId).toBe("SKU-1");
@@ -93,6 +94,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "12345",
       itemSpecifics: {},
+      condition: "NEW",
     });
 
     expect(result.externalId).toBe("SKU-1");
@@ -128,6 +130,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "1",
       itemSpecifics: { Brand: "Coach", Material: null },
+      condition: "USED_GOOD",
     });
 
     const inventoryCallBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
@@ -309,6 +312,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "1",
       itemSpecifics: {},
+      condition: "NEW",
     });
 
     const offerCallBody = JSON.parse((fetchMock.mock.calls[2]?.[1] as RequestInit).body as string);
@@ -365,6 +369,48 @@ describe("EbayAdapter", () => {
     const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
     expect(body.availability.shipToLocationAvailability.quantity).toBe(4);
     expect(body.product.title).toBe("Existing Title"); // unspecified fields merged from current
+  });
+
+  it("updateListing sends an explicit condition instead of hardcoding NEW", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "NEW",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [] },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { condition: "USED_VERY_GOOD" });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.condition).toBe("USED_VERY_GOOD");
+  });
+
+  it("updateListing carries over the current condition when none is specified", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_GOOD",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [] },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { quantity: 4 });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.condition).toBe("USED_GOOD");
   });
 
   it("updateListing makes no inventory_item call when nothing relevant changed", async () => {

@@ -44,6 +44,7 @@ const draft = {
   suggestedPriceUsd: null,
   categoryCandidates: [{ ebayCategoryId: "1", label: "Cat" }],
   itemSpecifics: {},
+  condition: "USED_GOOD",
 };
 
 describe("publish", () => {
@@ -96,6 +97,15 @@ describe("publish", () => {
 
     expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
+
+  it("passes the draft's condition through instead of hardcoding NEW", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ condition: "USED_GOOD" }));
+  });
 });
 
 describe("update", () => {
@@ -108,7 +118,11 @@ describe("update", () => {
 
     await update(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1", "base-1");
 
-    expect(updateListing).toHaveBeenCalledWith("token", "base-1", expect.objectContaining({ quantity: 5 }));
+    expect(updateListing).toHaveBeenCalledWith(
+      "token",
+      "base-1",
+      expect.objectContaining({ quantity: 5, condition: "USED_GOOD" }),
+    );
   });
 
   it("leaves quantity undefined when there is no inventory_master row yet", async () => {

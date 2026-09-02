@@ -43,6 +43,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
           descriptionHtmlEn: listing.descriptionHtmlEn,
           categoryCandidates: listing.categoryCandidates,
           itemSpecifics: listing.itemSpecifics,
+          condition: listing.condition,
           seoKeywords: listing.seoKeywords,
           suggestedPriceUsd: listing.suggestedPriceUsd ? Math.round(listing.suggestedPriceUsd * 100) : null,
           confidenceFlags: listing.confidenceFlags,

@@ -15,6 +15,13 @@
       "when": 1788335582222,
       "tag": "0001_violet_meteorite",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788340919731,
+      "tag": "0002_empty_screwball",
+      "breakpoints": true
     }
   ]
 }
