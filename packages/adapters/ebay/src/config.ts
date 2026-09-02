@@ -30,7 +30,10 @@ export const EBAY_OAUTH_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.inventory",
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.account",
-  // Required to subscribe to the Notification API's LISTING topic (a USER-scoped topic,
-  // verified live via getTopics — its authorizationScopes are sell.listing[.read]).
-  "https://api.ebay.com/oauth/api_scope/sell.listing.read",
+  // sell.listing.read would be required to subscribe to the Notification API's LISTING
+  // topic, but this app's Sandbox keyset does not have access to it (confirmed live: eBay
+  // rejects both the authorize request and every token refresh with invalid_scope once it's
+  // requested). Do not re-add it here without first confirming eBay has granted the scope —
+  // requesting an unavailable scope breaks token refresh for every other eBay call too, not
+  // just the ones that need it. ebay-webhook stays deployed and dormant until then.
 ] as const;
