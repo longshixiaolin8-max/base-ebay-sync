@@ -5,6 +5,13 @@ export interface EbayAdapterConfig {
   ruName: string;
   merchantLocationKey: string;
   marketplaceId?: string;
+  /**
+   * eBay Business Policy IDs (fulfillment/payment/return) required on every offer before it
+   * can publish. Create them once via EbayAdapter's policy-creation methods.
+   */
+  fulfillmentPolicyId?: string;
+  paymentPolicyId?: string;
+  returnPolicyId?: string;
   /** Defaults to eBay production; pass the sandbox host for dev/staging environments. */
   apiBaseUrl?: string;
   authBaseUrl?: string;

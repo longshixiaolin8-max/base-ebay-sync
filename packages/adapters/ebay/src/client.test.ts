@@ -30,6 +30,7 @@ describe("EbayAdapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({})) // PUT inventory_item
+      .mockResolvedValueOnce(jsonResponse({ offers: [] })) // GET offer?sku= (none exist yet)
       .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" })) // POST offer
       .mockResolvedValueOnce(jsonResponse({})); // POST publish
     vi.stubGlobal("fetch", fetchMock);
@@ -53,11 +54,46 @@ describe("EbayAdapter", () => {
       "https://api.example-ebay.test/sell/inventory/v1/inventory_item/SKU-1",
       expect.objectContaining({ method: "PUT" }),
     );
-    const offerCallBody = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    const offerCallBody = JSON.parse((fetchMock.mock.calls[2]?.[1] as RequestInit).body as string);
     expect(offerCallBody.pricingSummary.price.value).toBe("49.99");
     expect(fetchMock).toHaveBeenNthCalledWith(
-      3,
+      4,
       "https://api.example-ebay.test/sell/inventory/v1/offer/offer-1/publish",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("reuses an existing offer instead of creating a duplicate", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({})) // PUT inventory_item
+      .mockResolvedValueOnce(jsonResponse({ offers: [{ offerId: "existing-offer", sku: "SKU-1" }] })) // GET offer?sku=
+      .mockResolvedValueOnce(jsonResponse({})) // PUT offer/existing-offer
+      .mockResolvedValueOnce(jsonResponse({})); // POST publish
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const result = await adapter.createListing("token", {
+      productId: "p1",
+      sku: "SKU-1",
+      titleEn: "Vintage Jacket",
+      descriptionHtmlEn: "<p>desc</p>",
+      priceUsd: 49.99,
+      quantity: 2,
+      images: [],
+      categoryId: "12345",
+      itemSpecifics: {},
+    });
+
+    expect(result.externalId).toBe("SKU-1");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://api.example-ebay.test/sell/inventory/v1/offer/existing-offer",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      "https://api.example-ebay.test/sell/inventory/v1/offer/existing-offer/publish",
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -66,6 +102,7 @@ describe("EbayAdapter", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ offers: [] }))
       .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" }))
       .mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
@@ -120,6 +157,75 @@ describe("EbayAdapter", () => {
       expect.stringContaining("/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=silver"),
       expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
     );
+  });
+
+  it("creates a fulfillment policy and returns its id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ fulfillmentPolicyId: "fp-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const id = await adapter.createFulfillmentPolicy("token", "Standard Shipping");
+
+    expect(id).toBe("fp-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/sell/account/v1/fulfillment_policy",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("creates a payment policy and returns its id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ paymentPolicyId: "pp-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const id = await adapter.createPaymentPolicy("token", "Standard Payment");
+
+    expect(id).toBe("pp-1");
+  });
+
+  it("creates a return policy and returns its id", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ returnPolicyId: "rp-1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const id = await adapter.createReturnPolicy("token", "30 Day Returns");
+
+    expect(id).toBe("rp-1");
+  });
+
+  it("includes listing policy ids on the offer when configured", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({}))
+      .mockResolvedValueOnce(jsonResponse({ offers: [] }))
+      .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" }))
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter({
+      ...config,
+      fulfillmentPolicyId: "fp-1",
+      paymentPolicyId: "pp-1",
+      returnPolicyId: "rp-1",
+    });
+    await adapter.createListing("token", {
+      productId: "p1",
+      sku: "SKU-3",
+      titleEn: "Item",
+      descriptionHtmlEn: "<p>d</p>",
+      priceUsd: 20,
+      quantity: 1,
+      images: [],
+      categoryId: "1",
+      itemSpecifics: {},
+    });
+
+    const offerCallBody = JSON.parse((fetchMock.mock.calls[2]?.[1] as RequestInit).body as string);
+    expect(offerCallBody.listingPolicies).toEqual({
+      fulfillmentPolicyId: "fp-1",
+      paymentPolicyId: "pp-1",
+      returnPolicyId: "rp-1",
+    });
   });
 
   it("creates an inventory location with the given address", async () => {

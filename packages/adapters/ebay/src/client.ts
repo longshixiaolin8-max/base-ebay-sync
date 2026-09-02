@@ -173,6 +173,7 @@ export class EbayAdapter implements ChannelAdapter {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
         "Content-Language": "en-US",
+        "Accept-Language": "en-US",
         ...init?.headers,
       },
     });
@@ -203,6 +204,12 @@ export class EbayAdapter implements ChannelAdapter {
     return mapEbayInventoryItem((await res.json()) as EbayInventoryItem);
   }
 
+  /** Raw inventory_item payload (aspects included) — useful for debugging category-required-aspect errors. */
+  async getRawInventoryItem(accessToken: string, sku: string): Promise<unknown> {
+    const res = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${sku}`);
+    return res.json();
+  }
+
   async createListing(accessToken: string, input: CreateListingInput): Promise<{ externalId: string }> {
     await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${input.sku}`, {
       method: "PUT",
@@ -218,21 +225,39 @@ export class EbayAdapter implements ChannelAdapter {
       }),
     });
 
-    const offerRes = await this.authedFetch(accessToken, `/sell/inventory/v1/offer`, {
-      method: "POST",
-      body: JSON.stringify({
-        sku: input.sku,
-        marketplaceId: this.config.marketplaceId ?? "EBAY_US",
-        format: "FIXED_PRICE",
-        categoryId: input.categoryId,
-        listingDescription: input.descriptionHtmlEn,
-        pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
-        merchantLocationKey: this.config.merchantLocationKey,
-      }),
-    });
-    const offer = (await offerRes.json()) as { offerId: string };
+    const offerBody = {
+      sku: input.sku,
+      marketplaceId: this.config.marketplaceId ?? "EBAY_US",
+      format: "FIXED_PRICE",
+      categoryId: input.categoryId,
+      listingDescription: input.descriptionHtmlEn,
+      pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
+      merchantLocationKey: this.config.merchantLocationKey,
+      listingPolicies: {
+        fulfillmentPolicyId: this.config.fulfillmentPolicyId,
+        paymentPolicyId: this.config.paymentPolicyId,
+        returnPolicyId: this.config.returnPolicyId,
+      },
+    };
 
-    await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offer.offerId}/publish`, {
+    // A prior attempt (e.g. one that failed at the publish step) may have already created
+    // the offer for this SKU — eBay rejects a second POST with "Offer entity already
+    // exists", so reuse it via PUT instead of blindly creating a new one every retry.
+    let offerId = await this.findOfferId(accessToken, input.sku);
+    if (offerId) {
+      await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}`, {
+        method: "PUT",
+        body: JSON.stringify(offerBody),
+      });
+    } else {
+      const offerRes = await this.authedFetch(accessToken, `/sell/inventory/v1/offer`, {
+        method: "POST",
+        body: JSON.stringify(offerBody),
+      });
+      ({ offerId } = (await offerRes.json()) as { offerId: string });
+    }
+
+    await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}/publish`, {
       method: "POST",
     });
 
@@ -323,6 +348,79 @@ export class EbayAdapter implements ChannelAdapter {
         merchantLocationStatus: "ENABLED",
       }),
     });
+  }
+
+  /**
+   * One-time seller onboarding step: opts the account into eBay's Business Policy
+   * management, required before fulfillment/payment/return policies can be created.
+   * Safe to call again if already opted in (eBay returns an error we ignore).
+   */
+  async optInToBusinessPolicies(accessToken: string): Promise<void> {
+    const res = await fetch(`${this.apiBaseUrl}/sell/account/v1/program/opt_in`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ programType: "SELLING_POLICY_MANAGEMENT" }),
+    });
+    if (!res.ok && res.status !== 409) throw new EbayApiError(res.status, await res.text());
+  }
+
+  async createFulfillmentPolicy(accessToken: string, name: string): Promise<string> {
+    const res = await this.authedFetch(accessToken, `/sell/account/v1/fulfillment_policy`, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        marketplaceId: this.config.marketplaceId ?? "EBAY_US",
+        categoryTypes: [{ name: "ALL_EXCLUDING_MOTORS_VEHICLES" }],
+        handlingTime: { value: 3, unit: "DAY" },
+        shippingOptions: [
+          {
+            optionType: "DOMESTIC",
+            costType: "FLAT_RATE",
+            shippingServices: [
+              {
+                sortOrder: 1,
+                shippingCarrierCode: "USPS",
+                shippingServiceCode: "USPSPriority",
+                shippingCost: { value: "15.00", currency: "USD" },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const json = (await res.json()) as { fulfillmentPolicyId: string };
+    return json.fulfillmentPolicyId;
+  }
+
+  async createPaymentPolicy(accessToken: string, name: string): Promise<string> {
+    const res = await this.authedFetch(accessToken, `/sell/account/v1/payment_policy`, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        marketplaceId: this.config.marketplaceId ?? "EBAY_US",
+        categoryTypes: [{ name: "ALL_EXCLUDING_MOTORS_VEHICLES" }],
+        immediatePay: false,
+      }),
+    });
+    const json = (await res.json()) as { paymentPolicyId: string };
+    return json.paymentPolicyId;
+  }
+
+  async createReturnPolicy(accessToken: string, name: string): Promise<string> {
+    const res = await this.authedFetch(accessToken, `/sell/account/v1/return_policy`, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        marketplaceId: this.config.marketplaceId ?? "EBAY_US",
+        categoryTypes: [{ name: "ALL_EXCLUDING_MOTORS_VEHICLES" }],
+        returnsAccepted: true,
+        returnPeriod: { value: 30, unit: "DAY" },
+        refundMethod: "MONEY_BACK",
+        returnShippingCostPayer: "BUYER",
+      }),
+    });
+    const json = (await res.json()) as { returnPolicyId: string };
+    return json.returnPolicyId;
   }
 
   private async findOfferId(accessToken: string, sku: string): Promise<string | null> {

@@ -25,10 +25,18 @@ const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
 const getApplicationAccessTokenMock = vi.fn().mockResolvedValue("app-token");
 const suggestCategoriesMock = vi.fn().mockResolvedValue([{ ebayCategoryId: "10364", label: "Bracelets" }]);
+const optInToBusinessPoliciesMock = vi.fn().mockResolvedValue(undefined);
+const createFulfillmentPolicyMock = vi.fn().mockResolvedValue("fp-1");
+const createPaymentPolicyMock = vi.fn().mockResolvedValue("pp-1");
+const createReturnPolicyMock = vi.fn().mockResolvedValue("rp-1");
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
   suggestCategories: suggestCategoriesMock,
+  optInToBusinessPolicies: optInToBusinessPoliciesMock,
+  createFulfillmentPolicy: createFulfillmentPolicyMock,
+  createPaymentPolicy: createPaymentPolicyMock,
+  createReturnPolicy: createReturnPolicyMock,
 }));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
@@ -209,6 +217,18 @@ describe("admin-api handler", () => {
       }),
     );
     expect(res.statusCode).toBe(409);
+  });
+
+  it("POST /admin/ebay/policies opts in and creates the three business policies", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/policies"));
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body!)).toEqual({
+      fulfillmentPolicyId: "fp-1",
+      paymentPolicyId: "pp-1",
+      returnPolicyId: "rp-1",
+    });
+    expect(optInToBusinessPoliciesMock).toHaveBeenCalledWith("token");
   });
 
   it("GET /admin/ebay/category-suggestions returns eBay's real category suggestions", async () => {

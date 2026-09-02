@@ -11,7 +11,7 @@ import {
   recordAuditLog,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
@@ -54,7 +54,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const [ebayListing] = await db
         .select()
         .from(channelListings)
-        .where(eq(channelListings.productId, id))
+        .where(and(eq(channelListings.productId, id), eq(channelListings.channel, "ebay")))
         .limit(1);
       if (!ebayListing) return json(404, { error: "no_ebay_draft_for_product" });
       if (ebayListing.status === "published") return json(409, { error: "already_published" });
@@ -133,6 +133,44 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       return json(201, { merchantLocationKey: body.merchantLocationKey });
+    }
+
+    if (method === "POST" && path === "/admin/ebay/policies") {
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      await adapter.optInToBusinessPolicies(accessToken);
+      const [fulfillmentPolicyId, paymentPolicyId, returnPolicyId] = await Promise.all([
+        adapter.createFulfillmentPolicy(accessToken, "Standard Shipping"),
+        adapter.createPaymentPolicy(accessToken, "Standard Payment"),
+        adapter.createReturnPolicy(accessToken, "30 Day Returns"),
+      ]);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "ebay_business_policies_created",
+        entityType: "ebay_account",
+        entityId: accountId,
+      });
+
+      return json(201, { fulfillmentPolicyId, paymentPolicyId, returnPolicyId });
+    }
+
+    if (method === "GET" && path === "/admin/ebay/inventory-item") {
+      const sku = event.queryStringParameters?.sku;
+      if (!sku) return json(400, { error: "sku_required" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const item = await adapter.getRawInventoryItem(accessToken, sku);
+      return json(200, { item });
     }
 
     if (method === "GET" && path === "/admin/ebay/category-suggestions") {
