@@ -227,6 +227,10 @@ export class LambdaStack extends cdk.Stack {
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
+    // Needed for POST /admin/ebay/location, which reads eBay app credentials and the
+    // connected account's OAuth token (already granted to every fn via makeFn) to create
+    // the seller's ship-from location.
+    props.appCredentialSecrets.ebay.grantRead(this.adminApiFn);
 
     // productImagesBucket is provisioned for a future image re-hosting step (see README
     // follow-ups); no lambda writes to it yet, so no grant is issued until one does.

@@ -35,6 +35,15 @@ interface EbayOffersResponse {
   offers: EbayOffer[];
 }
 
+export interface EbayInventoryLocationAddress {
+  addressLine1: string;
+  addressLine2?: string;
+  city: string;
+  stateOrProvince: string;
+  postalCode: string;
+  country: string;
+}
+
 interface EbayOrderLineItem {
   sku: string;
   quantity: number;
@@ -261,6 +270,25 @@ export class EbayAdapter implements ChannelAdapter {
         occurredAt: new Date(order.creationDate),
       })),
     );
+  }
+
+  /**
+   * One-time seller onboarding step: registers the ship-from location that offers
+   * reference via merchantLocationKey. Must exist before createListing can publish.
+   */
+  async createInventoryLocation(
+    accessToken: string,
+    merchantLocationKey: string,
+    address: EbayInventoryLocationAddress,
+  ): Promise<void> {
+    await this.authedFetch(accessToken, `/sell/inventory/v1/location/${merchantLocationKey}`, {
+      method: "POST",
+      body: JSON.stringify({
+        location: { address },
+        locationTypes: ["WAREHOUSE"],
+        merchantLocationStatus: "ENABLED",
+      }),
+    });
   }
 
   private async findOfferId(accessToken: string, sku: string): Promise<string | null> {

@@ -88,6 +88,28 @@ describe("EbayAdapter", () => {
     expect(inventoryCallBody.product.aspects.Material).toBeUndefined();
   });
 
+  it("creates an inventory location with the given address", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.createInventoryLocation("token", "osaka-main", {
+      addressLine1: "Nagata 3-8-15-415",
+      city: "Osaka-shi Joto-ku",
+      stateOrProvince: "Osaka",
+      postalCode: "536-0022",
+      country: "JP",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/sell/inventory/v1/location/osaka-main",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body.location.address.postalCode).toBe("536-0022");
+    expect(body.merchantLocationStatus).toBe("ENABLED");
+  });
+
   it("sets inventory quantity via PATCH", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);

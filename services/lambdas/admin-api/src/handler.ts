@@ -1,5 +1,16 @@
+import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { auditLog, channelListings, inventoryMaster, productMaster, syncErrors, syncJobs } from "@ai-ec/db";
-import { enqueue, getDb, getQueueUrls, recordAuditLog } from "@ai-ec/lambda-shared";
+import {
+  createEbayAdapter,
+  enqueue,
+  getAppCredentials,
+  getDb,
+  getQueueUrls,
+  getValidAccessToken,
+  listConnectedAccountIds,
+  recordAuditLog,
+  type EbayAppCredentials,
+} from "@ai-ec/lambda-shared";
 import { desc, eq } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
@@ -95,6 +106,33 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       return json(202, { status: "retry_queued" });
+    }
+
+    if (method === "POST" && path === "/admin/ebay/location") {
+      const body = JSON.parse(event.body ?? "{}") as {
+        merchantLocationKey?: string;
+        address?: EbayInventoryLocationAddress;
+      };
+      if (!body.merchantLocationKey || !body.address) {
+        return json(400, { error: "merchantLocationKey_and_address_required" });
+      }
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      await adapter.createInventoryLocation(accessToken, body.merchantLocationKey, body.address);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "ebay_inventory_location_created",
+        entityType: "ebay_location",
+        entityId: body.merchantLocationKey,
+      });
+
+      return json(201, { merchantLocationKey: body.merchantLocationKey });
     }
 
     if (method === "GET" && path === "/admin/audit-log") {

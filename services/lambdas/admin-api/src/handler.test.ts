@@ -19,12 +19,21 @@ const getQueueUrlsMock = vi.fn(() => ({
 }));
 let fakeDb: unknown;
 const getDbMock = vi.fn(() => fakeDb);
+const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid" });
+const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
+const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
+const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
+const createEbayAdapterMock = vi.fn(() => ({ createInventoryLocation: createInventoryLocationMock }));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
+  listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
+  getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
+  createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -54,12 +63,18 @@ function createFakeDb(selectResults: unknown[]) {
   };
 }
 
-function makeEvent(method: string, path: string, query: Record<string, string> = {}): APIGatewayProxyEventV2 {
+function makeEvent(
+  method: string,
+  path: string,
+  query: Record<string, string> = {},
+  body?: unknown,
+): APIGatewayProxyEventV2 {
   return {
     version: "2.0",
     rawPath: path,
     rawQueryString: "",
     queryStringParameters: query,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
     requestContext: {
       http: { method, path, protocol: "HTTP/1.1", sourceIp: "0.0.0.0", userAgent: "test" },
       authorizer: { jwt: { claims: { email: "admin@example.com" }, scopes: [] } },
@@ -144,6 +159,50 @@ describe("admin-api handler", () => {
       { type: "ai_generate", productId: "p1" },
       expect.stringContaining("retry:e1:"),
     );
+  });
+
+  it("POST /admin/ebay/location creates the location and records an audit log entry", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/location", {}, {
+        merchantLocationKey: "osaka-main",
+        address: {
+          addressLine1: "Nagata 3-8-15-415",
+          city: "Osaka-shi Joto-ku",
+          stateOrProvince: "Osaka",
+          postalCode: "536-0022",
+          country: "JP",
+        },
+      }),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(createInventoryLocationMock).toHaveBeenCalledWith(
+      "token",
+      "osaka-main",
+      expect.objectContaining({ postalCode: "536-0022" }),
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "ebay_inventory_location_created", entityId: "osaka-main" }),
+    );
+  });
+
+  it("POST /admin/ebay/location returns 400 when address is missing", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/location", {}, { merchantLocationKey: "x" }));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("POST /admin/ebay/location returns 409 when no eBay account is connected", async () => {
+    fakeDb = createFakeDb([]);
+    listConnectedAccountIdsMock.mockResolvedValueOnce([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/location", {}, {
+        merchantLocationKey: "osaka-main",
+        address: { addressLine1: "a", city: "b", stateOrProvince: "c", postalCode: "d", country: "JP" },
+      }),
+    );
+    expect(res.statusCode).toBe(409);
   });
 
   it("returns 404 for an unknown route", async () => {
