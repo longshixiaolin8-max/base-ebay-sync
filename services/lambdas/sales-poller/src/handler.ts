@@ -14,15 +14,18 @@ import {
  * sync queue. The lookback window intentionally overlaps between runs — duplicate
  * events are safe because inventory-sync-worker dedupes on (channel, orderId, sku).
  *
- * eBay's Notification API has no direct "item sold" topic (verified against eBay's live
- * getTopics response) -- ebay-webhook triggers a narrower, faster version of this same
- * poll when eBay's LISTING topic signals a quantity change, but this broad scheduled poll
- * stays as the authoritative fallback for both channels.
+ * Neither channel offers a real "item sold" push signal: BASE has no webhook feature at
+ * all (confirmed against BASE's own help center), and eBay's Notification API has no
+ * direct "item sold" topic (verified live via getTopics) -- the closest signal, LISTING,
+ * needs a sell.listing[.read] scope this app's Sandbox keyset doesn't have access to yet
+ * (ebay-webhook is built and deployed for when that scope becomes available, but is
+ * currently dormant/unregistered). Until then, this 1-minute schedule is the practical
+ * substitute for real-time sync on both channels.
  */
 export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
-  const since = new Date(Date.now() - 15 * 60 * 1000); // 15 min lookback vs. a 5 min schedule
+  const since = new Date(Date.now() - 5 * 60 * 1000); // 5 min lookback vs. a 1 min schedule
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
   await pollChannelSales(new BaseAdapter(baseCreds), since, db, queues.inventorySync);

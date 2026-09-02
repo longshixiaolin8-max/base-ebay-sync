@@ -196,7 +196,10 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.ebay.grantRead(this.salesPollerFn);
     props.queues.inventorySync.grantSendMessages(this.salesPollerFn);
     new events.Rule(this, "SalesPollerSchedule", {
-      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      // 1 minute is EventBridge's finest rate() granularity. Shortened from 5 minutes as the
+      // practical near-real-time substitute for eBay's LISTING webhook, whose required
+      // sell.listing[.read] scope this app's Sandbox keyset does not currently have access to.
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new targets.LambdaFunction(this.salesPollerFn)],
     });
 
