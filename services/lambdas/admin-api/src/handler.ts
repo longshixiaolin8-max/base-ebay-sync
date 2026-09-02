@@ -173,6 +173,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { item });
     }
 
+    if (method === "GET" && path === "/admin/ebay/offer") {
+      const sku = event.queryStringParameters?.sku;
+      if (!sku) return json(400, { error: "sku_required" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const offer = await adapter.getRawOffer(accessToken, sku);
+      return json(200, { offer });
+    }
+
     if (method === "GET" && path === "/admin/ebay/category-suggestions") {
       const q = event.queryStringParameters?.q;
       if (!q) return json(400, { error: "q_required" });

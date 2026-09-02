@@ -210,6 +210,12 @@ export class EbayAdapter implements ChannelAdapter {
     return res.json();
   }
 
+  /** Raw offer payload (includes the public listingId once published) for a given SKU. */
+  async getRawOffer(accessToken: string, sku: string): Promise<unknown> {
+    const res = await this.authedFetch(accessToken, `/sell/inventory/v1/offer?sku=${sku}`);
+    return res.json();
+  }
+
   async createListing(accessToken: string, input: CreateListingInput): Promise<{ externalId: string }> {
     await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${input.sku}`, {
       method: "PUT",
