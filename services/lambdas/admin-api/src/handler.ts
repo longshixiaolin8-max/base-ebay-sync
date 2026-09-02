@@ -233,6 +233,86 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { topics });
     }
 
+    if (method === "GET" && path === "/admin/ebay/unmanaged-listings") {
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+
+      const trackedExternalIds = new Set(
+        (await db.select().from(channelListings).where(eq(channelListings.channel, "ebay")))
+          .map((l) => l.externalId)
+          .filter((id): id is string => id !== null),
+      );
+
+      const unmanaged: Array<{ externalId: string; title: string; suggestedProductId: string | null }> = [];
+      let cursor: string | undefined;
+      do {
+        const { items, nextCursor } = await adapter.listProducts(accessToken, { cursor });
+        for (const item of items) {
+          if (trackedExternalIds.has(item.externalId)) continue;
+
+          // Deterministic match only: our own product-fetch names every eBay SKU it creates
+          // "base-<BASE item id>". If a live eBay SKU happens to follow that exact pattern
+          // and a matching product_master row really exists, this is not a guess -- it is
+          // the same identifier our own pipeline would have used. Anything else is left null
+          // for a human to link explicitly rather than fuzzy-matched by title/image.
+          let suggestedProductId: string | null = null;
+          if (item.externalId.startsWith("base-")) {
+            const [match] = await db.select().from(productMaster).where(eq(productMaster.sku, item.externalId)).limit(1);
+            if (match) suggestedProductId = match.id;
+          }
+
+          unmanaged.push({ externalId: item.externalId, title: item.title, suggestedProductId });
+        }
+        cursor = nextCursor;
+      } while (cursor);
+
+      return json(200, { unmanagedListings: unmanaged });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/link-ebay-listing$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { externalId?: string };
+      if (!body.externalId) return json(400, { error: "externalId_required" });
+
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const [existing] = await db
+        .select()
+        .from(channelListings)
+        .where(and(eq(channelListings.productId, id), eq(channelListings.channel, "ebay")))
+        .limit(1);
+      if (existing) return json(409, { error: "product_already_has_an_ebay_listing" });
+
+      const [conflictingExternalId] = await db
+        .select()
+        .from(channelListings)
+        .where(and(eq(channelListings.channel, "ebay"), eq(channelListings.externalId, body.externalId)))
+        .limit(1);
+      if (conflictingExternalId) return json(409, { error: "ebay_listing_already_linked_to_another_product" });
+
+      await db.insert(channelListings).values({
+        productId: id,
+        channel: "ebay",
+        externalId: body.externalId,
+        status: "published",
+        lastSyncedAt: new Date(),
+      });
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "ebay_listing_linked",
+        entityType: "product",
+        entityId: id,
+        after: { externalId: body.externalId },
+      });
+
+      return json(201, { productId: id, externalId: body.externalId });
+    }
+
     if (method === "GET" && path === "/admin/ebay/category-suggestions") {
       const q = event.queryStringParameters?.q;
       if (!q) return json(400, { error: "q_required" });

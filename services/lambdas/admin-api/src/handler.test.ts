@@ -32,6 +32,7 @@ const createReturnPolicyMock = vi.fn().mockResolvedValue("rp-1");
 const createNotificationDestinationMock = vi.fn().mockResolvedValue({ destinationId: "dest-1" });
 const createNotificationSubscriptionMock = vi.fn().mockResolvedValue({ subscriptionId: "sub-1" });
 const updateNotificationConfigMock = vi.fn().mockResolvedValue(undefined);
+const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
@@ -43,6 +44,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createNotificationDestination: createNotificationDestinationMock,
   createNotificationSubscription: createNotificationSubscriptionMock,
   updateNotificationConfig: updateNotificationConfigMock,
+  listProducts: listProductsMock,
 }));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
@@ -80,6 +82,7 @@ function createFakeDb(selectResults: unknown[]) {
   return {
     select: () => chain(selectResults[i++]),
     update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
+    insert: vi.fn(() => ({ values: async () => undefined })),
   };
 }
 
@@ -269,6 +272,67 @@ describe("admin-api handler", () => {
       returnPolicyId: "rp-1",
     });
     expect(optInToBusinessPoliciesMock).toHaveBeenCalledWith("token");
+  });
+
+  it("GET /admin/ebay/unmanaged-listings finds eBay SKUs with no channel_listings row, deterministically matching our own naming pattern only", async () => {
+    listProductsMock.mockResolvedValueOnce({
+      items: [
+        { externalId: "base-tracked-1", title: "Already tracked" },
+        { externalId: "base-999", title: "Matches a real product_master row" },
+        { externalId: "hand-listed-sku", title: "Pre-existing, not ours" },
+      ],
+      nextCursor: undefined,
+    });
+    fakeDb = createFakeDb([
+      [{ externalId: "base-tracked-1" }], // tracked channel_listings(ebay) rows
+      [{ id: "product-999" }], // product_master lookup for base-999 -> match
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({
+      unmanagedListings: [
+        { externalId: "base-999", title: "Matches a real product_master row", suggestedProductId: "product-999" },
+        { externalId: "hand-listed-sku", title: "Pre-existing, not ours", suggestedProductId: null },
+      ],
+    });
+  });
+
+  it("POST /admin/products/{id}/link-ebay-listing links an unmanaged eBay SKU to a product", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1" }], [], []]); // product exists, no existing link, no conflict
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/product-1/link-ebay-listing", {}, { externalId: "hand-listed-sku" }),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body!)).toEqual({ productId: "product-1", externalId: "hand-listed-sku" });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "ebay_listing_linked", entityId: "product-1" }),
+    );
+  });
+
+  it("POST /admin/products/{id}/link-ebay-listing returns 404 for an unknown product", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/missing/link-ebay-listing", {}, { externalId: "sku-1" }),
+    );
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/link-ebay-listing returns 409 when the product already has an eBay listing", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1" }], [{ externalId: "already-linked" }]]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/product-1/link-ebay-listing", {}, { externalId: "sku-1" }),
+    );
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("POST /admin/products/{id}/link-ebay-listing returns 409 when the eBay SKU is already linked elsewhere", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1" }], [], [{ productId: "other-product" }]]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/product-1/link-ebay-listing", {}, { externalId: "sku-1" }),
+    );
+    expect(res.statusCode).toBe(409);
   });
 
   it("GET /admin/ebay/category-suggestions returns eBay's real category suggestions", async () => {
