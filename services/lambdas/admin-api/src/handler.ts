@@ -1,3 +1,4 @@
+import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { auditLog, channelListings, inventoryMaster, productMaster, syncErrors, syncJobs } from "@ai-ec/db";
 import {
@@ -335,6 +336,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const requiredAspects = await adapter.getRequiredItemAspects(appAccessToken, categoryId);
 
       return json(200, { categoryId, requiredAspects });
+    }
+
+    if (method === "GET" && path === "/admin/base/product") {
+      const itemId = event.queryStringParameters?.itemId;
+      if (!itemId) return json(400, { error: "itemId_required" });
+
+      const creds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
+      const adapter = new BaseAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, "base");
+      if (!accountId) return json(409, { error: "no_base_account_connected" });
+      const accessToken = await getValidAccessToken(db, adapter, accountId);
+
+      const product = await adapter.getProduct(accessToken, itemId);
+      return json(200, { product });
     }
 
     if (method === "GET" && path === "/admin/audit-log") {

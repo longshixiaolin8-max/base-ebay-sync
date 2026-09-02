@@ -107,6 +107,40 @@ describe("BaseAdapter", () => {
     expect(result.items[0]?.images).toEqual([]);
   });
 
+  it("getProduct fetches the detail endpoint with item_id as a path segment, not a query param", async () => {
+    // BASE's own reference (docs.thebase.in/docs/api/items/detail): GET /1/items/detail/:item_id.
+    // items/detail also carries the full up-to-20 image slots, unlike items/search which is
+    // capped at 5 -- verified live via a real product that has 6 photos on BASE but only 5
+    // came through listProducts.
+    const fetchMock = mockFetchOnce({
+      item: {
+        item_id: "item-6photos",
+        title: "Bracelet",
+        detail: "<p>desc</p>",
+        price: 5000,
+        stock: 1,
+        modified: 1788157953,
+        img1_origin: "https://img.example/1.jpg",
+        img2_origin: "https://img.example/2.jpg",
+        img3_origin: "https://img.example/3.jpg",
+        img4_origin: "https://img.example/4.jpg",
+        img5_origin: "https://img.example/5.jpg",
+        img6_origin: "https://img.example/6.jpg",
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const result = await adapter.getProduct("token", "item-6photos");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-base.test/1/items/detail/item-6photos",
+      expect.anything(),
+    );
+    expect(result?.images).toHaveLength(6);
+    expect(result?.images[5]).toBe("https://img.example/6.jpg");
+  });
+
   it("refuses createListing since BASE is always the source, not a sync target", async () => {
     const adapter = new BaseAdapter(config);
     await expect(adapter.createListing("token", {} as never)).rejects.toThrow(/not supported/);

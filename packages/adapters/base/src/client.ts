@@ -158,7 +158,9 @@ export class BaseAdapter implements ChannelAdapter {
   }
 
   async getProduct(accessToken: string, externalId: string): Promise<ExternalProduct | null> {
-    const res = await this.authedFetch(accessToken, `/1/items/detail?item_id=${externalId}`);
+    // item_id is a path segment here, not a query param -- verified against BASE's own
+    // reference (docs.thebase.in/docs/api/items/detail): GET /1/items/detail/:item_id.
+    const res = await this.authedFetch(accessToken, `/1/items/detail/${externalId}`);
     const json = (await res.json()) as { item: BaseItem | null };
     return json.item ? mapBaseItem(json.item) : null;
   }

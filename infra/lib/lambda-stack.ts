@@ -289,6 +289,9 @@ export class LambdaStack extends cdk.Stack {
     // connected account's OAuth token (already granted to every fn via makeFn) to create
     // the seller's ship-from location.
     props.appCredentialSecrets.ebay.grantRead(this.adminApiFn);
+    // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
+    // to fetch a single item's raw detail response (e.g. to compare against product_master).
+    props.appCredentialSecrets.base.grantRead(this.adminApiFn);
 
     // productImagesBucket is provisioned for a future image re-hosting step (see README
     // follow-ups); no lambda writes to it yet, so no grant is issued until one does.

@@ -35,7 +35,13 @@ export async function handler(): Promise<void> {
     do {
       const { items, nextCursor } = await adapter.listProducts(accessToken, { cursor });
       for (const item of items) {
-        await upsertProduct(db, queues, item);
+        // BASE's list endpoint (items/search) only ever returns up to 5 image slots
+        // (img1_origin..img5_origin) by design -- confirmed against BASE's own API
+        // reference -- while items/detail supports the full 20. A real product with 6+
+        // photos would silently lose the rest if we trusted the list response's images,
+        // so re-fetch the authoritative per-item detail before upserting.
+        const detail = await adapter.getProduct(accessToken, item.externalId);
+        await upsertProduct(db, queues, detail ?? item);
       }
       cursor = nextCursor;
     } while (cursor);

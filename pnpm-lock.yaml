@@ -183,6 +183,9 @@ importers:
 
   services/lambdas/admin-api:
     dependencies:
+      '@ai-ec/adapter-base':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/base
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
