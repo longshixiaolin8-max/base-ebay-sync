@@ -111,6 +111,40 @@ export class EbayAdapter implements ChannelAdapter {
     });
   }
 
+  /**
+   * App-level token (client_credentials grant) for eBay APIs that don't act on behalf of a
+   * connected seller, such as Taxonomy category lookups. No user OAuth connection required.
+   */
+  async getApplicationAccessToken(): Promise<string> {
+    const { accessToken } = await this.requestToken({
+      grant_type: "client_credentials",
+      scope: "https://api.ebay.com/oauth/api_scope",
+    });
+    return accessToken;
+  }
+
+  /**
+   * Looks up real eBay category IDs for a free-text query via the Taxonomy API, so category
+   * selection is a verified lookup rather than a guessed number.
+   */
+  async suggestCategories(
+    appAccessToken: string,
+    query: string,
+  ): Promise<Array<{ ebayCategoryId: string; label: string }>> {
+    const res = await fetch(
+      `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=${encodeURIComponent(query)}`,
+      { headers: { Authorization: `Bearer ${appAccessToken}` } },
+    );
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const json = (await res.json()) as {
+      categorySuggestions?: Array<{ category: { categoryId: string; categoryName: string } }>;
+    };
+    return (json.categorySuggestions ?? []).map((s) => ({
+      ebayCategoryId: s.category.categoryId,
+      label: s.category.categoryName,
+    }));
+  }
+
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);

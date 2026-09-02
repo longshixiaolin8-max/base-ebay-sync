@@ -135,6 +135,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(201, { merchantLocationKey: body.merchantLocationKey });
     }
 
+    if (method === "GET" && path === "/admin/ebay/category-suggestions") {
+      const q = event.queryStringParameters?.q;
+      if (!q) return json(400, { error: "q_required" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const appAccessToken = await adapter.getApplicationAccessToken();
+      const suggestions = await adapter.suggestCategories(appAccessToken, q);
+
+      return json(200, { suggestions });
+    }
+
     if (method === "GET" && path === "/admin/audit-log") {
       const rows = await db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200);
       return json(200, { auditLog: rows });

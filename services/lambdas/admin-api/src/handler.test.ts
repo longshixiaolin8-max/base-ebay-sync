@@ -23,7 +23,13 @@ const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid" });
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
-const createEbayAdapterMock = vi.fn(() => ({ createInventoryLocation: createInventoryLocationMock }));
+const getApplicationAccessTokenMock = vi.fn().mockResolvedValue("app-token");
+const suggestCategoriesMock = vi.fn().mockResolvedValue([{ ebayCategoryId: "10364", label: "Bracelets" }]);
+const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
+  createInventoryLocation: createInventoryLocationMock,
+  getApplicationAccessToken: getApplicationAccessTokenMock,
+  suggestCategories: suggestCategoriesMock,
+}));
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
@@ -203,6 +209,20 @@ describe("admin-api handler", () => {
       }),
     );
     expect(res.statusCode).toBe(409);
+  });
+
+  it("GET /admin/ebay/category-suggestions returns eBay's real category suggestions", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/category-suggestions", { q: "silver bracelet" }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ suggestions: [{ ebayCategoryId: "10364", label: "Bracelets" }] });
+    expect(suggestCategoriesMock).toHaveBeenCalledWith("app-token", "silver bracelet");
+  });
+
+  it("GET /admin/ebay/category-suggestions returns 400 without a query", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/category-suggestions"));
+    expect(res.statusCode).toBe(400);
   });
 
   it("returns 404 for an unknown route", async () => {

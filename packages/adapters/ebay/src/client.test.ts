@@ -88,6 +88,40 @@ describe("EbayAdapter", () => {
     expect(inventoryCallBody.product.aspects.Material).toBeUndefined();
   });
 
+  it("gets an application access token via client_credentials", async () => {
+    const tokenMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "app-token", expires_in: 7200 }));
+    vi.stubGlobal("fetch", tokenMock);
+
+    const adapter = new EbayAdapter(config);
+    const token = await adapter.getApplicationAccessToken();
+
+    expect(token).toBe("app-token");
+    const body = (tokenMock.mock.calls[0]?.[1] as RequestInit).body as URLSearchParams;
+    expect(body.get("grant_type")).toBe("client_credentials");
+  });
+
+  it("suggests real eBay categories for a query via the Taxonomy API", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        categorySuggestions: [
+          { category: { categoryId: "10364", categoryName: "Bracelets" } },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const suggestions = await adapter.suggestCategories("app-token", "silver bracelet");
+
+    expect(suggestions).toEqual([{ ebayCategoryId: "10364", label: "Bracelets" }]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=silver"),
+      expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
+    );
+  });
+
   it("creates an inventory location with the given address", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
