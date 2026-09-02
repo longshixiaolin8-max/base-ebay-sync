@@ -29,11 +29,11 @@ jobs:
       - name: Lint
         run: pnpm -r --if-present run lint
 
-      - name: Typecheck
-        run: pnpm -r --if-present run typecheck
-
       - name: Build
         run: pnpm -r --if-present run build
+
+      - name: Typecheck
+        run: pnpm -r --if-present run typecheck
 
       - name: Test
         run: pnpm -r --if-present run test
