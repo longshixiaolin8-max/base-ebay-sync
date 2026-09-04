@@ -69,6 +69,24 @@ class EbayApiError extends Error {
 }
 
 /**
+ * Item #3 of the second hardening round ("自動ロールバック -- 誤同期した場合、直前の
+ * 正常状態へ自動復元"). updateListing() makes two independent eBay API calls (the
+ * inventory_item content PUT, then a separate offer price PUT) -- if the first succeeds
+ * and the second fails, the live listing is left showing a new title/condition/quantity
+ * next to a stale price, a real inconsistency a buyer could see. When that happens,
+ * updateListing() reverts the content PUT back to what it was a moment before (the exact
+ * state it already fetched to build the update) and throws this instead of the raw error,
+ * so the caller knows a rollback happened and can record it -- the update still counts as
+ * failed and flows through the normal sync_errors/retry path either way.
+ */
+export class EbayPartialUpdateRolledBackError extends Error {
+  constructor(readonly cause: Error) {
+    super(`eBay listing update partially applied then rolled back to its prior state: ${cause.message}`);
+    this.name = "EbayPartialUpdateRolledBackError";
+  }
+}
+
+/**
  * ChannelAdapter implementation for eBay, built on the Sell Inventory API
  * (inventory_item + offer + publish) and the Sell Fulfillment API (orders).
  *
@@ -394,6 +412,9 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async updateListing(accessToken: string, externalId: string, input: UpdateListingInput): Promise<void> {
+    let contentPutApplied = false;
+    let priorInventoryItemBody: Record<string, unknown> | undefined;
+
     if (
       input.titleEn !== undefined ||
       input.descriptionHtmlEn !== undefined ||
@@ -409,6 +430,21 @@ export class EbayAdapter implements ChannelAdapter {
       // changed here is carried over instead of dropped.
       const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
       const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
+      // The exact same body, but with every field defaulted to its pre-update value --
+      // i.e. a full no-op restore of "current" -- kept in case the price PUT below fails
+      // and this content half needs to be rolled back (see EbayPartialUpdateRolledBackError).
+      priorInventoryItemBody = {
+        availability: {
+          shipToLocationAvailability: { quantity: current.availability?.shipToLocationAvailability?.quantity ?? 0 },
+        },
+        condition: current.condition,
+        product: {
+          title: current.product?.title,
+          description: current.product?.description,
+          imageUrls: current.product?.imageUrls,
+          aspects: current.product?.aspects,
+        },
+      };
       await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
         method: "PUT",
         body: JSON.stringify({
@@ -426,17 +462,27 @@ export class EbayAdapter implements ChannelAdapter {
           },
         }),
       });
+      contentPutApplied = true;
     }
 
     if (input.priceUsd !== undefined) {
-      const offerId = await this.findOfferId(accessToken, externalId);
-      if (offerId) {
-        await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}`, {
+      try {
+        const offerId = await this.findOfferId(accessToken, externalId);
+        if (offerId) {
+          await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
+            }),
+          });
+        }
+      } catch (err) {
+        if (!contentPutApplied || !priorInventoryItemBody) throw err; // nothing was applied, nothing to roll back
+        await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
           method: "PUT",
-          body: JSON.stringify({
-            pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
-          }),
+          body: JSON.stringify(priorInventoryItemBody),
         });
+        throw new EbayPartialUpdateRolledBackError(err as Error);
       }
     }
   }

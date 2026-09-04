@@ -1,4 +1,4 @@
-import type { EbayAdapter } from "@ai-ec/adapter-ebay";
+import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
@@ -448,5 +448,21 @@ describe("update", () => {
     await update(db, adapter, "token", "p1", "base-1");
 
     expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedPriceJpy: product.priceJpy }));
+  });
+
+  it("records an audit log when the adapter reports it auto-rolled-back a partial update, and still propagates the failure", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const rollbackError = new EbayPartialUpdateRolledBackError(new Error("offer PUT failed"));
+    const updateListing = vi.fn().mockRejectedValue(rollbackError);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
+    ).rejects.toBe(rollbackError);
+
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "auto_rollback_applied", entityId: "p1" }),
+    );
   });
 });

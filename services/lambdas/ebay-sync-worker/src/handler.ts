@@ -1,4 +1,4 @@
-import type { EbayAdapter } from "@ai-ec/adapter-ebay";
+import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import { buildIdempotencyKey, findMissingRequiredAspects, withIdempotency } from "@ai-ec/core";
 import {
   aiListingDraft,
@@ -323,19 +323,36 @@ export async function update(
       )
     : undefined;
 
-  await adapter.updateListing(accessToken, externalId, {
-    titleEn: draft?.titleEn,
-    descriptionHtmlEn: draft?.descriptionHtmlEn,
-    images: product.images,
-    priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
-    quantity: availableQuantity,
-    condition: draft?.condition,
-    // Always resend the draft's item specifics, not just when they change -- eBay's PUT
-    // inventory_item is a full replace, so relying on EbayAdapter's "carry over the
-    // current value" fallback alone means a required aspect wiped by any earlier failed
-    // PUT never gets restored. The DB draft is the source of truth here.
-    itemSpecifics: draft?.itemSpecifics,
-  });
+  try {
+    await adapter.updateListing(accessToken, externalId, {
+      titleEn: draft?.titleEn,
+      descriptionHtmlEn: draft?.descriptionHtmlEn,
+      images: product.images,
+      priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
+      quantity: availableQuantity,
+      condition: draft?.condition,
+      // Always resend the draft's item specifics, not just when they change -- eBay's PUT
+      // inventory_item is a full replace, so relying on EbayAdapter's "carry over the
+      // current value" fallback alone means a required aspect wiped by any earlier failed
+      // PUT never gets restored. The DB draft is the source of truth here.
+      itemSpecifics: draft?.itemSpecifics,
+    });
+  } catch (err) {
+    if (err instanceof EbayPartialUpdateRolledBackError) {
+      // Item #3 of the second hardening round ("自動ロールバック"): the adapter already
+      // reverted eBay's live listing content back to its prior state. Record that it
+      // happened; this update attempt still counts as failed and flows through the same
+      // sync_errors/retry path as any other update failure below.
+      await recordAuditLog(db, {
+        actor: "system:ebay-sync-worker",
+        action: "auto_rollback_applied",
+        entityType: "product",
+        entityId: productId,
+        after: { reason: err.message },
+      });
+    }
+    throw err;
+  }
 
   await db
     .update(channelListings)
