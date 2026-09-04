@@ -5,7 +5,10 @@ const applySaleMock = vi.fn();
 
 vi.mock("@ai-ec/db", () => ({
   applySale: (...args: unknown[]) => applySaleMock(...args),
+  calculateChannelAvailableQuantity: (trueQuantity: number, buffer: number, channel: string, sourceChannel: string) =>
+    channel === sourceChannel ? trueQuantity : Math.max(0, trueQuantity - buffer),
   channelListings: {},
+  inventoryMaster: {},
   productMaster: {},
 }));
 
@@ -25,12 +28,15 @@ vi.mock("@ai-ec/lambda-shared", () => ({
 
 const { processSale } = await import("./handler.js");
 
-function createFakeDb(otherListing: unknown) {
+/** Each entry is the array `select().from().where().limit()` resolves to for one call,
+ *  consumed in call order — mirrors the real query sequence in processSale(). */
+function createFakeDb(selectResults: unknown[][]) {
+  let i = 0;
   return {
     select: () => ({
       from: () => ({
         where: () => ({
-          limit: async () => (otherListing ? [otherListing] : []),
+          limit: async () => selectResults[i++] ?? [],
         }),
       }),
     }),
@@ -57,12 +63,12 @@ describe("processSale", () => {
     recordAuditLogMock.mockClear();
   });
 
-  it("does nothing when the product is still in stock", async () => {
+  it("does nothing when the product is still in stock and no listing is published on the other channel", async () => {
     applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb(undefined), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[]]), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
     expect(applySaleMock).toHaveBeenCalledWith(expect.anything(), "product-1", 1, {
@@ -77,7 +83,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb({ status: "published", externalId: "ebay-sku-1" }), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([]), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
   });
@@ -88,7 +94,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await processSale(
-      createFakeDb({ status: "published", externalId: "ebay-sku-1" }),
+      createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]),
       adapters as never,
       "product-1",
       sale,
@@ -107,8 +113,59 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb(undefined), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[]]), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
+  });
+
+  it("pushes the freshly-reduced available quantity to the other channel immediately, rather than waiting for its next sync cycle", async () => {
+    // Item #3 of the second hardening round ("即時同期"). A partial decrement (still in
+    // stock) used to just return here and let the other channel's own scheduled/triggered
+    // sync eventually notice — now it pushes right away.
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    const setInventory = vi.fn().mockResolvedValue(undefined);
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await processSale(
+      createFakeDb([
+        [{ status: "published", externalId: "ebay-sku-1" }], // otherListing (channel_listings)
+        [{ sourceChannel: "base" }], // product_master
+        [{ quantity: 4, safetyStockBuffer: 1 }], // inventory_master
+      ]),
+      adapters as never,
+      "product-1",
+      sale,
+    );
+
+    expect(setInventory).toHaveBeenCalledTimes(1);
+    expect(setInventory).toHaveBeenCalledWith("token-123", "ebay-sku-1", 3); // 4 true stock - 1 buffer
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "inventory_immediate_sync_after_sale", after: expect.objectContaining({ pushedQuantity: 3 }) }),
+    );
+  });
+
+  it("does not push or fail the sale when a partial decrement's other-channel account isn't connected", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    listConnectedAccountIdsMock.mockResolvedValueOnce([]);
+    const setInventory = vi.fn();
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await expect(
+      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+    ).resolves.toBeUndefined();
+
+    expect(setInventory).not.toHaveBeenCalled();
+  });
+
+  it("still throws when sold-out and the other channel's account isn't connected (nothing to zero it out with)", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 0, soldOut: true, alreadyZero: false });
+    listConnectedAccountIdsMock.mockResolvedValueOnce([]);
+    const setInventory = vi.fn();
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await expect(
+      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+    ).rejects.toThrow(/no ebay account is connected/);
   });
 });

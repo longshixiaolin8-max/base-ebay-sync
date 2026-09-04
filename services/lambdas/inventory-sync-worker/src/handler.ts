@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
-import { applySale, channelListings, productMaster } from "@ai-ec/db";
+import { applySale, calculateChannelAvailableQuantity, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -90,9 +90,9 @@ export async function processSale(
     externalEventId: sale.externalOrderId,
   });
 
-  if (!result.soldOut || result.alreadyZero) {
-    // Either still in stock, or another event already drove this to zero first — the
-    // double-sell guard: whichever sale arrives first wins, this one is a safe no-op.
+  if (result.alreadyZero) {
+    // Another event already drove this to zero first — the double-sell guard: whichever
+    // sale arrives first wins, this one is a safe no-op.
     return;
   }
 
@@ -103,30 +103,58 @@ export async function processSale(
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)))
     .limit(1);
 
-  await db.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
+  if (result.soldOut) {
+    await db.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
+  }
 
   if (otherListing?.status === "published" && otherListing.externalId) {
     const [accountId] = await listConnectedAccountIds(db, otherChannel);
     if (!accountId) {
-      throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
+      if (result.soldOut) {
+        throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
+      }
+      // Not sold out — the other channel's own next scheduled/triggered sync will catch
+      // this up once it's reconnected; nothing urgent enough to fail the whole sale event.
+      return;
     }
     const adapter = adapters[otherChannel];
     const accessToken = await getValidAccessToken(db, adapter, accountId);
-    await adapter.setInventory(accessToken, otherListing.externalId, 0);
+
+    let pushedQuantity: number;
+    if (result.soldOut) {
+      pushedQuantity = 0;
+    } else {
+      // Item #3 of the second hardening round (即時同期, a reinterpretation of 在庫予約ロック:
+      // neither BASE nor eBay gives this platform a hook to reserve stock *before* a buyer
+      // checks out on either one, so the closest real equivalent is shrinking the window a
+      // sale sits unreflected on the other channel). Previously a partial decrement (still
+      // in stock afterward) just waited for that channel's own next scheduled/triggered sync
+      // cycle to notice — push the freshly-reduced available quantity right now instead.
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
+      const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+      if (!product || !inventory) return; // nothing to push without both rows
+      pushedQuantity = calculateChannelAvailableQuantity(
+        inventory.quantity,
+        inventory.safetyStockBuffer,
+        otherChannel,
+        product.sourceChannel,
+      );
+    }
+    await adapter.setInventory(accessToken, otherListing.externalId, pushedQuantity);
 
     await db
       .update(channelListings)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)));
-  }
 
-  await recordAuditLog(db, {
-    actor: "system:inventory-sync-worker",
-    action: "inventory_zeroed_due_to_sale",
-    entityType: "product",
-    entityId: productId,
-    after: { soldOnChannel: sale.channel, orderId: sale.externalOrderId, zeroedChannel: otherChannel },
-  });
+    await recordAuditLog(db, {
+      actor: "system:inventory-sync-worker",
+      action: result.soldOut ? "inventory_zeroed_due_to_sale" : "inventory_immediate_sync_after_sale",
+      entityType: "product",
+      entityId: productId,
+      after: { soldOnChannel: sale.channel, orderId: sale.externalOrderId, syncedChannel: otherChannel, pushedQuantity },
+    });
+  }
 }
 
 function notImplementedAdapter(channel: string): ChannelAdapter {
