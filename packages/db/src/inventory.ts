@@ -237,6 +237,57 @@ export async function reconstructInventory(db: Database, productId: string): Pro
   };
 }
 
+export interface ApplyReconstructedInventoryResult extends ReconstructInventoryResult {
+  applied: boolean;
+}
+
+/**
+ * The recovery half of item #3 ("状態再構築"): calls reconstructInventory() and, only if it
+ * found real drift, writes the recomputed quantity back via the same CAS pattern as
+ * applySale/applyBaseStockReport (so it can't clobber a sale that lands mid-repair). This
+ * is always human-triggered (an admin action), never automatic — matching this platform's
+ * existing "never silently auto-correct inventory drift" stance (see inventory-diff-check),
+ * since drift can also mean an undiscovered bug, not just an expected delay.
+ */
+export async function applyReconstructedInventory(
+  db: Database,
+  productId: string,
+  maxRetries = 5,
+): Promise<ApplyReconstructedInventoryResult> {
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    const result = await reconstructInventory(db, productId);
+    if (!result.drifted) {
+      return { ...result, applied: false };
+    }
+
+    const [current] = await db
+      .select()
+      .from(inventoryMaster)
+      .where(eq(inventoryMaster.productId, productId))
+      .limit(1);
+    if (!current) throw new Error(`inventory_master row missing for product ${productId}`);
+
+    const updated = await db
+      .update(inventoryMaster)
+      .set({
+        quantity: result.reconstructedQuantity,
+        soldOut: result.reconstructedQuantity === 0,
+        version: current.version + 1,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(inventoryMaster.productId, productId), eq(inventoryMaster.version, current.version)))
+      .returning();
+
+    if (updated.length > 0) {
+      return { ...result, applied: true };
+    }
+    // version mismatch — a sale (or another repair) landed between our read and our write;
+    // loop and recompute from scratch rather than blindly retrying the stale write.
+  }
+
+  throw new ConcurrentInventoryUpdateError(productId);
+}
+
 /**
  * Availability advertised to a channel, after safety-stock withholding. Reduces — never
  * eliminates — the window where the same physical last unit could be sold on two channels

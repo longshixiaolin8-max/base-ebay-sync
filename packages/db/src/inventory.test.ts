@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Database } from "./client.js";
 import {
   applyBaseStockReport,
+  applyReconstructedInventory,
   applySale,
   calculateChannelAvailableQuantity,
   ConcurrentInventoryUpdateError,
@@ -327,5 +328,54 @@ describe("reconstructInventory", () => {
     const result = await reconstructInventory(asDatabase(db), "p1");
 
     expect(result.reconstructedQuantity).toBe(0); // floored, never negative
+  });
+});
+
+describe("applyReconstructedInventory", () => {
+  it("does nothing and reports applied:false when there is no drift", async () => {
+    const row = new FakeInventoryRow(3);
+    const db = fakeDb(row);
+    db.events.push({
+      productId: "p1",
+      channel: "base",
+      eventType: "base_stock_report",
+      sequenceAt: new Date("2026-09-01T00:00:00Z"),
+      absoluteQuantity: 3,
+      applied: true,
+    });
+
+    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+
+    expect(result).toMatchObject({ applied: false, drifted: false, reconstructedQuantity: 3 });
+    expect(row.version).toBe(0); // no write attempted
+  });
+
+  it("writes the reconstructed quantity back via CAS when drift is found", async () => {
+    const row = new FakeInventoryRow(10); // counter wrong, history says 3
+    const db = fakeDb(row);
+    db.events.push(
+      {
+        productId: "p1",
+        channel: "base",
+        eventType: "base_stock_report",
+        sequenceAt: new Date("2026-09-01T00:00:00Z"),
+        absoluteQuantity: 5,
+        applied: true,
+      },
+      {
+        productId: "p1",
+        channel: "ebay",
+        eventType: "sale",
+        sequenceAt: new Date("2026-09-02T00:00:00Z"),
+        quantityDelta: 2,
+        applied: true,
+      },
+    );
+
+    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+
+    expect(result).toMatchObject({ applied: true, drifted: true, reconstructedQuantity: 3, currentQuantity: 10 });
+    expect(row.quantity).toBe(3);
+    expect(row.version).toBe(1);
   });
 });

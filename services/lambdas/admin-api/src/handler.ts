@@ -3,12 +3,14 @@ import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { ItemCondition } from "@ai-ec/core";
 import {
   aiListingDraft,
+  applyReconstructedInventory,
   auditLog,
   channelListings,
   computeDynamicSafetyStock,
   computeSyncConfidence,
   inventoryMaster,
   productMaster,
+  reconstructInventory,
   syncErrors,
   syncJobs,
 } from "@ai-ec/db";
@@ -420,6 +422,34 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const recommendation = await computeDynamicSafetyStock(db, id, channel);
       return json(200, recommendation);
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/reconstruct-inventory$/.test(path)) {
+      // Preview only -- never writes. Item #3 ("状態再構築"): shows what the event history
+      // says quantity should be, vs. what's currently stored, without touching either.
+      const id = path.split("/")[3]!;
+      const preview = await reconstructInventory(db, id);
+      return json(200, preview);
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/reconstruct-inventory$/.test(path)) {
+      // Applies the recomputed quantity, but only if reconstructInventory found real drift
+      // -- always a human-triggered admin action, never automatic (see applyReconstructedInventory).
+      const id = path.split("/")[3]!;
+      const result = await applyReconstructedInventory(db, id);
+
+      if (result.applied) {
+        await recordAuditLog(db, {
+          actor: actorFromEvent(event),
+          action: "inventory_reconstructed",
+          entityType: "product",
+          entityId: id,
+          before: { quantity: result.currentQuantity },
+          after: { quantity: result.reconstructedQuantity, eventsReplayed: result.eventsReplayed },
+        });
+      }
+
+      return json(200, result);
     }
 
     if (method === "GET" && path === "/admin/audit-log") {

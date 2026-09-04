@@ -22,6 +22,21 @@ const computeDynamicSafetyStockMock = vi.fn().mockResolvedValue({
   riskMultiplier: 1,
 });
 
+const reconstructInventoryMock = vi.fn().mockResolvedValue({
+  reconstructedQuantity: 3,
+  currentQuantity: 3,
+  drifted: false,
+  eventsReplayed: 1,
+});
+
+const applyReconstructedInventoryMock = vi.fn().mockResolvedValue({
+  reconstructedQuantity: 3,
+  currentQuantity: 3,
+  drifted: false,
+  eventsReplayed: 1,
+  applied: false,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
@@ -31,6 +46,8 @@ vi.mock("@ai-ec/db", () => ({
   auditLog: {},
   computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
   computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
+  reconstructInventory: (...args: unknown[]) => reconstructInventoryMock(...args),
+  applyReconstructedInventory: (...args: unknown[]) => applyReconstructedInventoryMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -396,6 +413,49 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", recommendedBuffer: 2 });
     expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, "product-1", "ebay");
+  });
+
+  it("GET /admin/products/{id}/reconstruct-inventory previews drift without writing anything", async () => {
+    reconstructInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 10,
+      drifted: true,
+      eventsReplayed: 2,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/reconstruct-inventory"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ reconstructedQuantity: 3, currentQuantity: 10, drifted: true });
+    expect(applyReconstructedInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it("POST /admin/products/{id}/reconstruct-inventory applies drift and records an audit log entry", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 10,
+      drifted: true,
+      eventsReplayed: 2,
+      applied: true,
+    });
+    const res = await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ applied: true, reconstructedQuantity: 3 });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "inventory_reconstructed", entityId: "product-1" }),
+    );
+  });
+
+  it("POST /admin/products/{id}/reconstruct-inventory records no audit log when there was no drift to apply", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 3,
+      drifted: false,
+      eventsReplayed: 1,
+      applied: false,
+    });
+    const res = await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(res.statusCode).toBe(200);
+    expect(recordAuditLogMock).not.toHaveBeenCalled();
   });
 
   it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {
