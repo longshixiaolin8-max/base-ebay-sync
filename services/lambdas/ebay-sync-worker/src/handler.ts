@@ -6,6 +6,8 @@ import {
   channelListings,
   computeDynamicSafetyStock,
   computeSyncConfidence,
+  detectInventoryAnomaly,
+  detectPriceAnomaly,
   inventoryMaster,
   productMaster,
 } from "@ai-ec/db";
@@ -96,6 +98,40 @@ async function enforceContentConsistency(
   );
 }
 
+/**
+ * Item #1 of the second hardening round ("異常検知 -- 通常と違う在庫変動・価格変動・
+ * 大量注文を自動検知して同期を一時停止"). Checks the product's recent inventory activity
+ * (mass orders, an abnormally large single sale, a suspicious BASE stock swing — see
+ * detectInventoryAnomaly) and the price about to be pushed to eBay against the last price
+ * actually synced there (detectPriceAnomaly). Either one blocks the sync — better to pause
+ * and let a human look than to propagate what might be corrupted source data or a burst that
+ * looks more like fraud/error than organic demand.
+ */
+async function enforceAnomalyFree(
+  db: ReturnType<typeof getDb>,
+  productId: string,
+  candidatePriceJpy: number,
+  lastSyncedPriceJpy: number | null,
+): Promise<void> {
+  const inventoryCheck = await detectInventoryAnomaly(db, productId);
+  const priceCheck = detectPriceAnomaly(lastSyncedPriceJpy, candidatePriceJpy);
+  const reasons = [...inventoryCheck.reasons, ...(priceCheck.reason ? [priceCheck.reason] : [])];
+  if (reasons.length === 0) return;
+
+  await recordAuditLog(db, {
+    actor: "system:ebay-sync-worker",
+    action: "anomaly_detected_sync_paused",
+    entityType: "product",
+    entityId: productId,
+    after: { reasons },
+  });
+
+  throw new Error(
+    `Sync paused for product ${productId}: unusual activity detected (${reasons.join("; ")}). ` +
+      `Retry once the underlying data looks normal again.`,
+  );
+}
+
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
   const idempotencyStore = getIdempotencyStore();
@@ -177,6 +213,13 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
 
   await enforceContentConsistency(db, product, draft);
 
+  const [listing] = await db
+    .select()
+    .from(channelListings)
+    .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
+    .limit(1);
+  await enforceAnomalyFree(db, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
+
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
 
   const priceUsd = draft.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : product.priceJpy * USD_PER_JPY_FALLBACK;
@@ -220,7 +263,14 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
 
   await db
     .update(channelListings)
-    .set({ externalId, status: "published", lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
+    .set({
+      externalId,
+      status: "published",
+      lastSyncedAt: new Date(),
+      lastError: null,
+      lastSyncedPriceJpy: product.priceJpy,
+      updatedAt: new Date(),
+    })
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")));
 
   await db.update(productMaster).set({ status: "active", updatedAt: new Date() }).where(eq(productMaster.id, productId));
@@ -253,6 +303,13 @@ export async function update(
 
   await enforceContentConsistency(db, product, draft);
 
+  const [listing] = await db
+    .select()
+    .from(channelListings)
+    .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
+    .limit(1);
+  await enforceAnomalyFree(db, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
+
   // Also re-syncs quantity (with the safety-stock buffer applied) on every content update —
   // previously only the initial publish ever pushed a quantity, so a BASE restock after
   // publish never reached eBay at all.
@@ -282,7 +339,12 @@ export async function update(
 
   await db
     .update(channelListings)
-    .set({ lastSyncedAt: new Date(), lastError: null, updatedAt: new Date() })
+    .set({
+      lastSyncedAt: new Date(),
+      lastError: null,
+      lastSyncedPriceJpy: product.priceJpy,
+      updatedAt: new Date(),
+    })
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")));
 
   await recordAuditLog(db, {

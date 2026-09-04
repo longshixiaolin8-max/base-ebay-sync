@@ -64,6 +64,12 @@ export const channelListings = pgTable(
     status: text("status").notNull().default("pending"),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     lastError: text("last_error"),
+    /**
+     * The price this platform actually pushed to this channel the last time a sync
+     * succeeded. Doubles as the anomaly-detection baseline ("does this new price look sane
+     * next to what we last told the channel?") and, for eBay, the auto-rollback target.
+     */
+    lastSyncedPriceJpy: integer("last_synced_price_jpy"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

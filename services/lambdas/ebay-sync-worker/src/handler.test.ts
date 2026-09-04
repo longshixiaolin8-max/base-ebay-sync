@@ -22,6 +22,16 @@ const computeDynamicSafetyStockMock = vi.fn().mockResolvedValue({
   riskMultiplier: 1,
 });
 
+const detectInventoryAnomalyMock = vi.fn().mockResolvedValue({
+  productId: "p1",
+  anomalous: false,
+  reasons: [],
+  windowMinutes: 60,
+  saleEventCount: 0,
+  maxSingleSaleQuantity: 0,
+});
+const detectPriceAnomalyMock = vi.fn().mockReturnValue({ anomalous: false });
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   aiListingDraft: {},
@@ -31,6 +41,8 @@ vi.mock("@ai-ec/db", () => ({
     channel === sourceChannel ? trueQuantity : Math.max(0, trueQuantity - buffer),
   computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
   computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
+  detectInventoryAnomaly: (...args: unknown[]) => detectInventoryAnomalyMock(...args),
+  detectPriceAnomaly: (...args: unknown[]) => detectPriceAnomalyMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -55,12 +67,15 @@ function chain(result: unknown) {
   return self;
 }
 
-function createFakeDb(selectResults: unknown[]) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- test double, deliberately untyped like the Database it stands in for
+function createFakeDb(selectResults: unknown[]): any {
   let i = 0;
+  const setMock = vi.fn(() => ({ where: async () => undefined }));
   return {
     select: () => chain(selectResults[i++]),
-    update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
-  } as never;
+    update: vi.fn(() => ({ set: setMock })),
+    setMock,
+  };
 }
 
 const product = { id: "p1", sku: "base-1", sourceChannel: "base", priceJpy: 10000, contentHash: "hash-1" };
@@ -73,6 +88,9 @@ const draft = {
   condition: "USED_GOOD",
   sourceContentHash: "hash-1",
 };
+// The channel_listings row read for the anomaly-detection price baseline. null
+// lastSyncedPriceJpy (never synced before) is always non-anomalous.
+const listing = { lastSyncedPriceJpy: null };
 
 describe("publish", () => {
   beforeEach(() => {
@@ -99,6 +117,17 @@ describe("publish", () => {
       confidenceScore: 100,
       riskMultiplier: 1,
     });
+    detectInventoryAnomalyMock.mockClear();
+    detectInventoryAnomalyMock.mockResolvedValue({
+      productId: "p1",
+      anomalous: false,
+      reasons: [],
+      windowMinutes: 60,
+      saleEventCount: 0,
+      maxSingleSaleQuantity: 0,
+    });
+    detectPriceAnomalyMock.mockClear();
+    detectPriceAnomalyMock.mockReturnValue({ anomalous: false });
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -124,7 +153,7 @@ describe("publish", () => {
     const inventory = { quantity: 5, safetyStockBuffer: 999 }; // stale stored value must be ignored
     const adapter = ebayAdapter();
 
-    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 3 }));
     expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(expect.anything(), "p1", "ebay");
@@ -144,7 +173,7 @@ describe("publish", () => {
     const inventory = { quantity: 1, safetyStockBuffer: 0 };
     const adapter = ebayAdapter();
 
-    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 0 }));
   });
@@ -154,7 +183,7 @@ describe("publish", () => {
     const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
     // draft.itemSpecifics is {} — neither Brand nor Type is set.
 
-    await expect(publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
+    await expect(publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
       /Brand, Type/,
     );
     expect(adapter.createListing).not.toHaveBeenCalled();
@@ -165,7 +194,7 @@ describe("publish", () => {
     const draftWithSpecifics = { ...draft, itemSpecifics: { Brand: "Unbranded", Type: "Bracelet" } };
     const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
 
-    await publish(createFakeDb([[product], [draftWithSpecifics], [inventory]]), adapter, "token", "p1");
+    await publish(createFakeDb([[product], [draftWithSpecifics], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
@@ -174,7 +203,7 @@ describe("publish", () => {
     const inventory = { quantity: 5, safetyStockBuffer: 0 };
     const adapter = ebayAdapter();
 
-    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ condition: "USED_GOOD" }));
   });
@@ -192,7 +221,7 @@ describe("publish", () => {
     const inventory = { quantity: 5, safetyStockBuffer: 0 };
     const adapter = ebayAdapter();
 
-    await expect(publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
+    await expect(publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
       /sync confidence too low/,
     );
     expect(adapter.createListing).not.toHaveBeenCalled();
@@ -211,7 +240,7 @@ describe("publish", () => {
     const inventory = { quantity: 5, safetyStockBuffer: 0 };
     const adapter = ebayAdapter();
 
-    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
@@ -222,7 +251,7 @@ describe("publish", () => {
     const adapter = ebayAdapter();
 
     await expect(
-      publish(createFakeDb([[product], [staleDraft], [inventory]]), adapter, "token", "p1"),
+      publish(createFakeDb([[product], [staleDraft], [listing], [inventory]]), adapter, "token", "p1"),
     ).rejects.toThrow(/no longer matches the product's current content/);
 
     expect(adapter.createListing).not.toHaveBeenCalled();
@@ -235,6 +264,56 @@ describe("publish", () => {
       expect.anything(),
       expect.objectContaining({ action: "ai_draft_stale_regeneration_triggered", entityId: "p1" }),
     );
+  });
+
+  it("blocks publish and records an audit log when inventory activity looks anomalous", async () => {
+    detectInventoryAnomalyMock.mockResolvedValue({
+      productId: "p1",
+      anomalous: true,
+      reasons: ["6 sale events for this product in the last 60min (threshold 5)"],
+      windowMinutes: 60,
+      saleEventCount: 6,
+      maxSingleSaleQuantity: 1,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await expect(
+      publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1"),
+    ).rejects.toThrow(/unusual activity detected/);
+
+    expect(adapter.createListing).not.toHaveBeenCalled();
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "anomaly_detected_sync_paused", entityId: "p1" }),
+    );
+  });
+
+  it("blocks publish when the candidate price swings too far from the last price synced to eBay", async () => {
+    detectPriceAnomalyMock.mockReturnValue({
+      anomalous: true,
+      reason: "price would change 90% versus the last price synced to eBay",
+    });
+    const staleListing = { lastSyncedPriceJpy: 100000 };
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await expect(
+      publish(createFakeDb([[product], [draft], [staleListing], [inventory]]), adapter, "token", "p1"),
+    ).rejects.toThrow(/unusual activity detected/);
+
+    expect(adapter.createListing).not.toHaveBeenCalled();
+    expect(detectPriceAnomalyMock).toHaveBeenCalledWith(100000, product.priceJpy);
+  });
+
+  it("records the just-published price as the new lastSyncedPriceJpy baseline", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+    const db = createFakeDb([[product], [draft], [listing], [inventory]]);
+
+    await publish(db, adapter, "token", "p1");
+
+    expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedPriceJpy: product.priceJpy }));
   });
 });
 
@@ -253,6 +332,17 @@ describe("update", () => {
       confidenceScore: 100,
       riskMultiplier: 1,
     });
+    detectInventoryAnomalyMock.mockClear();
+    detectInventoryAnomalyMock.mockResolvedValue({
+      productId: "p1",
+      anomalous: false,
+      reasons: [],
+      windowMinutes: 60,
+      saleEventCount: 0,
+      maxSingleSaleQuantity: 0,
+    });
+    detectPriceAnomalyMock.mockClear();
+    detectPriceAnomalyMock.mockReturnValue({ anomalous: false });
   });
 
   it("re-syncs the quantity, buffered by the freshly-computed dynamic safety stock", async () => {
@@ -270,7 +360,7 @@ describe("update", () => {
     const updateListing = vi.fn().mockResolvedValue(undefined);
     const adapter = { updateListing } as unknown as EbayAdapter;
 
-    await update(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1", "base-1");
+    await update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1");
 
     expect(updateListing).toHaveBeenCalledWith(
       "token",
@@ -285,7 +375,7 @@ describe("update", () => {
     const adapter = { updateListing } as unknown as EbayAdapter;
     const draftWithSpecifics = { ...draft, itemSpecifics: { Type: "Bracelet", Brand: "Unbranded" } };
 
-    await update(createFakeDb([[product], [draftWithSpecifics], [inventory]]), adapter, "token", "p1", "base-1");
+    await update(createFakeDb([[product], [draftWithSpecifics], [listing], [inventory]]), adapter, "token", "p1", "base-1");
 
     expect(updateListing).toHaveBeenCalledWith(
       "token",
@@ -298,7 +388,7 @@ describe("update", () => {
     const updateListing = vi.fn().mockResolvedValue(undefined);
     const adapter = { updateListing } as unknown as EbayAdapter;
 
-    await update(createFakeDb([[product], [draft], []]), adapter, "token", "p1", "base-1");
+    await update(createFakeDb([[product], [draft], [listing], []]), adapter, "token", "p1", "base-1");
 
     expect(updateListing).toHaveBeenCalledWith("token", "base-1", expect.objectContaining({ quantity: undefined }));
   });
@@ -310,7 +400,7 @@ describe("update", () => {
     const adapter = { updateListing } as unknown as EbayAdapter;
 
     await expect(
-      update(createFakeDb([[product], [staleDraft], [inventory]]), adapter, "token", "p1", "base-1"),
+      update(createFakeDb([[product], [staleDraft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
     ).rejects.toThrow(/no longer matches the product's current content/);
 
     expect(updateListing).not.toHaveBeenCalled();
@@ -323,5 +413,40 @@ describe("update", () => {
       expect.anything(),
       expect.objectContaining({ action: "ai_draft_stale_regeneration_triggered", entityId: "p1" }),
     );
+  });
+
+  it("blocks update and records an audit log when inventory activity looks anomalous", async () => {
+    detectInventoryAnomalyMock.mockResolvedValue({
+      productId: "p1",
+      anomalous: true,
+      reasons: ["a single sale event moved 15 units (threshold 10)"],
+      windowMinutes: 60,
+      saleEventCount: 1,
+      maxSingleSaleQuantity: 15,
+    });
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
+    ).rejects.toThrow(/unusual activity detected/);
+
+    expect(updateListing).not.toHaveBeenCalled();
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "anomaly_detected_sync_paused", entityId: "p1" }),
+    );
+  });
+
+  it("records the just-updated price as the new lastSyncedPriceJpy baseline", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+    const db = createFakeDb([[product], [draft], [listing], [inventory]]);
+
+    await update(db, adapter, "token", "p1", "base-1");
+
+    expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedPriceJpy: product.priceJpy }));
   });
 });
