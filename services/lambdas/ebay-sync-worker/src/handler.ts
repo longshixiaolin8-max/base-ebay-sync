@@ -9,6 +9,8 @@ import {
   detectInventoryAnomaly,
   detectPriceAnomaly,
   inventoryMaster,
+  predictStockoutRisk,
+  PREEMPTIVE_STOCKOUT_BUFFER,
   productMaster,
 } from "@ai-ec/db";
 import {
@@ -47,16 +49,25 @@ const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
  * Item #2 of the hardening list ("動的安全在庫"): recomputes and persists the product's
  * safety-stock buffer from real sales velocity + eBay sync confidence (see
  * computeDynamicSafetyStock) on every sync cycle, rather than trusting a value someone
- * set by hand once. Returns the freshly-computed buffer so the caller doesn't need to
- * re-read the row it just wrote.
+ * set by hand once.
+ *
+ * Also applies item #5 of the second hardening round ("予測型在庫制御"): on top of that
+ * buffer, withholds one extra unit specifically for a product whose current sales pace
+ * would sell it out within days (see predictStockoutRisk) -- not every product, only the
+ * ones actually at risk, since a slow-moving item doesn't need the extra caution.
+ *
+ * Returns the freshly-computed total buffer so the caller doesn't need to re-read the row
+ * it just wrote.
  */
 async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId: string): Promise<number> {
   const { recommendedBuffer } = await computeDynamicSafetyStock(db, productId, "ebay");
+  const risk = await predictStockoutRisk(db, productId);
+  const totalBuffer = recommendedBuffer + (risk.highRisk ? PREEMPTIVE_STOCKOUT_BUFFER : 0);
   await db
     .update(inventoryMaster)
-    .set({ safetyStockBuffer: recommendedBuffer, updatedAt: new Date() })
+    .set({ safetyStockBuffer: totalBuffer, updatedAt: new Date() })
     .where(eq(inventoryMaster.productId, productId));
-  return recommendedBuffer;
+  return totalBuffer;
 }
 
 /**

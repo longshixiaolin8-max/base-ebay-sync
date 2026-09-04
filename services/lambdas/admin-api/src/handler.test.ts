@@ -37,6 +37,15 @@ const applyReconstructedInventoryMock = vi.fn().mockResolvedValue({
   applied: false,
 });
 
+const predictStockoutRiskMock = vi.fn().mockResolvedValue({
+  productId: "product-1",
+  daysUntilStockout: null,
+  highRisk: false,
+  salesPerDay: 0,
+  currentQuantity: 5,
+  windowDays: 7,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
@@ -48,6 +57,7 @@ vi.mock("@ai-ec/db", () => ({
   computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
   reconstructInventory: (...args: unknown[]) => reconstructInventoryMock(...args),
   applyReconstructedInventory: (...args: unknown[]) => applyReconstructedInventoryMock(...args),
+  predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -413,6 +423,21 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", recommendedBuffer: 2 });
     expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, "product-1", "ebay");
+  });
+
+  it("GET /admin/products/{id}/stockout-risk returns the predicted stockout risk for a product", async () => {
+    predictStockoutRiskMock.mockResolvedValueOnce({
+      productId: "product-1",
+      daysUntilStockout: 1.5,
+      highRisk: true,
+      salesPerDay: 2,
+      currentQuantity: 3,
+      windowDays: 7,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/stockout-risk"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", highRisk: true, daysUntilStockout: 1.5 });
+    expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, "product-1");
   });
 
   it("GET /admin/products/{id}/reconstruct-inventory previews drift without writing anything", async () => {

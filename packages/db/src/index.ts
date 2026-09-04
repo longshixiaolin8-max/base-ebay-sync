@@ -6,3 +6,4 @@ export * from "./sync-confidence.js";
 export * from "./dynamic-safety-stock.js";
 export * from "./anomaly-detection.js";
 export * from "./rate-control.js";
+export * from "./stockout-risk.js";

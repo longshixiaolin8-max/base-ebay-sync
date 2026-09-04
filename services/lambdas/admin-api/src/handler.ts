@@ -9,6 +9,7 @@ import {
   computeDynamicSafetyStock,
   computeSyncConfidence,
   inventoryMaster,
+  predictStockoutRisk,
   productMaster,
   reconstructInventory,
   syncErrors,
@@ -422,6 +423,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const recommendation = await computeDynamicSafetyStock(db, id, channel);
       return json(200, recommendation);
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/stockout-risk$/.test(path)) {
+      // Item #5 of the second hardening round ("予測型在庫制御"): shows the same
+      // stockout-risk prediction resolveSafetyStockBuffer already applies during sync,
+      // so an operator can see *why* a product's public quantity was cut further.
+      const id = path.split("/")[3]!;
+      const risk = await predictStockoutRisk(db, id);
+      return json(200, risk);
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/reconstruct-inventory$/.test(path)) {

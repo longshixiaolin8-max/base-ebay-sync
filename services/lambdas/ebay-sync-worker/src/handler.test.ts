@@ -31,6 +31,14 @@ const detectInventoryAnomalyMock = vi.fn().mockResolvedValue({
   maxSingleSaleQuantity: 0,
 });
 const detectPriceAnomalyMock = vi.fn().mockReturnValue({ anomalous: false });
+const predictStockoutRiskMock = vi.fn().mockResolvedValue({
+  productId: "p1",
+  daysUntilStockout: null,
+  highRisk: false,
+  salesPerDay: 0,
+  currentQuantity: 5,
+  windowDays: 7,
+});
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -43,6 +51,8 @@ vi.mock("@ai-ec/db", () => ({
   computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
   detectInventoryAnomaly: (...args: unknown[]) => detectInventoryAnomalyMock(...args),
   detectPriceAnomaly: (...args: unknown[]) => detectPriceAnomalyMock(...args),
+  predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
+  PREEMPTIVE_STOCKOUT_BUFFER: 1,
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -128,6 +138,15 @@ describe("publish", () => {
     });
     detectPriceAnomalyMock.mockClear();
     detectPriceAnomalyMock.mockReturnValue({ anomalous: false });
+    predictStockoutRiskMock.mockClear();
+    predictStockoutRiskMock.mockResolvedValue({
+      productId: "p1",
+      daysUntilStockout: null,
+      highRisk: false,
+      salesPerDay: 0,
+      currentQuantity: 5,
+      windowDays: 7,
+    });
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -157,6 +176,33 @@ describe("publish", () => {
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 3 }));
     expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(expect.anything(), "p1", "ebay");
+  });
+
+  it("withholds one extra unit on top of the dynamic buffer for a product predicted to sell out soon", async () => {
+    predictStockoutRiskMock.mockResolvedValue({
+      productId: "p1",
+      daysUntilStockout: 1.5,
+      highRisk: true,
+      salesPerDay: 2,
+      currentQuantity: 3,
+      windowDays: 7,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
+
+    // recommendedBuffer 0 (default mock) + 1 preemptive unit = quantity 4, not 5
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 4 }));
+  });
+
+  it("does not withhold an extra unit for a product that is not predicted to sell out soon", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 5 }));
   });
 
   it("pushes 0 rather than negative when the computed buffer exceeds true stock", async () => {
@@ -343,6 +389,15 @@ describe("update", () => {
     });
     detectPriceAnomalyMock.mockClear();
     detectPriceAnomalyMock.mockReturnValue({ anomalous: false });
+    predictStockoutRiskMock.mockClear();
+    predictStockoutRiskMock.mockResolvedValue({
+      productId: "p1",
+      daysUntilStockout: null,
+      highRisk: false,
+      salesPerDay: 0,
+      currentQuantity: 5,
+      windowDays: 7,
+    });
   });
 
   it("re-syncs the quantity, buffered by the freshly-computed dynamic safety stock", async () => {
@@ -367,6 +422,25 @@ describe("update", () => {
       "base-1",
       expect.objectContaining({ quantity: 5, condition: "USED_GOOD" }),
     );
+  });
+
+  it("withholds one extra unit on top of the dynamic buffer for a product predicted to sell out soon", async () => {
+    predictStockoutRiskMock.mockResolvedValue({
+      productId: "p1",
+      daysUntilStockout: 0.5,
+      highRisk: true,
+      salesPerDay: 4,
+      currentQuantity: 2,
+      windowDays: 7,
+    });
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1");
+
+    // recommendedBuffer 0 (default mock) + 1 preemptive unit = quantity 7, not 8
+    expect(updateListing).toHaveBeenCalledWith("token", "base-1", expect.objectContaining({ quantity: 7 }));
   });
 
   it("always resends item specifics, so a required aspect wiped by an earlier failed PUT gets restored", async () => {
