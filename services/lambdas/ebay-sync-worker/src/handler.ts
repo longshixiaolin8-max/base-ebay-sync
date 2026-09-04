@@ -1,6 +1,13 @@
 import type { EbayAdapter } from "@ai-ec/adapter-ebay";
 import { buildIdempotencyKey, findMissingRequiredAspects, withIdempotency } from "@ai-ec/core";
-import { aiListingDraft, calculateChannelAvailableQuantity, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
+import {
+  aiListingDraft,
+  calculateChannelAvailableQuantity,
+  channelListings,
+  computeSyncConfidence,
+  inventoryMaster,
+  productMaster,
+} from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -21,6 +28,15 @@ interface EbaySyncMessage {
 }
 
 const USD_PER_JPY_FALLBACK = 0.0067; // used only if the AI draft has no suggestedPriceUsd
+
+/**
+ * Below this eBay sync-confidence score (see computeSyncConfidence), new publishes are
+ * paused -- item #4 of the hardening list ("信頼度が低い時だけ出品数を制限"). Existing
+ * listings still get their price/quantity/condition updates either way: pausing those too
+ * would let real drift (a sellout, a price change) go unreflected while eBay is already
+ * unreliable, making things worse rather than safer.
+ */
+const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
@@ -80,6 +96,16 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 };
 
 export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, accessToken: string, productId: string) {
+  const confidence = await computeSyncConfidence(db, "ebay");
+  if (confidence.score < SYNC_CONFIDENCE_PUBLISH_THRESHOLD) {
+    throw new Error(
+      `eBay sync confidence too low to publish new listings (score ${confidence.score}/100 over the last ` +
+        `${confidence.windowHours}h: ${confidence.successCount} synced / ${confidence.failureCount} failed, ` +
+        `${confidence.outOfOrderEventCount}/${confidence.totalEventCount} inventory events out of order). ` +
+        `Publishing is paused until sync quality recovers; existing listings still receive updates.`,
+    );
+  }
+
   const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
   if (!product) throw new Error(`product not found: ${productId}`);
 

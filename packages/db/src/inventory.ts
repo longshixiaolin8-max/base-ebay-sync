@@ -131,6 +131,13 @@ export async function applyBaseStockReport(
     }
 
     if (current.lastBaseSeq && sequenceAt.getTime() <= current.lastBaseSeq.getTime()) {
+      // Equal timestamp just means "BASE hasn't changed since we last synced" -- a normal,
+      // frequent outcome of polling, not a problem. Only a strictly older sequence is an
+      // actual reversal (a delayed/retried delivery arriving after a newer one already
+      // applied). Distinguishing the two matters for computeSyncConfidence, which must not
+      // let ordinary no-op polls masquerade as sync-quality problems.
+      const isGenuineReversal = sequenceAt.getTime() < current.lastBaseSeq.getTime();
+      const reason = isGenuineReversal ? "out_of_order" : "unchanged";
       await db.insert(inventoryEvents).values({
         productId,
         channel: "base",
@@ -138,9 +145,9 @@ export async function applyBaseStockReport(
         sequenceAt,
         absoluteQuantity: reportedQuantity,
         applied: false,
-        skippedReason: "out_of_order",
+        skippedReason: reason,
       });
-      return { applied: false, quantity: current.quantity, reason: "out_of_order" };
+      return { applied: false, quantity: current.quantity, reason };
     }
 
     const reconciledQuantity = Math.max(0, reportedQuantity - current.ebaySoldSinceBaseSync);

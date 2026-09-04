@@ -1,6 +1,16 @@
 import type { EbayAdapter } from "@ai-ec/adapter-ebay";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
+  channel: "ebay",
+  score: 100,
+  windowHours: 24,
+  successCount: 0,
+  failureCount: 0,
+  outOfOrderEventCount: 0,
+  totalEventCount: 0,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   aiListingDraft: {},
@@ -8,6 +18,7 @@ vi.mock("@ai-ec/db", () => ({
   inventoryMaster: {},
   calculateChannelAvailableQuantity: (trueQuantity: number, buffer: number, channel: string, sourceChannel: string) =>
     channel === sourceChannel ? trueQuantity : Math.max(0, trueQuantity - buffer),
+  computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -48,7 +59,19 @@ const draft = {
 };
 
 describe("publish", () => {
-  beforeEach(() => recordAuditLogMock.mockClear());
+  beforeEach(() => {
+    recordAuditLogMock.mockClear();
+    computeSyncConfidenceMock.mockClear();
+    computeSyncConfidenceMock.mockResolvedValue({
+      channel: "ebay",
+      score: 100,
+      windowHours: 24,
+      successCount: 0,
+      failureCount: 0,
+      outOfOrderEventCount: 0,
+      totalEventCount: 0,
+    });
+  });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
     return {
@@ -105,6 +128,43 @@ describe("publish", () => {
     await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ condition: "USED_GOOD" }));
+  });
+
+  it("blocks a new publish when eBay's sync confidence is too low, without calling createListing", async () => {
+    computeSyncConfidenceMock.mockResolvedValue({
+      channel: "ebay",
+      score: 20,
+      windowHours: 24,
+      successCount: 1,
+      failureCount: 4,
+      outOfOrderEventCount: 0,
+      totalEventCount: 0,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await expect(publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
+      /sync confidence too low/,
+    );
+    expect(adapter.createListing).not.toHaveBeenCalled();
+  });
+
+  it("publishes normally once confidence is back above the threshold", async () => {
+    computeSyncConfidenceMock.mockResolvedValue({
+      channel: "ebay",
+      score: 41,
+      windowHours: 24,
+      successCount: 9,
+      failureCount: 1,
+      outOfOrderEventCount: 0,
+      totalEventCount: 0,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
 });
 

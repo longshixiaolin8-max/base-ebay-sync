@@ -1,7 +1,16 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { ItemCondition } from "@ai-ec/core";
-import { aiListingDraft, auditLog, channelListings, inventoryMaster, productMaster, syncErrors, syncJobs } from "@ai-ec/db";
+import {
+  aiListingDraft,
+  auditLog,
+  channelListings,
+  computeSyncConfidence,
+  inventoryMaster,
+  productMaster,
+  syncErrors,
+  syncJobs,
+} from "@ai-ec/db";
 import {
   createEbayAdapter,
   enqueue,
@@ -391,6 +400,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const product = await adapter.getProduct(accessToken, itemId);
       return json(200, { product });
+    }
+
+    if (method === "GET" && path === "/admin/sync/confidence") {
+      const channel = event.queryStringParameters?.channel;
+      if (!channel) return json(400, { error: "channel_required" });
+      const windowHours = event.queryStringParameters?.windowHours
+        ? Number(event.queryStringParameters.windowHours)
+        : undefined;
+
+      const confidence = await computeSyncConfidence(db, channel, windowHours);
+      return json(200, confidence);
     }
 
     if (method === "GET" && path === "/admin/audit-log") {

@@ -1,6 +1,16 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
+  channel: "ebay",
+  score: 100,
+  windowHours: 24,
+  successCount: 0,
+  failureCount: 0,
+  outOfOrderEventCount: 0,
+  totalEventCount: 0,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
@@ -8,6 +18,7 @@ vi.mock("@ai-ec/db", () => ({
   syncErrors: {},
   syncJobs: {},
   auditLog: {},
+  computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -335,6 +346,27 @@ describe("admin-api handler", () => {
       makeEvent("POST", "/admin/products/product-1/link-ebay-listing", {}, { externalId: "sku-1" }),
     );
     expect(res.statusCode).toBe(409);
+  });
+
+  it("GET /admin/sync/confidence returns the computed score for a channel", async () => {
+    computeSyncConfidenceMock.mockResolvedValueOnce({
+      channel: "ebay",
+      score: 63,
+      windowHours: 24,
+      successCount: 2,
+      failureCount: 2,
+      outOfOrderEventCount: 1,
+      totalEventCount: 4,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/sync/confidence", { channel: "ebay" }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ channel: "ebay", score: 63 });
+    expect(computeSyncConfidenceMock).toHaveBeenCalledWith(fakeDb, "ebay", undefined);
+  });
+
+  it("GET /admin/sync/confidence returns 400 without a channel", async () => {
+    const res = await callHandler(makeEvent("GET", "/admin/sync/confidence"));
+    expect(res.statusCode).toBe(400);
   });
 
   it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {

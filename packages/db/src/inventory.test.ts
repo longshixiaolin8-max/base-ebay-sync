@@ -256,6 +256,18 @@ describe("applyBaseStockReport", () => {
     expect(row.version).toBe(0); // no write attempted
   });
 
+  it("distinguishes 'nothing changed on BASE' from a genuine reversal", async () => {
+    // A report with the *same* sequence as the watermark just means BASE hasn't changed
+    // since the last poll -- an ordinary, frequent outcome, not a sync-quality problem.
+    const row = new FakeInventoryRow(5);
+    const t1 = new Date("2026-09-02T00:00:00Z");
+    row.lastBaseSeq = t1;
+
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 5, t1);
+
+    expect(result).toEqual({ applied: false, quantity: 5, reason: "unchanged" });
+  });
+
   it("floors the reconciled quantity at 0 rather than going negative", async () => {
     const row = new FakeInventoryRow(1);
     row.ebaySoldSinceBaseSync = 5; // more eBay sales recorded than BASE now reports in stock
