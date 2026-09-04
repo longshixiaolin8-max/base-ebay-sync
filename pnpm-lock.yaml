@@ -442,6 +442,9 @@ importers:
       '@ai-ec/core':
         specifier: workspace:*
         version: link:../../../packages/core
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
       '@ai-ec/lambda-shared':
         specifier: workspace:*
         version: link:../shared

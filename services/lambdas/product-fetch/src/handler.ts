@@ -1,6 +1,13 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { contentHash, type ExternalProduct } from "@ai-ec/core";
-import { applyBaseStockReport, channelListings, inventoryMaster, productMaster, type Database } from "@ai-ec/db";
+import {
+  applyBaseStockReport,
+  channelListings,
+  inventoryMaster,
+  productMaster,
+  shouldThrottleChannel,
+  type Database,
+} from "@ai-ec/db";
 import {
   enqueue,
   getAppCredentials,
@@ -8,6 +15,7 @@ import {
   getQueueUrls,
   getValidAccessToken,
   listConnectedAccountIds,
+  recordAuditLog,
 } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
 
@@ -24,6 +32,24 @@ interface BaseAppCredentials {
 export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
+
+  // Item #4 of the second hardening round ("チャネル別レート制御"). CDK owns this
+  // Lambda's EventBridge schedule, so rewriting the cron expression at runtime would just
+  // get reset on the next deploy; skipping this cycle's poll when BASE's API has recently
+  // rate-limited or errored a lot is the effective-frequency-reduction that's actually safe
+  // to do from inside the function itself.
+  const throttle = await shouldThrottleChannel(db, "base");
+  if (throttle.throttle) {
+    await recordAuditLog(db, {
+      actor: "system:product-fetch",
+      action: "poll_skipped_due_to_throttle",
+      entityType: "channel",
+      entityId: "base",
+      after: { reasons: throttle.reasons },
+    });
+    return;
+  }
+
   const creds = await getAppCredentials<BaseAppCredentials>("base");
   const adapter = new BaseAdapter(creds);
 
