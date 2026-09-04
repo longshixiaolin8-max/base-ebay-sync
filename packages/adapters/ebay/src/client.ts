@@ -24,7 +24,7 @@ interface EbayTokenResponse {
 
 interface EbayInventoryItem {
   sku: string;
-  product: { title: string; description: string; imageUrls: string[] };
+  product: { title: string; description: string; imageUrls: string[]; aspects?: Record<string, string[]> };
   availability: { shipToLocationAvailability: { quantity: number } };
 }
 
@@ -245,6 +245,29 @@ export class EbayAdapter implements ChannelAdapter {
     return (json.aspects ?? []).filter((a) => a.aspectConstraint?.aspectRequired).map((a) => a.localizedAspectName);
   }
 
+  /**
+   * Real, per-category allowed condition values (eBay's Sell Metadata API) -- some
+   * categories (e.g. fine jewelry) only support a subset of the generic ConditionEnum,
+   * and publishing an unsupported one fails with errorId 25059. Never guess; verify.
+   */
+  async getConditionPolicies(
+    appAccessToken: string,
+    categoryId: string,
+  ): Promise<Array<{ conditionId: string; conditionDescription: string }>> {
+    const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
+    const res = await fetch(
+      `${this.apiBaseUrl}/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=categoryIds:{${encodeURIComponent(categoryId)}}`,
+      { headers: { Authorization: `Bearer ${appAccessToken}` } },
+    );
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const json = (await res.json()) as {
+      itemConditionPolicies?: Array<{
+        itemConditions?: Array<{ conditionId: string; conditionDescription: string }>;
+      }>;
+    };
+    return json.itemConditionPolicies?.[0]?.itemConditions ?? [];
+  }
+
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);
@@ -376,12 +399,14 @@ export class EbayAdapter implements ChannelAdapter {
       input.descriptionHtmlEn !== undefined ||
       input.images !== undefined ||
       input.quantity !== undefined ||
-      input.condition !== undefined
+      input.condition !== undefined ||
+      input.itemSpecifics !== undefined
     ) {
-      // Fetch the raw current item (not the mapped ExternalProduct) so we can carry over
-      // its real `condition` when the caller doesn't specify one -- never default a
-      // condition update to "NEW", which would silently overwrite a correct used/vintage
-      // condition already on file.
+      // eBay's PUT inventory_item is a full replace, not a merge -- any field we omit is
+      // cleared, not left as-is (confirmed live: an update that only touched quantity had
+      // silently wiped the listing's required "Type" aspect, breaking republish with
+      // errorId 25002). Fetch the raw current item so every field not explicitly being
+      // changed here is carried over instead of dropped.
       const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
       const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
       await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
@@ -397,7 +422,7 @@ export class EbayAdapter implements ChannelAdapter {
             title: input.titleEn ?? current.product?.title,
             description: input.descriptionHtmlEn ?? current.product?.description,
             imageUrls: input.images ?? current.product?.imageUrls,
-            aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : undefined,
+            aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : current.product?.aspects,
           },
         }),
       });

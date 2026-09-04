@@ -125,6 +125,21 @@ describe("update", () => {
     );
   });
 
+  it("always resends item specifics, so a required aspect wiped by an earlier failed PUT gets restored", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 3 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+    const draftWithSpecifics = { ...draft, itemSpecifics: { Type: "Bracelet", Brand: "Unbranded" } };
+
+    await update(createFakeDb([[product], [draftWithSpecifics], [inventory]]), adapter, "token", "p1", "base-1");
+
+    expect(updateListing).toHaveBeenCalledWith(
+      "token",
+      "base-1",
+      expect.objectContaining({ itemSpecifics: { Type: "Bracelet", Brand: "Unbranded" } }),
+    );
+  });
+
   it("leaves quantity undefined when there is no inventory_master row yet", async () => {
     const updateListing = vi.fn().mockResolvedValue(undefined);
     const adapter = { updateListing } as unknown as EbayAdapter;

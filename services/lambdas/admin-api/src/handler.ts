@@ -1,6 +1,7 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
-import { auditLog, channelListings, inventoryMaster, productMaster, syncErrors, syncJobs } from "@ai-ec/db";
+import { ItemCondition } from "@ai-ec/core";
+import { aiListingDraft, auditLog, channelListings, inventoryMaster, productMaster, syncErrors, syncJobs } from "@ai-ec/db";
 import {
   createEbayAdapter,
   enqueue,
@@ -71,6 +72,34 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       return json(202, { status: "publish_queued" });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-condition$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { condition?: string };
+      const parsed = ItemCondition.safeParse(body.condition);
+      if (!parsed.success) return json(400, { error: "invalid_condition", validValues: ItemCondition.options });
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(eq(aiListingDraft.productId, id))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      await db.update(aiListingDraft).set({ condition: parsed.data }).where(eq(aiListingDraft.id, draft.id));
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "ai_draft_condition_corrected",
+        entityType: "ai_listing_draft",
+        entityId: draft.id,
+        before: { condition: draft.condition },
+        after: { condition: parsed.data },
+      });
+
+      return json(200, { productId: id, condition: parsed.data });
     }
 
     if (method === "GET" && path === "/admin/sync-errors") {
@@ -336,6 +365,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const requiredAspects = await adapter.getRequiredItemAspects(appAccessToken, categoryId);
 
       return json(200, { categoryId, requiredAspects });
+    }
+
+    if (method === "GET" && path === "/admin/ebay/condition-policies") {
+      const categoryId = event.queryStringParameters?.categoryId;
+      if (!categoryId) return json(400, { error: "categoryId_required" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const appAccessToken = await adapter.getApplicationAccessToken();
+      const conditions = await adapter.getConditionPolicies(appAccessToken, categoryId);
+
+      return json(200, { categoryId, conditions });
     }
 
     if (method === "GET" && path === "/admin/base/product") {

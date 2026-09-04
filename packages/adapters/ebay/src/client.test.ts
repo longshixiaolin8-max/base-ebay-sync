@@ -413,6 +413,35 @@ describe("EbayAdapter", () => {
     expect(body.condition).toBe("USED_GOOD");
   });
 
+  it("updateListing carries over existing item-specific aspects when none are specified", async () => {
+    // Regression: eBay's PUT inventory_item is a full replace, not a merge. A quantity-only
+    // update that omitted `aspects` had silently wiped a category-required aspect (Type),
+    // breaking the listing with errorId 25002 on the next republish -- confirmed live.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_EXCELLENT",
+          product: {
+            title: "Existing Title",
+            description: "<p>existing</p>",
+            imageUrls: [],
+            aspects: { Type: ["Bracelet"], Brand: ["Unbranded"] },
+          },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { quantity: 4 });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.product.aspects).toEqual({ Type: ["Bracelet"], Brand: ["Unbranded"] });
+  });
+
   it("updateListing makes no inventory_item call when nothing relevant changed", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

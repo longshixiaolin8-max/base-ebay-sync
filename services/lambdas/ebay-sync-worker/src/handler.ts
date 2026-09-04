@@ -179,6 +179,11 @@ export async function update(
     priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
     quantity: availableQuantity,
     condition: draft?.condition,
+    // Always resend the draft's item specifics, not just when they change -- eBay's PUT
+    // inventory_item is a full replace, so relying on EbayAdapter's "carry over the
+    // current value" fallback alone means a required aspect wiped by any earlier failed
+    // PUT never gets restored. The DB draft is the source of truth here.
+    itemSpecifics: draft?.itemSpecifics,
   });
 
   await db

@@ -50,7 +50,7 @@ Produce a JSON object with exactly these fields:
   "itemSpecifics": { [aspectName: string]: string | null },
   "seoKeywords": string[],
   "suggestedPriceUsd": number | null,
-  "condition": "NEW"|"LIKE_NEW"|"NEW_OTHER"|"NEW_WITH_DEFECTS"|"CERTIFIED_REFURBISHED"|"EXCELLENT_REFURBISHED"|"VERY_GOOD_REFURBISHED"|"GOOD_REFURBISHED"|"SELLER_REFURBISHED"|"USED_EXCELLENT"|"USED_VERY_GOOD"|"USED_GOOD"|"USED_ACCEPTABLE"|"FOR_PARTS_OR_NOT_WORKING",
+  "condition": "NEW"|"LIKE_NEW"|"NEW_OTHER"|"NEW_WITH_DEFECTS"|"CERTIFIED_REFURBISHED"|"EXCELLENT_REFURBISHED"|"VERY_GOOD_REFURBISHED"|"GOOD_REFURBISHED"|"SELLER_REFURBISHED"|"USED_EXCELLENT"|"USED_VERY_GOOD"|"USED_GOOD"|"USED_ACCEPTABLE"|"FOR_PARTS_OR_NOT_WORKING"|"PRE_OWNED_EXCELLENT"|"PRE_OWNED_GOOD"|"PRE_OWNED_FAIR",
   "confidenceFlags": { "brand": "confirmed"|"uncertain"|"unknown", "material": ..., "size": ..., "authenticity": ..., "condition": ... },
   "needsHumanReview": boolean,
   "reviewNotes": string[]

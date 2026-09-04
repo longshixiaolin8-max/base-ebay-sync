@@ -43,6 +43,12 @@ export const ItemCondition = z.enum([
   "USED_GOOD",
   "USED_ACCEPTABLE",
   "FOR_PARTS_OR_NOT_WORKING",
+  // eBay's newer 3-tier "pre-owned" grading scale used by fashion/jewelry categories
+  // instead of the generic USED_* scale above (confirmed live via
+  // EbayAdapter.getConditionPolicies -- category 262003 only accepts these plus NEW*).
+  "PRE_OWNED_EXCELLENT",
+  "PRE_OWNED_GOOD",
+  "PRE_OWNED_FAIR",
 ]);
 export type ItemCondition = z.infer<typeof ItemCondition>;
 
