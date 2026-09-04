@@ -1,10 +1,12 @@
 import type { ExternalProduct } from "@ai-ec/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const applyBaseStockReportMock = vi.fn().mockResolvedValue({ applied: true, quantity: 5 });
 vi.mock("@ai-ec/db", () => ({
   productMaster: { sku: "sku" },
   inventoryMaster: {},
   channelListings: { productId: "productId", channel: "channel" },
+  applyBaseStockReport: (...args: unknown[]) => applyBaseStockReportMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -78,6 +80,30 @@ function createFakeDb(opts: FakeDbOptions) {
 describe("upsertProduct", () => {
   beforeEach(() => {
     enqueueMock.mockClear();
+    applyBaseStockReportMock.mockClear();
+  });
+
+  it("reconciles BASE's reported stock into inventory_master on every poll of an existing product, even when nothing else changed", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({
+      title: item.title,
+      descriptionHtml: item.descriptionHtml,
+      priceJpy: item.priceJpy,
+      images: item.images,
+    });
+    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
+
+    await upsertProduct(db, queues, item);
+
+    expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, "existing-id", item.quantity, item.updatedAt);
+  });
+
+  it("does not attempt stock reconciliation for a brand-new product (nothing to reconcile against yet)", async () => {
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, item);
+
+    expect(applyBaseStockReportMock).not.toHaveBeenCalled();
   });
 
   it("inserts a brand-new product, its inventory/base listing rows, and enqueues ai_generate", async () => {

@@ -22,6 +22,13 @@
       "when": 1788340919731,
       "tag": "0002_empty_screwball",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788517731930,
+      "tag": "0003_skinny_turbo",
+      "breakpoints": true
     }
   ]
 }

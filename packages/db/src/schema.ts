@@ -81,7 +81,51 @@ export const inventoryMaster = pgTable("inventory_master", {
    * channel (BASE), which always reflects true stock; see calculateChannelAvailableQuantity.
    */
   safetyStockBuffer: integer("safety_stock_buffer").notNull().default(0),
+  /**
+   * BASE's own `modified` timestamp as of the last BASE stock-report we actually applied —
+   * the logical clock watermark that lets applyBaseStockReport() reject a stale/out-of-order
+   * report (one whose sequence isn't newer than this) instead of blindly trusting it.
+   */
+  lastBaseSeq: timestamp("last_base_seq", { withTimezone: true }),
+  /**
+   * Units sold on eBay (the secondary channel) since the last BASE stock report was
+   * applied. BASE's own reported stock number reflects only BASE-side changes (BASE
+   * itself never learns about an eBay sale unless/until we zero it out on total sellout),
+   * so reconciling a new BASE report as `reported - ebaySoldSinceBaseSync` avoids
+   * clobbering eBay sales BASE doesn't know about; reset to 0 each time a report applies.
+   */
+  ebaySoldSinceBaseSync: integer("ebay_sold_since_base_sync").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Append-only ledger of every event that has ever changed (or attempted to change)
+ * inventory_master.quantity. Two jobs: (1) the logical-clock ordering record -- a report
+ * whose `sequenceAt` isn't newer than the channel's current watermark is logged here with
+ * applied=false rather than silently dropped, so reversal/duplicate delivery is visible,
+ * not just harmless; (2) the source of truth for reconstructInventory() to replay after
+ * suspected drift or corruption, rather than trusting the mutable counter alone.
+ */
+export const inventoryEvents = pgTable("inventory_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  productId: uuid("product_id")
+    .notNull()
+    .references(() => productMaster.id, { onDelete: "cascade" }),
+  channel: text("channel").notNull(),
+  eventType: text("event_type").notNull(), // "sale" | "base_stock_report"
+  /** Logical clock value: BASE's `modified` ts for a stock report, the order's placed-at
+   *  time for a sale. Compared against inventory_master.lastBaseSeq to detect reversal. */
+  sequenceAt: timestamp("sequence_at", { withTimezone: true }).notNull(),
+  /** Set for "sale" events: units sold in this event. */
+  quantityDelta: integer("quantity_delta"),
+  /** Set for "base_stock_report" events: BASE's reported absolute stock at sequenceAt. */
+  absoluteQuantity: integer("absolute_quantity"),
+  /** BASE order id / eBay order id, for correlating with the sale that produced this event. */
+  externalEventId: text("external_event_id"),
+  applied: boolean("applied").notNull().default(true),
+  /** Why an event was recorded but not applied, e.g. "out_of_order". Null when applied. */
+  skippedReason: text("skipped_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const syncJobs = pgTable("sync_jobs", {

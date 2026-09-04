@@ -65,6 +65,11 @@ describe("processSale", () => {
     await processSale(createFakeDb(undefined), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
+    expect(applySaleMock).toHaveBeenCalledWith(expect.anything(), "product-1", 1, {
+      channel: "base",
+      sequenceAt: sale.occurredAt,
+      externalEventId: "order-1",
+    });
   });
 
   it("does not re-zero the other channel when this sale lost the race (already sold out)", async () => {

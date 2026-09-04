@@ -84,7 +84,11 @@ export async function processSale(
   productId: string,
   sale: SaleEvent,
 ): Promise<void> {
-  const result = await applySale(db, productId, sale.quantitySold);
+  const result = await applySale(db, productId, sale.quantitySold, {
+    channel: sale.channel,
+    sequenceAt: sale.occurredAt,
+    externalEventId: sale.externalOrderId,
+  });
 
   if (!result.soldOut || result.alreadyZero) {
     // Either still in stock, or another event already drove this to zero first — the

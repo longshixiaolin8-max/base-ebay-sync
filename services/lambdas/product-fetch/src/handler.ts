@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { contentHash, type ExternalProduct } from "@ai-ec/core";
-import { channelListings, inventoryMaster, productMaster, type Database } from "@ai-ec/db";
+import { applyBaseStockReport, channelListings, inventoryMaster, productMaster, type Database } from "@ai-ec/db";
 import {
   enqueue,
   getAppCredentials,
@@ -63,8 +63,17 @@ export async function upsertProduct(
 
   const [existing] = await db.select().from(productMaster).where(eq(productMaster.sku, sku)).limit(1);
 
+  if (existing) {
+    // contentHash covers title/description/price/images only, not stock -- a poll where
+    // *only* BASE's stock number changed (a restock, or a manual adjustment BASE never
+    // reports as an "order") would otherwise never reach inventory_master at all. Always
+    // reconcile the reported stock; applyBaseStockReport itself is the no-op guard when
+    // nothing has actually changed on BASE (its out-of-order check on item.updatedAt).
+    await applyBaseStockReport(db, existing.id, item.quantity, item.updatedAt);
+  }
+
   if (existing && existing.contentHash === hash) {
-    return; // no-op poll — nothing changed since last import
+    return; // no other field changed since last import
   }
 
   let productId: string;
@@ -102,6 +111,9 @@ export async function upsertProduct(
       quantity: item.quantity,
       version: 0,
       soldOut: item.quantity === 0,
+      // Baseline the logical clock watermark to this first-seen BASE state, so the next
+      // poll's applyBaseStockReport has something to compare against.
+      lastBaseSeq: item.updatedAt,
     });
     await db.insert(channelListings).values({
       productId,
