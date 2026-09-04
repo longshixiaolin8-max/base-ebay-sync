@@ -4,6 +4,7 @@ import {
   aiListingDraft,
   calculateChannelAvailableQuantity,
   channelListings,
+  computeDynamicSafetyStock,
   computeSyncConfidence,
   inventoryMaster,
   productMaster,
@@ -37,6 +38,22 @@ const USD_PER_JPY_FALLBACK = 0.0067; // used only if the AI draft has no suggest
  * unreliable, making things worse rather than safer.
  */
 const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
+
+/**
+ * Item #2 of the hardening list ("動的安全在庫"): recomputes and persists the product's
+ * safety-stock buffer from real sales velocity + eBay sync confidence (see
+ * computeDynamicSafetyStock) on every sync cycle, rather than trusting a value someone
+ * set by hand once. Returns the freshly-computed buffer so the caller doesn't need to
+ * re-read the row it just wrote.
+ */
+async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId: string): Promise<number> {
+  const { recommendedBuffer } = await computeDynamicSafetyStock(db, productId, "ebay");
+  await db
+    .update(inventoryMaster)
+    .set({ safetyStockBuffer: recommendedBuffer, updatedAt: new Date() })
+    .where(eq(inventoryMaster.productId, productId));
+  return recommendedBuffer;
+}
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
@@ -123,9 +140,10 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
   const primaryCategory = draft.categoryCandidates[0];
   if (!primaryCategory) throw new Error(`AI draft for product ${productId} has no category candidate`);
 
+  const safetyStockBuffer = inventory ? await resolveSafetyStockBuffer(db, productId) : 0;
   const availableQuantity = calculateChannelAvailableQuantity(
     inventory?.quantity ?? 0,
-    inventory?.safetyStockBuffer ?? 0,
+    safetyStockBuffer,
     "ebay",
     product.sourceChannel,
   );
@@ -195,7 +213,12 @@ export async function update(
   // publish never reached eBay at all.
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
   const availableQuantity = inventory
-    ? calculateChannelAvailableQuantity(inventory.quantity, inventory.safetyStockBuffer, "ebay", product.sourceChannel)
+    ? calculateChannelAvailableQuantity(
+        inventory.quantity,
+        await resolveSafetyStockBuffer(db, productId),
+        "ebay",
+        product.sourceChannel,
+      )
     : undefined;
 
   await adapter.updateListing(accessToken, externalId, {

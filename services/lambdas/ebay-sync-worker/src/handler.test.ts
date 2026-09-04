@@ -11,6 +11,17 @@ const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
   totalEventCount: 0,
 });
 
+const computeDynamicSafetyStockMock = vi.fn().mockResolvedValue({
+  productId: "p1",
+  channel: "ebay",
+  recommendedBuffer: 0,
+  salesPerDay: 0,
+  windowDays: 7,
+  pollIntervalMinutes: 1,
+  confidenceScore: 100,
+  riskMultiplier: 1,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   aiListingDraft: {},
@@ -19,6 +30,7 @@ vi.mock("@ai-ec/db", () => ({
   calculateChannelAvailableQuantity: (trueQuantity: number, buffer: number, channel: string, sourceChannel: string) =>
     channel === sourceChannel ? trueQuantity : Math.max(0, trueQuantity - buffer),
   computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
+  computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -71,6 +83,17 @@ describe("publish", () => {
       outOfOrderEventCount: 0,
       totalEventCount: 0,
     });
+    computeDynamicSafetyStockMock.mockClear();
+    computeDynamicSafetyStockMock.mockResolvedValue({
+      productId: "p1",
+      channel: "ebay",
+      recommendedBuffer: 0,
+      salesPerDay: 0,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 100,
+      riskMultiplier: 1,
+    });
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -82,17 +105,38 @@ describe("publish", () => {
     } as unknown as EbayAdapter;
   }
 
-  it("withholds the safety stock buffer from the quantity pushed to eBay", async () => {
-    const inventory = { quantity: 5, safetyStockBuffer: 2 };
+  it("withholds the freshly-computed dynamic safety stock buffer from the quantity pushed to eBay", async () => {
+    computeDynamicSafetyStockMock.mockResolvedValue({
+      productId: "p1",
+      channel: "ebay",
+      recommendedBuffer: 2,
+      salesPerDay: 1,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 100,
+      riskMultiplier: 1,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 999 }; // stale stored value must be ignored
     const adapter = ebayAdapter();
 
     await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 3 }));
+    expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(expect.anything(), "p1", "ebay");
   });
 
-  it("pushes 0 rather than negative when the buffer exceeds true stock", async () => {
-    const inventory = { quantity: 1, safetyStockBuffer: 5 };
+  it("pushes 0 rather than negative when the computed buffer exceeds true stock", async () => {
+    computeDynamicSafetyStockMock.mockResolvedValue({
+      productId: "p1",
+      channel: "ebay",
+      recommendedBuffer: 5,
+      salesPerDay: 5,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 100,
+      riskMultiplier: 1,
+    });
+    const inventory = { quantity: 1, safetyStockBuffer: 0 };
     const adapter = ebayAdapter();
 
     await publish(createFakeDb([[product], [draft], [inventory]]), adapter, "token", "p1");
@@ -169,10 +213,33 @@ describe("publish", () => {
 });
 
 describe("update", () => {
-  beforeEach(() => recordAuditLogMock.mockClear());
+  beforeEach(() => {
+    recordAuditLogMock.mockClear();
+    computeDynamicSafetyStockMock.mockClear();
+    computeDynamicSafetyStockMock.mockResolvedValue({
+      productId: "p1",
+      channel: "ebay",
+      recommendedBuffer: 0,
+      salesPerDay: 0,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 100,
+      riskMultiplier: 1,
+    });
+  });
 
-  it("re-syncs the buffered quantity alongside content changes", async () => {
-    const inventory = { quantity: 8, safetyStockBuffer: 3 };
+  it("re-syncs the quantity, buffered by the freshly-computed dynamic safety stock", async () => {
+    computeDynamicSafetyStockMock.mockResolvedValue({
+      productId: "p1",
+      channel: "ebay",
+      recommendedBuffer: 3,
+      salesPerDay: 1,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 100,
+      riskMultiplier: 1,
+    });
+    const inventory = { quantity: 8, safetyStockBuffer: 999 }; // stale stored value must be ignored
     const updateListing = vi.fn().mockResolvedValue(undefined);
     const adapter = { updateListing } as unknown as EbayAdapter;
 

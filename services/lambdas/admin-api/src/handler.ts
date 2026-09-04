@@ -5,6 +5,7 @@ import {
   aiListingDraft,
   auditLog,
   channelListings,
+  computeDynamicSafetyStock,
   computeSyncConfidence,
   inventoryMaster,
   productMaster,
@@ -411,6 +412,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const confidence = await computeSyncConfidence(db, channel, windowHours);
       return json(200, confidence);
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/dynamic-safety-stock$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const channel = event.queryStringParameters?.channel ?? "ebay";
+
+      const recommendation = await computeDynamicSafetyStock(db, id, channel);
+      return json(200, recommendation);
     }
 
     if (method === "GET" && path === "/admin/audit-log") {

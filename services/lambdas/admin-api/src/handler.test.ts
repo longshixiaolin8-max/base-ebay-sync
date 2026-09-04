@@ -11,6 +11,17 @@ const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
   totalEventCount: 0,
 });
 
+const computeDynamicSafetyStockMock = vi.fn().mockResolvedValue({
+  productId: "product-1",
+  channel: "ebay",
+  recommendedBuffer: 0,
+  salesPerDay: 0,
+  windowDays: 7,
+  pollIntervalMinutes: 1,
+  confidenceScore: 100,
+  riskMultiplier: 1,
+});
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
@@ -19,6 +30,7 @@ vi.mock("@ai-ec/db", () => ({
   syncJobs: {},
   auditLog: {},
   computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
+  computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -367,6 +379,23 @@ describe("admin-api handler", () => {
   it("GET /admin/sync/confidence returns 400 without a channel", async () => {
     const res = await callHandler(makeEvent("GET", "/admin/sync/confidence"));
     expect(res.statusCode).toBe(400);
+  });
+
+  it("GET /admin/products/{id}/dynamic-safety-stock returns the recommended buffer for a product", async () => {
+    computeDynamicSafetyStockMock.mockResolvedValueOnce({
+      productId: "product-1",
+      channel: "ebay",
+      recommendedBuffer: 2,
+      salesPerDay: 3,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 90,
+      riskMultiplier: 1,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-safety-stock"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", recommendedBuffer: 2 });
+    expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, "product-1", "ebay");
   });
 
   it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {
