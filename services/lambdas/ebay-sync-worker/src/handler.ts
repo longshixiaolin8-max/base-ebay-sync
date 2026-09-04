@@ -11,9 +11,11 @@ import {
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  enqueue,
   getAppCredentials,
   getDb,
   getIdempotencyStore,
+  getQueueUrls,
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
@@ -53,6 +55,45 @@ async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId:
     .set({ safetyStockBuffer: recommendedBuffer, updatedAt: new Date() })
     .where(eq(inventoryMaster.productId, productId));
   return recommendedBuffer;
+}
+
+/**
+ * Item #5 of the hardening list ("AI誤出品防止Gate"): before pushing an AI draft to eBay,
+ * verifies it was actually generated from the product's *current* content. product_master's
+ * contentHash covers title/description/price/images together, so any change to any of them
+ * since the draft was written makes them diverge — the draft's title/description/condition/
+ * item specifics may no longer describe the real product. Rather than trying to fuzzy-match
+ * text (unreliable and itself a source of false confidence), this reuses the exact hash this
+ * platform already computes and compares elsewhere (product-fetch's own no-op detection),
+ * so "does the draft still match?" is an objective yes/no, not a guess.
+ *
+ * On a mismatch: halts (throws, blocking this publish/update) and enqueues a fresh
+ * ai_generate job so a matching draft exists for the *next* attempt -- "自動停止・再生成".
+ */
+async function enforceContentConsistency(
+  db: ReturnType<typeof getDb>,
+  product: { id: string; contentHash: string },
+  draft: { sourceContentHash: string } | undefined,
+): Promise<void> {
+  if (draft && draft.sourceContentHash === product.contentHash) return;
+
+  const queues = getQueueUrls();
+  await enqueue(queues.aiGenerate, { type: "ai_generate", productId: product.id }, `ai-generate:${product.id}:${product.contentHash}`);
+
+  await recordAuditLog(db, {
+    actor: "system:ebay-sync-worker",
+    action: "ai_draft_stale_regeneration_triggered",
+    entityType: "product",
+    entityId: product.id,
+    before: { draftSourceContentHash: draft?.sourceContentHash ?? null },
+    after: { currentContentHash: product.contentHash },
+  });
+
+  throw new Error(
+    `AI draft for product ${product.id} no longer matches the product's current content ` +
+      `(BASE title/description/price/images changed since the draft was generated). ` +
+      `Blocking this eBay sync and enqueuing regeneration; retry once the new draft is approved.`,
+  );
 }
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
@@ -134,6 +175,8 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     .limit(1);
   if (!draft) throw new Error(`no AI listing draft found for product ${productId}`);
 
+  await enforceContentConsistency(db, product, draft);
+
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
 
   const priceUsd = draft.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : product.priceJpy * USD_PER_JPY_FALLBACK;
@@ -207,6 +250,8 @@ export async function update(
     .where(eq(aiListingDraft.productId, productId))
     .orderBy(desc(aiListingDraft.createdAt))
     .limit(1);
+
+  await enforceContentConsistency(db, product, draft);
 
   // Also re-syncs quantity (with the safety-stock buffer applied) on every content update —
   // previously only the initial publish ever pushed a quantity, so a BASE restock after

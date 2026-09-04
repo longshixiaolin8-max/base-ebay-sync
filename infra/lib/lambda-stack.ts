@@ -189,6 +189,10 @@ export class LambdaStack extends cdk.Stack {
     this.ebaySyncWorkerFn.addEventSource(
       new SqsEventSource(props.queues.ebaySync, { batchSize: 5, reportBatchItemFailures: true }),
     );
+    // Needed for the AI mis-listing gate (item #5): when a product's content has changed
+    // since its AI draft was generated, publish()/update() enqueue a fresh ai_generate job
+    // instead of pushing a possibly-stale listing.
+    props.queues.aiGenerate.grantSendMessages(this.ebaySyncWorkerFn);
 
     // --- Inventory sync (double-sell prevention) ---
     this.salesPollerFn = makeFn(

@@ -39,6 +39,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
         await db.insert(aiListingDraft).values({
           productId: product.id,
+          sourceContentHash: product.contentHash,
           titleEn: listing.titleEn,
           descriptionHtmlEn: listing.descriptionHtmlEn,
           categoryCandidates: listing.categoryCandidates,

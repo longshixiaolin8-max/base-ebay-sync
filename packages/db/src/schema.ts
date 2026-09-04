@@ -27,6 +27,15 @@ export const aiListingDraft = pgTable("ai_listing_draft", {
   productId: uuid("product_id")
     .notNull()
     .references(() => productMaster.id, { onDelete: "cascade" }),
+  /**
+   * product_master.content_hash at the moment this draft was generated. If the product's
+   * current content_hash no longer matches, BASE has changed title/description/price/images
+   * since this draft was written -- the AI-generated title/description/condition/item
+   * specifics may no longer describe the real product. The AI mis-listing gate (item #5)
+   * checks this before every publish/update and blocks + regenerates rather than pushing a
+   * possibly-stale listing to eBay.
+   */
+  sourceContentHash: text("source_content_hash").notNull(),
   titleEn: text("title_en").notNull(),
   descriptionHtmlEn: text("description_html_en").notNull(),
   categoryCandidates: jsonb("category_candidates").notNull().$type<

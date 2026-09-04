@@ -29,6 +29,13 @@
       "when": 1788517731930,
       "tag": "0003_skinny_turbo",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788519929462,
+      "tag": "0004_first_chameleon",
+      "breakpoints": true
     }
   ]
 }

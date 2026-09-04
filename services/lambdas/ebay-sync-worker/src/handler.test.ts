@@ -34,8 +34,11 @@ vi.mock("@ai-ec/db", () => ({
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
+const enqueueMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  enqueue: (...args: unknown[]) => enqueueMock(...args),
+  getQueueUrls: () => ({ aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" }),
 }));
 
 const { publish, update } = await import("./handler.js");
@@ -60,7 +63,7 @@ function createFakeDb(selectResults: unknown[]) {
   } as never;
 }
 
-const product = { id: "p1", sku: "base-1", sourceChannel: "base", priceJpy: 10000 };
+const product = { id: "p1", sku: "base-1", sourceChannel: "base", priceJpy: 10000, contentHash: "hash-1" };
 const draft = {
   titleEn: "Item",
   descriptionHtmlEn: "<p>d</p>",
@@ -68,11 +71,13 @@ const draft = {
   categoryCandidates: [{ ebayCategoryId: "1", label: "Cat" }],
   itemSpecifics: {},
   condition: "USED_GOOD",
+  sourceContentHash: "hash-1",
 };
 
 describe("publish", () => {
   beforeEach(() => {
     recordAuditLogMock.mockClear();
+    enqueueMock.mockClear();
     computeSyncConfidenceMock.mockClear();
     computeSyncConfidenceMock.mockResolvedValue({
       channel: "ebay",
@@ -210,11 +215,33 @@ describe("publish", () => {
 
     expect(adapter.createListing).toHaveBeenCalledTimes(1);
   });
+
+  it("blocks publish and enqueues regeneration when the draft's content hash is stale", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const staleDraft = { ...draft, sourceContentHash: "hash-0" };
+    const adapter = ebayAdapter();
+
+    await expect(
+      publish(createFakeDb([[product], [staleDraft], [inventory]]), adapter, "token", "p1"),
+    ).rejects.toThrow(/no longer matches the product's current content/);
+
+    expect(adapter.createListing).not.toHaveBeenCalled();
+    expect(enqueueMock).toHaveBeenCalledWith(
+      "ai-generate-url",
+      { type: "ai_generate", productId: "p1" },
+      "ai-generate:p1:hash-1",
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "ai_draft_stale_regeneration_triggered", entityId: "p1" }),
+    );
+  });
 });
 
 describe("update", () => {
   beforeEach(() => {
     recordAuditLogMock.mockClear();
+    enqueueMock.mockClear();
     computeDynamicSafetyStockMock.mockClear();
     computeDynamicSafetyStockMock.mockResolvedValue({
       productId: "p1",
@@ -274,5 +301,27 @@ describe("update", () => {
     await update(createFakeDb([[product], [draft], []]), adapter, "token", "p1", "base-1");
 
     expect(updateListing).toHaveBeenCalledWith("token", "base-1", expect.objectContaining({ quantity: undefined }));
+  });
+
+  it("blocks update and enqueues regeneration when the draft's content hash is stale", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const staleDraft = { ...draft, sourceContentHash: "hash-0" };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [staleDraft], [inventory]]), adapter, "token", "p1", "base-1"),
+    ).rejects.toThrow(/no longer matches the product's current content/);
+
+    expect(updateListing).not.toHaveBeenCalled();
+    expect(enqueueMock).toHaveBeenCalledWith(
+      "ai-generate-url",
+      { type: "ai_generate", productId: "p1" },
+      "ai-generate:p1:hash-1",
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "ai_draft_stale_regeneration_triggered", entityId: "p1" }),
+    );
   });
 });
