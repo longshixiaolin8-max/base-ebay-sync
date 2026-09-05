@@ -50,6 +50,13 @@
       "when": 1788622018705,
       "tag": "0006_glamorous_lily_hollister",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788624927188,
+      "tag": "0007_little_monster_badoon",
+      "breakpoints": true
     }
   ]
 }

@@ -8,3 +8,7 @@ export * from "./hash.js";
 export * from "./failsafe.js";
 export * from "./pricing.js";
 export * from "./product-identity.js";
+export * from "./order.js";
+export * from "./profit.js";
+export * from "./stale.js";
+export * from "./sync-state.js";

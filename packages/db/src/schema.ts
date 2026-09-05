@@ -26,6 +26,17 @@ export const productMaster = pgTable("product_master", {
   shippingCostUsdCents: integer("shipping_cost_usd_cents"),
   /** Basis points, e.g. 3000 = 30.00%. */
   targetMarginBasisPoints: integer("target_margin_basis_points"),
+  /**
+   * 仕入価格 (item #3, "売上・利益管理"). Nullable -- a product synced from BASE before this
+   * existed, or one whose cost simply hasn't been entered yet, has no cost data at all
+   * rather than a misleading 0. `orders.cost_jpy` snapshots this at sale time so a later
+   * edit here never retroactively changes an already-computed order's profit.
+   */
+  costJpy: integer("cost_jpy"),
+  /** 仕入日 (item #4, "商品ライフサイクル管理" -- 仕入 stage). Nullable and independent of
+   *  createdAt: a product can exist in product_master (synced from BASE) before its
+   *  purchase/cost data has been entered by a human. */
+  purchasedAt: timestamp("purchased_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -58,6 +69,16 @@ export const aiListingDraft = pgTable("ai_listing_draft", {
   confidenceFlags: jsonb("confidence_flags").notNull().$type<Record<string, string>>(),
   needsHumanReview: boolean("needs_human_review").notNull().default(true),
   reviewNotes: jsonb("review_notes").notNull().$type<string[]>().default([]),
+  /**
+   * Item #7 ("AI運用改善"). Nullable -- a draft generated before this existed has no
+   * recorded version. Lets a prompt/model change be correlated against actual sales
+   * outcomes (joined through orders on product_id) instead of guessing from dates.
+   */
+  promptVersion: text("prompt_version"),
+  /** What a human admin changed after generation (e.g. {"titleEn": "..."}), captured by the
+   *  admin draft-edit endpoint -- the "人間修正値" this item asks to retain. Null until a
+   *  human actually edits this specific draft. */
+  humanCorrectedFields: jsonb("human_corrected_fields").$type<Record<string, unknown> | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -218,4 +239,97 @@ export const idempotencyKeys = pgTable("idempotency_keys", {
   result: jsonb("result"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+/**
+ * Item #1 of the commercial-features round ("正式なOrderモデルを追加"). One row per
+ * (channel, external order id, product) -- the same granularity inventory-sync-worker
+ * already processes sales at (see processSale/applySale) -- so this sits alongside the
+ * existing inventory-truth machinery as a bookkeeping layer, never replacing it: applySale's
+ * CAS-based double-sell prevention is untouched, this table only ever records what applySale
+ * already decided. `status` is validated against @ai-ec/core's isValidOrderTransition before
+ * every write (see @ai-ec/db's transitionOrderStatus).
+ *
+ * The financial fields are a per-order *snapshot* -- captured once each becomes known,
+ * never recomputed from "current" product/channel state later -- so @ai-ec/core's
+ * computeOrderProfit() reading them back is deterministic and idempotent: replaying it after
+ * a return updates returnAmountUsdCents/status on this same row can only ever replace the
+ * previously-reported profit figure, never add a second one on top of it.
+ */
+export const orders = pgTable(
+  "orders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => productMaster.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    externalOrderId: text("external_order_id").notNull(),
+    quantity: integer("quantity").notNull(),
+    status: text("status").notNull().default("ORDER_RECEIVED"),
+
+    /** JPY unit cost, snapshotted from product_master.cost_jpy at sale time. */
+    costJpy: integer("cost_jpy"),
+    /** Set for a BASE sale (JPY-denominated). */
+    salePriceJpy: integer("sale_price_jpy"),
+    /** Set for an eBay sale (USD-denominated). */
+    salePriceUsdCents: integer("sale_price_usd_cents"),
+    ebayFeeUsdCents: integer("ebay_fee_usd_cents"),
+    paymentFeeUsdCents: integer("payment_fee_usd_cents"),
+    shippingCostJpy: integer("shipping_cost_jpy"),
+    adSpendUsdCents: integer("ad_spend_usd_cents"),
+    fxCostUsdCents: integer("fx_cost_usd_cents"),
+    /** Amount refunded to the buyer, set once a return actually completes. */
+    returnAmountUsdCents: integer("return_amount_usd_cents"),
+
+    /** 利益確定 lifecycle stage: a human-triggered snapshot of computeOrderProfit()'s output
+     *  at finalization time, so later reporting doesn't silently shift underneath a figure
+     *  that's already been reported/reconciled elsewhere. Live (non-finalized) profit is
+     *  always still computable on demand from the fields above. */
+    finalizedNetProfitUsdCents: integer("finalized_net_profit_usd_cents"),
+    profitFinalizedAt: timestamp("profit_finalized_at", { withTimezone: true }),
+
+    placedAt: timestamp("placed_at", { withTimezone: true }).notNull(),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    allocatedAt: timestamp("allocated_at", { withTimezone: true }),
+    shippedAt: timestamp("shipped_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    returnRequestedAt: timestamp("return_requested_at", { withTimezone: true }),
+    returnedAt: timestamp("returned_at", { withTimezone: true }),
+    refundedAt: timestamp("refunded_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    channelExternalOrderProductUnique: uniqueIndex("orders_channel_external_order_product_unique").on(
+      t.channel,
+      t.externalOrderId,
+      t.productId,
+    ),
+  }),
+);
+
+/**
+ * Item #6 ("SNS管理"). One row per product. Video creation and posting are recorded here as
+ * human-confirmed flags (set via the admin API once someone actually posts), matching this
+ * platform's existing pattern of AI producing a draft/suggestion and a human confirming the
+ * real-world action (see ai_listing_draft.needsHumanReview) -- there is no video-generation
+ * or social-posting API integration in this stack, so this table never claims one.
+ */
+export const snsContent = pgTable("sns_content", {
+  productId: uuid("product_id")
+    .primaryKey()
+    .references(() => productMaster.id, { onDelete: "cascade" }),
+  scriptText: text("script_text"),
+  scriptPromptVersion: text("script_prompt_version"),
+  videoCreated: boolean("video_created").notNull().default(false),
+  videoCreatedAt: timestamp("video_created_at", { withTimezone: true }),
+  instagramPosted: boolean("instagram_posted").notNull().default(false),
+  instagramPostedAt: timestamp("instagram_posted_at", { withTimezone: true }),
+  tiktokPosted: boolean("tiktok_posted").notNull().default(false),
+  tiktokPostedAt: timestamp("tiktok_posted_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
