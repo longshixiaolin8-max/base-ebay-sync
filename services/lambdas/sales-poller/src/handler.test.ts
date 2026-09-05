@@ -7,8 +7,10 @@ vi.mock("@ai-ec/db", () => ({
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
+const emitChannelIsolatedMetricMock = vi.fn();
 vi.mock("@ai-ec/lambda-shared", () => ({
   createEbayAdapter: vi.fn(),
+  emitChannelIsolatedMetric: (...args: unknown[]) => emitChannelIsolatedMetricMock(...args),
   getAppCredentials: vi.fn(),
   getDb: vi.fn(),
   getQueueUrls: vi.fn(),
@@ -46,6 +48,7 @@ describe("pollChannelIfHealthy", () => {
       expect.anything(),
       expect.objectContaining({ action: "channel_isolated_skip", entityId: "ebay" }),
     );
+    expect(emitChannelIsolatedMetricMock).toHaveBeenCalledWith("ebay");
   });
 
   it("does not let one channel's isolation affect the other channel's own decision", async () => {

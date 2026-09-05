@@ -7,3 +7,4 @@ export * from "./oauth-state.js";
 export * from "./ebay.js";
 export * from "./sales-sync.js";
 export * from "./fx-rate.js";
+export * from "./metrics.js";

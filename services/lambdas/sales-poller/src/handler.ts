@@ -2,6 +2,7 @@ import { BaseAdapter } from "@ai-ec/adapter-base";
 import { isChannelIsolated } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  emitChannelIsolatedMetric,
   getAppCredentials,
   getDb,
   getQueueUrls,
@@ -59,6 +60,7 @@ export async function pollChannelIfHealthy(
 ): Promise<void> {
   const isolation = await isChannelIsolated(db, channel);
   if (isolation.isolated) {
+    emitChannelIsolatedMetric(channel);
     await recordAuditLog(db, {
       actor: "system:sales-poller",
       action: "channel_isolated_skip",

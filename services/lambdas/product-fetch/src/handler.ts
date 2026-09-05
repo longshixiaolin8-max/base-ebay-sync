@@ -9,6 +9,7 @@ import {
   type Database,
 } from "@ai-ec/db";
 import {
+  emitChannelIsolatedMetric,
   enqueue,
   getAppCredentials,
   getDb,
@@ -43,6 +44,7 @@ export async function handler(): Promise<void> {
   // effective-frequency-reduction that's actually safe to do from inside the function itself.
   const isolation = await isChannelIsolated(db, "base");
   if (isolation.isolated) {
+    emitChannelIsolatedMetric("base");
     await recordAuditLog(db, {
       actor: "system:product-fetch",
       action: "channel_isolated_skip",
