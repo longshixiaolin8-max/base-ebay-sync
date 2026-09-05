@@ -1,5 +1,11 @@
 import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
-import { buildIdempotencyKey, findMissingRequiredAspects, withIdempotency } from "@ai-ec/core";
+import {
+  buildIdempotencyKey,
+  findMissingRequiredAspects,
+  finalSafetyCheckForNewListing,
+  finalSafetyCheckForUpdate,
+  withIdempotency,
+} from "@ai-ec/core";
 import {
   aiListingDraft,
   calculateChannelAvailableQuantity,
@@ -277,17 +283,29 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     );
   }
 
-  const { externalId } = await adapter.createListing(accessToken, {
-    productId,
-    sku: product.sku,
+  const listingPayload = {
     titleEn: draft.titleEn,
     descriptionHtmlEn: draft.descriptionHtmlEn,
     priceUsd: Math.round(priceUsd * 100) / 100,
     quantity: availableQuantity,
     images: product.images,
     categoryId: primaryCategory.ebayCategoryId,
-    itemSpecifics: draft.itemSpecifics,
     condition: draft.condition,
+  };
+  // Item #3 of the third hardening round ("多段階フェイルセーフ", stage 3 -- 最終安全ルール).
+  // Every field this actually sends to eBay, checked against plain, unconditional
+  // invariants right before the call -- independent of every gate above, so a bug in any
+  // one of them still can't push a listing with a negative price or an empty title.
+  const safetyCheck = finalSafetyCheckForNewListing(listingPayload);
+  if (!safetyCheck.safe) {
+    throw new Error(`Refusing to publish product ${productId} to eBay: ${safetyCheck.violations.join("; ")}`);
+  }
+
+  const { externalId } = await adapter.createListing(accessToken, {
+    productId,
+    sku: product.sku,
+    ...listingPayload,
+    itemSpecifics: draft.itemSpecifics,
   });
 
   await db
@@ -354,14 +372,26 @@ export async function update(
       )
     : undefined;
 
+  const updatePayload = {
+    titleEn: draft?.titleEn,
+    descriptionHtmlEn: draft?.descriptionHtmlEn,
+    images: product.images,
+    priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
+    quantity: availableQuantity,
+    condition: draft?.condition,
+  };
+  // Item #3 of the third hardening round ("多段階フェイルセーフ", stage 3 -- 最終安全ルール).
+  // Only the fields actually being changed are checked -- update() only ever sends a
+  // partial payload, so an omitted field is never "invalid", only one explicitly set to
+  // something impossible (a negative quantity, a zero price) is.
+  const safetyCheck = finalSafetyCheckForUpdate(updatePayload);
+  if (!safetyCheck.safe) {
+    throw new Error(`Refusing to update product ${productId} on eBay: ${safetyCheck.violations.join("; ")}`);
+  }
+
   try {
     await adapter.updateListing(accessToken, externalId, {
-      titleEn: draft?.titleEn,
-      descriptionHtmlEn: draft?.descriptionHtmlEn,
-      images: product.images,
-      priceUsd: draft?.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : undefined,
-      quantity: availableQuantity,
-      condition: draft?.condition,
+      ...updatePayload,
       // Always resend the draft's item specifics, not just when they change -- eBay's PUT
       // inventory_item is a full replace, so relying on EbayAdapter's "carry over the
       // current value" fallback alone means a required aspect wiped by any earlier failed

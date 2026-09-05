@@ -90,7 +90,14 @@ function createFakeDb(selectResults: unknown[]): any {
   };
 }
 
-const product = { id: "p1", sku: "base-1", sourceChannel: "base", priceJpy: 10000, contentHash: "hash-1" };
+const product = {
+  id: "p1",
+  sku: "base-1",
+  sourceChannel: "base",
+  priceJpy: 10000,
+  contentHash: "hash-1",
+  images: ["https://img.example/1.jpg"],
+};
 const draft = {
   titleEn: "Item",
   descriptionHtmlEn: "<p>d</p>",
@@ -380,6 +387,20 @@ describe("publish", () => {
 
     expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedPriceJpy: product.priceJpy }));
   });
+
+  it("blocks publish when the product has no images, regardless of what every upstream gate decided", async () => {
+    // Item #3 of the third hardening round ("多段階フェイルセーフ", stage 3). Deliberately
+    // exercised with every upstream gate passing, to prove this check is independent of them.
+    const noImageProduct = { ...product, images: [] };
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await expect(
+      publish(createFakeDb([[noImageProduct], [draft], [listing], [inventory]]), adapter, "token", "p1"),
+    ).rejects.toThrow(/Refusing to publish product p1 to eBay: no images/);
+
+    expect(adapter.createListing).not.toHaveBeenCalled();
+  });
 });
 
 describe("update", () => {
@@ -574,5 +595,19 @@ describe("update", () => {
       expect.anything(),
       expect.objectContaining({ action: "auto_rollback_applied", entityId: "p1" }),
     );
+  });
+
+  it("blocks update when the draft's condition is empty, regardless of what every upstream gate decided", async () => {
+    // Item #3 of the third hardening round ("多段階フェイルセーフ", stage 3).
+    const emptyConditionDraft = { ...draft, condition: "" };
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [emptyConditionDraft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
+    ).rejects.toThrow(/Refusing to update product p1 on eBay: condition is empty/);
+
+    expect(updateListing).not.toHaveBeenCalled();
   });
 });
