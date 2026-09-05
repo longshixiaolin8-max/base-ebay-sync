@@ -7,6 +7,7 @@ import {
   inventoryMaster,
   isChannelIsolated,
   productMaster,
+  upsertOrderReceived,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -101,6 +102,34 @@ export async function processSale(
     // Another event already drove this to zero first — the double-sell guard: whichever
     // sale arrives first wins, this one is a safe no-op.
     return;
+  }
+
+  // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
+  // record alongside applySale above, never a replacement for it -- applySale already made
+  // the real, correctness-critical inventory decision by the time execution reaches here, so
+  // a failure recording the order must never propagate and threaten that. Neither channel's
+  // adapter currently parses a real sale price out of its orders API response (see
+  // listRecentSales in @ai-ec/adapter-base / @ai-ec/adapter-ebay) -- salePriceJpy/
+  // salePriceUsdCents are left null here rather than guessed, until that's built and verified
+  // against a real order.
+  try {
+    const [productForOrder] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
+    await upsertOrderReceived(db, {
+      productId,
+      channel: sale.channel,
+      externalOrderId: sale.externalOrderId,
+      quantity: sale.quantitySold,
+      placedAt: sale.occurredAt,
+      costJpy: productForOrder?.costJpy ?? null,
+    });
+  } catch (err) {
+    await recordSyncError(db, {
+      channel: sale.channel,
+      productId,
+      errorCode: "order_record_failed",
+      errorMessage: (err as Error).message,
+      payload: { externalOrderId: sale.externalOrderId },
+    });
   }
 
   const otherChannel = otherChannelOf(sale.channel);

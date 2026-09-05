@@ -166,6 +166,18 @@ export async function upsertProduct(
       lastSyncedAt: new Date(),
     });
 
+    // BASE登録 lifecycle stage (commercial-features round, item #4). This is the first
+    // moment this platform ever knows about the product -- 仕入 (cost/purchase date) is a
+    // separate, human-entered stage (see admin-api's purchase-info endpoint), since BASE's
+    // own API has no concept of acquisition cost.
+    await recordAuditLog(db, {
+      actor: "system:product-fetch",
+      action: "product_listed_base",
+      entityType: "product",
+      entityId: productId,
+      after: { sku, title: item.title },
+    });
+
     await enqueue(queues.aiGenerate, { type: "ai_generate", productId }, `ai-generate:${productId}`);
     return;
   }

@@ -10,8 +10,10 @@ vi.mock("@ai-ec/db", () => ({
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
+const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   enqueue: (...args: unknown[]) => enqueueMock(...args),
+  recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
 }));
 
 const { upsertProduct } = await import("./handler.js");
@@ -81,6 +83,7 @@ describe("upsertProduct", () => {
   beforeEach(() => {
     enqueueMock.mockClear();
     applyBaseStockReportMock.mockClear();
+    recordAuditLogMock.mockClear();
   });
 
   it("reconciles BASE's reported stock into inventory_master on every poll of an existing product, even when nothing else changed", async () => {
@@ -116,6 +119,10 @@ describe("upsertProduct", () => {
       queues.aiGenerate,
       { type: "ai_generate", productId: "new-product-id" },
       "ai-generate:new-product-id",
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "product_listed_base", entityId: "new-product-id" }),
     );
   });
 

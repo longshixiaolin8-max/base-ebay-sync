@@ -623,6 +623,39 @@ describe("update", () => {
     expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedPriceJpy: product.priceJpy }));
   });
 
+  it("records a distinct 価格変更 lifecycle event when the price actually changed since the last sync", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const priceChangedListing = { lastSyncedPriceJpy: product.priceJpy + 1000 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await update(createFakeDb([[product], [draft], [priceChangedListing], [inventory]]), adapter, "token", "p1", "base-1");
+
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "product_price_changed",
+        entityId: "p1",
+        before: { priceJpy: product.priceJpy + 1000 },
+        after: { priceJpy: product.priceJpy },
+      }),
+    );
+  });
+
+  it("does not record a 価格変更 event when the price is unchanged", async () => {
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const samePriceListing = { lastSyncedPriceJpy: product.priceJpy };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await update(createFakeDb([[product], [draft], [samePriceListing], [inventory]]), adapter, "token", "p1", "base-1");
+
+    expect(recordAuditLogMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "product_price_changed" }),
+    );
+  });
+
   it("records an audit log when the adapter reports it auto-rolled-back a partial update, and still propagates the failure", async () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const rollbackError = new EbayPartialUpdateRolledBackError(new Error("offer PUT failed"));

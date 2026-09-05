@@ -452,6 +452,22 @@ export async function update(
     })
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")));
 
+  // 価格変更 lifecycle stage (commercial-features round, item #4) -- its own distinct audit
+  // event, separate from the generic "ebay_listing_updated" below, so a price change is
+  // queryable on its own rather than buried in every update (most updates aren't price
+  // changes at all -- a title/quantity/condition edit with no price movement shouldn't read
+  // as one). Only recorded once the update above has actually succeeded.
+  if (listing?.lastSyncedPriceJpy != null && listing.lastSyncedPriceJpy !== product.priceJpy) {
+    await recordAuditLog(db, {
+      actor: "system:ebay-sync-worker",
+      action: "product_price_changed",
+      entityType: "product",
+      entityId: productId,
+      before: { priceJpy: listing.lastSyncedPriceJpy },
+      after: { priceJpy: product.priceJpy },
+    });
+  }
+
   await recordAuditLog(db, {
     actor: "system:ebay-sync-worker",
     action: "ebay_listing_updated",

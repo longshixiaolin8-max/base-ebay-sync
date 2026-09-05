@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const applySaleMock = vi.fn();
 const isChannelIsolatedMock = vi.fn().mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+const upsertOrderReceivedMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@ai-ec/db", () => ({
   applySale: (...args: unknown[]) => applySaleMock(...args),
@@ -12,11 +13,13 @@ vi.mock("@ai-ec/db", () => ({
   inventoryMaster: {},
   productMaster: {},
   isChannelIsolated: (...args: unknown[]) => isChannelIsolatedMock(...args),
+  upsertOrderReceived: (...args: unknown[]) => upsertOrderReceivedMock(...args),
 }));
 
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token-123");
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: vi.fn(),
@@ -25,7 +28,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
-  recordSyncError: vi.fn(),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
 const { processSale } = await import("./handler.js");
@@ -65,8 +68,11 @@ describe("processSale", () => {
     listConnectedAccountIdsMock.mockClear();
     listConnectedAccountIdsMock.mockResolvedValue(["acct-1"]);
     recordAuditLogMock.mockClear();
+    recordSyncErrorMock.mockClear();
     isChannelIsolatedMock.mockClear();
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+    upsertOrderReceivedMock.mockClear();
+    upsertOrderReceivedMock.mockResolvedValue(undefined);
   });
 
   it("does nothing when the product is still in stock and no listing is published on the other channel", async () => {
@@ -74,7 +80,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([[]]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[], []]), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
     expect(applySaleMock).toHaveBeenCalledWith(expect.anything(), "product-1", 1, {
@@ -82,6 +88,38 @@ describe("processSale", () => {
       sequenceAt: sale.occurredAt,
       externalEventId: "order-1",
     });
+  });
+
+  it("records an order for a genuine (non-duplicate) sale, snapshotting the product's cost", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    const adapters = { base: {}, ebay: { setInventory: vi.fn() } } as unknown as Record<string, ChannelAdapter>;
+
+    await processSale(createFakeDb([[{ costJpy: 3000 }], []]), adapters as never, "product-1", sale);
+
+    expect(upsertOrderReceivedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        productId: "product-1",
+        channel: "base",
+        externalOrderId: "order-1",
+        quantity: 1,
+        costJpy: 3000,
+      }),
+    );
+  });
+
+  it("never lets an order-bookkeeping failure block or fail the sale processing", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    upsertOrderReceivedMock.mockRejectedValue(new Error("boom"));
+    const setInventory = vi.fn();
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await expect(processSale(createFakeDb([[], []]), adapters as never, "product-1", sale)).resolves.toBeUndefined();
+
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ errorCode: "order_record_failed" }),
+    );
   });
 
   it("does not re-zero the other channel when this sale lost the race (already sold out)", async () => {
@@ -100,7 +138,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await processSale(
-      createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]),
+      createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]),
       adapters as never,
       "product-1",
       sale,
@@ -119,7 +157,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([[]]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[], []]), adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
   });
@@ -134,6 +172,7 @@ describe("processSale", () => {
 
     await processSale(
       createFakeDb([
+        [], // productForOrder (product_master, for order bookkeeping)
         [{ status: "published", externalId: "ebay-sku-1" }], // otherListing (channel_listings)
         [{ sourceChannel: "base" }], // product_master
         [{ quantity: 4, safetyStockBuffer: 1 }], // inventory_master
@@ -158,7 +197,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
     ).resolves.toBeUndefined();
 
     expect(setInventory).not.toHaveBeenCalled();
@@ -171,7 +210,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
     ).rejects.toThrow(/no ebay account is connected/);
   });
 
@@ -191,7 +230,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
     ).resolves.toBeUndefined();
 
     expect(setInventory).not.toHaveBeenCalled();
@@ -214,7 +253,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await processSale(
-      createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]),
+      createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]),
       adapters as never,
       "product-1",
       sale,
