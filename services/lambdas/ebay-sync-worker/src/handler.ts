@@ -9,6 +9,7 @@ import {
   detectInventoryAnomaly,
   detectPriceAnomaly,
   inventoryMaster,
+  isChannelIsolated,
   predictStockoutRisk,
   PREEMPTIVE_STOCKOUT_BUFFER,
   productMaster,
@@ -68,6 +69,21 @@ async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId:
     .set({ safetyStockBuffer: totalBuffer, updatedAt: new Date() })
     .where(eq(inventoryMaster.productId, productId));
   return totalBuffer;
+}
+
+/**
+ * Item A of the third hardening round ("チャネル障害時の隔離モード -- eBay障害中はeBay
+ * だけ自動隔離し、BASEは正常運用を継続"). handler() already fails fast on an auth failure
+ * (getValidAccessToken throws before publish()/update() are ever reached), so this mainly
+ * catches the other isolation trigger: a channel that's healthy on auth but has been
+ * hitting real 429/5xx responses. Failing here, before touching product/draft/inventory at
+ * all, avoids wasting an attempt on an eBay call already known likely to fail the same way.
+ */
+async function enforceChannelNotIsolated(db: ReturnType<typeof getDb>): Promise<void> {
+  const isolation = await isChannelIsolated(db, "ebay");
+  if (isolation.isolated) {
+    throw new Error(`eBay is currently isolated (${isolation.reasons.join("; ")}). Sync is paused until it recovers.`);
+  }
 }
 
 /**
@@ -201,6 +217,8 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 };
 
 export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, accessToken: string, productId: string) {
+  await enforceChannelNotIsolated(db);
+
   const confidence = await computeSyncConfidence(db, "ebay");
   if (confidence.score < SYNC_CONFIDENCE_PUBLISH_THRESHOLD) {
     throw new Error(
@@ -302,6 +320,8 @@ export async function update(
   productId: string,
   externalId: string,
 ) {
+  await enforceChannelNotIsolated(db);
+
   const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
   if (!product) throw new Error(`product not found: ${productId}`);
 

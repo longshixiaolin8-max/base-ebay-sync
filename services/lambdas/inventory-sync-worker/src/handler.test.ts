@@ -2,6 +2,7 @@ import type { ChannelAdapter, SaleEvent } from "@ai-ec/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const applySaleMock = vi.fn();
+const isChannelIsolatedMock = vi.fn().mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
 
 vi.mock("@ai-ec/db", () => ({
   applySale: (...args: unknown[]) => applySaleMock(...args),
@@ -10,6 +11,7 @@ vi.mock("@ai-ec/db", () => ({
   channelListings: {},
   inventoryMaster: {},
   productMaster: {},
+  isChannelIsolated: (...args: unknown[]) => isChannelIsolatedMock(...args),
 }));
 
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token-123");
@@ -60,7 +62,11 @@ describe("processSale", () => {
   beforeEach(() => {
     applySaleMock.mockReset();
     getValidAccessTokenMock.mockClear();
+    listConnectedAccountIdsMock.mockClear();
+    listConnectedAccountIdsMock.mockResolvedValue(["acct-1"]);
     recordAuditLogMock.mockClear();
+    isChannelIsolatedMock.mockClear();
+    isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
   });
 
   it("does nothing when the product is still in stock and no listing is published on the other channel", async () => {
@@ -167,5 +173,53 @@ describe("processSale", () => {
     await expect(
       processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
     ).rejects.toThrow(/no ebay account is connected/);
+  });
+
+  it("skips the other channel gracefully (no throw) when it is isolated, even on a sellout", async () => {
+    // Item A of the third hardening round ("チャネル障害時の隔離モード"). Confirmed live:
+    // eBay's oauth_connections row can exist (an account IS connected) while its access
+    // token is expired with no refresh token -- a plain "account connected?" check can't
+    // catch that, so this must be checked before ever reaching listConnectedAccountIds.
+    isChannelIsolatedMock.mockResolvedValue({
+      channel: "ebay",
+      isolated: true,
+      reasons: ["an authentication failure was recorded for ebay in the last 15min"],
+      windowMinutes: 15,
+    });
+    applySaleMock.mockResolvedValue({ quantity: 0, soldOut: true, alreadyZero: false });
+    const setInventory = vi.fn();
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await expect(
+      processSale(createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+    ).resolves.toBeUndefined();
+
+    expect(setInventory).not.toHaveBeenCalled();
+    expect(listConnectedAccountIdsMock).not.toHaveBeenCalled();
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "other_channel_isolated_skip" }),
+    );
+  });
+
+  it("skips the other channel gracefully when it is isolated on a partial decrement too", async () => {
+    isChannelIsolatedMock.mockResolvedValue({
+      channel: "ebay",
+      isolated: true,
+      reasons: ["a 429 (rate limited) response was recorded for ebay's own API in the last 15min"],
+      windowMinutes: 15,
+    });
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    const setInventory = vi.fn();
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+
+    await processSale(
+      createFakeDb([[{ status: "published", externalId: "ebay-sku-1" }]]),
+      adapters as never,
+      "product-1",
+      sale,
+    );
+
+    expect(setInventory).not.toHaveBeenCalled();
   });
 });

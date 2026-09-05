@@ -1,6 +1,13 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
-import { applySale, calculateChannelAvailableQuantity, channelListings, inventoryMaster, productMaster } from "@ai-ec/db";
+import {
+  applySale,
+  calculateChannelAvailableQuantity,
+  channelListings,
+  inventoryMaster,
+  isChannelIsolated,
+  productMaster,
+} from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -108,6 +115,26 @@ export async function processSale(
   }
 
   if (otherListing?.status === "published" && otherListing.externalId) {
+    // Item A of the third hardening round ("チャネル障害時の隔離モード"). This is exactly
+    // the scenario a plain "is an account connected?" check can't catch: eBay's
+    // oauth_connections row can be present (accountId found) while its stored access token
+    // is expired with no refresh token to fall back on -- confirmed live, that failure
+    // happens down in getValidAccessToken below, past the connected-account check. Catching
+    // it here instead, before spending an attempt on a call already known likely to fail
+    // the same way, and treating it as a known, tracked condition rather than a fresh
+    // failure to throw and retry-spam on.
+    const isolation = await isChannelIsolated(db, otherChannel);
+    if (isolation.isolated) {
+      await recordAuditLog(db, {
+        actor: "system:inventory-sync-worker",
+        action: "other_channel_isolated_skip",
+        entityType: "product",
+        entityId: productId,
+        after: { isolatedChannel: otherChannel, reasons: isolation.reasons },
+      });
+      return;
+    }
+
     const [accountId] = await listConnectedAccountIds(db, otherChannel);
     if (!accountId) {
       if (result.soldOut) {

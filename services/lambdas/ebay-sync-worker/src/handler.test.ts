@@ -39,6 +39,7 @@ const predictStockoutRiskMock = vi.fn().mockResolvedValue({
   currentQuantity: 5,
   windowDays: 7,
 });
+const isChannelIsolatedMock = vi.fn().mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -53,6 +54,7 @@ vi.mock("@ai-ec/db", () => ({
   detectPriceAnomaly: (...args: unknown[]) => detectPriceAnomalyMock(...args),
   predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
   PREEMPTIVE_STOCKOUT_BUFFER: 1,
+  isChannelIsolated: (...args: unknown[]) => isChannelIsolatedMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -147,6 +149,8 @@ describe("publish", () => {
       currentQuantity: 5,
       windowDays: 7,
     });
+    isChannelIsolatedMock.mockClear();
+    isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -252,6 +256,21 @@ describe("publish", () => {
     await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ condition: "USED_GOOD" }));
+  });
+
+  it("blocks publish when eBay is isolated, without calling createListing or any other gate", async () => {
+    isChannelIsolatedMock.mockResolvedValue({
+      channel: "ebay",
+      isolated: true,
+      reasons: ["an authentication failure was recorded for ebay in the last 15min"],
+      windowMinutes: 15,
+    });
+    const adapter = ebayAdapter();
+
+    await expect(publish({} as never, adapter, "token", "p1")).rejects.toThrow(/eBay is currently isolated/);
+
+    expect(adapter.createListing).not.toHaveBeenCalled();
+    expect(computeSyncConfidenceMock).not.toHaveBeenCalled();
   });
 
   it("blocks a new publish when eBay's sync confidence is too low, without calling createListing", async () => {
@@ -398,6 +417,23 @@ describe("update", () => {
       currentQuantity: 5,
       windowDays: 7,
     });
+    isChannelIsolatedMock.mockClear();
+    isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+  });
+
+  it("blocks update when eBay is isolated, without calling updateListing", async () => {
+    isChannelIsolatedMock.mockResolvedValue({
+      channel: "ebay",
+      isolated: true,
+      reasons: ["a 429 (rate limited) response was recorded for ebay's own API in the last 15min"],
+      windowMinutes: 15,
+    });
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing } as unknown as EbayAdapter;
+
+    await expect(update({} as never, adapter, "token", "p1", "base-1")).rejects.toThrow(/eBay is currently isolated/);
+
+    expect(updateListing).not.toHaveBeenCalled();
   });
 
   it("re-syncs the quantity, buffered by the freshly-computed dynamic safety stock", async () => {

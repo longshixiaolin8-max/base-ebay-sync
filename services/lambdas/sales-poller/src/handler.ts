@@ -1,5 +1,5 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { shouldThrottleChannel } from "@ai-ec/db";
+import { isChannelIsolated } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -7,6 +7,7 @@ import {
   getQueueUrls,
   pollChannelSales,
   recordAuditLog,
+  recordSyncError,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 
@@ -41,28 +42,41 @@ export async function handler(): Promise<void> {
 }
 
 /**
- * Item #4 of the second hardening round ("チャネル別レート制御"). This poller covers both
- * channels in one fixed-schedule invocation, so there is no single EventBridge rule to
- * slow down for just one of them (and CDK owns the rule either way — see product-fetch for
- * the same reasoning). Skipping just this channel's half of the cycle when it's recently
- * been rate-limited or erroring a lot reduces its *effective* polling frequency without
- * holding up the other, healthy channel.
+ * Item A of the third hardening round ("チャネル障害時の隔離モード -- eBay障害中は
+ * eBayだけ自動隔離し、BASEは正常運用を継続"). Checks isChannelIsolated() before polling a
+ * channel at all, and -- just as important -- never lets one channel's poll failure escape
+ * uncaught. Confirmed live: previously an unhandled rejection here aborted the whole Lambda
+ * invocation instead of being recorded per-channel, showing up only as an opaque top-level
+ * "Invoke Error" that computeSyncConfidence/isChannelIsolated couldn't see at all (they only
+ * read sync_errors) -- eBay's OAuth token expiring with no refresh token stored was doing
+ * exactly this on every 1-minute cycle. BASE's poll happened to still run because it's
+ * called first in handler() above, but that was incidental to call order, never a guarantee.
  */
 export async function pollChannelIfHealthy(
   db: ReturnType<typeof getDb>,
   channel: "base" | "ebay",
   poll: () => Promise<void>,
 ): Promise<void> {
-  const throttle = await shouldThrottleChannel(db, channel);
-  if (throttle.throttle) {
+  const isolation = await isChannelIsolated(db, channel);
+  if (isolation.isolated) {
     await recordAuditLog(db, {
       actor: "system:sales-poller",
-      action: "poll_skipped_due_to_throttle",
+      action: "channel_isolated_skip",
       entityType: "channel",
       entityId: channel,
-      after: { reasons: throttle.reasons },
+      after: { reasons: isolation.reasons },
     });
     return;
   }
-  await poll();
+
+  try {
+    await poll();
+  } catch (err) {
+    await recordSyncError(db, {
+      channel,
+      productId: null,
+      errorCode: "sales_poll_failed",
+      errorMessage: (err as Error).message,
+    });
+  }
 }
