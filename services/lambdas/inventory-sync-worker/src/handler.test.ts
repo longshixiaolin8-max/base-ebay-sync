@@ -108,6 +108,19 @@ describe("processSale", () => {
     );
   });
 
+  it("passes the sale event's own price through to the order record when the adapter captured one", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
+    const adapters = { base: {}, ebay: { setInventory: vi.fn() } } as unknown as Record<string, ChannelAdapter>;
+    const pricedSale: SaleEvent = { ...sale, salePriceJpy: 4000 };
+
+    await processSale(createFakeDb([[{ costJpy: null }], []]), adapters as never, "product-1", pricedSale);
+
+    expect(upsertOrderReceivedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ salePriceJpy: 4000, salePriceUsdCents: null }),
+    );
+  });
+
   it("never lets an order-bookkeeping failure block or fail the sale processing", async () => {
     applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
     upsertOrderReceivedMock.mockRejectedValue(new Error("boom"));

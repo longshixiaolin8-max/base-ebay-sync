@@ -45,9 +45,21 @@ export interface EbayInventoryLocationAddress {
   country: string;
 }
 
+/**
+ * Verified against an independently-generated eBay Fulfillment API SDK (not eBay's own
+ * developer.ebay.com docs, which this environment's network policy blocks fetching directly
+ * -- github.com/sam-ecomdev/ebay-fulfillment-api's LineItem/Amount models, themselves
+ * generated from eBay's real OpenAPI spec): `total` is the buyer-paid amount for this line
+ * item after any line-item-level discount, as an Amount{value, currency} pair.
+ */
+interface EbayAmount {
+  value: string;
+  currency: string;
+}
 interface EbayOrderLineItem {
   sku: string;
   quantity: number;
+  total?: EbayAmount;
 }
 interface EbayOrder {
   orderId: string;
@@ -511,13 +523,23 @@ export class EbayAdapter implements ChannelAdapter {
     const res = await this.authedFetch(accessToken, `/sell/fulfillment/v1/order?filter=${filter}`);
     const json = (await res.json()) as EbayOrdersResponse;
     return json.orders.flatMap((order) =>
-      order.lineItems.map((lineItem) => ({
-        channel: "ebay" as const,
-        externalProductId: lineItem.sku,
-        externalOrderId: order.orderId,
-        quantitySold: lineItem.quantity,
-        occurredAt: new Date(order.creationDate),
-      })),
+      order.lineItems.map((lineItem) => {
+        // USD is this platform's only supported eBay marketplace currency today (see
+        // pricing.ts) -- a line item settled in another currency is left unpriced here
+        // rather than silently treated as USD.
+        const salePriceUsdCents =
+          lineItem.total && lineItem.total.currency === "USD"
+            ? Math.round(Number(lineItem.total.value) * 100)
+            : undefined;
+        return {
+          channel: "ebay" as const,
+          externalProductId: lineItem.sku,
+          externalOrderId: order.orderId,
+          quantitySold: lineItem.quantity,
+          occurredAt: new Date(order.creationDate),
+          salePriceUsdCents,
+        };
+      }),
     );
   }
 

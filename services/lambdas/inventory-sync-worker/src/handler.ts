@@ -121,6 +121,8 @@ export async function processSale(
       quantity: sale.quantitySold,
       placedAt: sale.occurredAt,
       costJpy: productForOrder?.costJpy ?? null,
+      salePriceJpy: sale.salePriceJpy ?? null,
+      salePriceUsdCents: sale.salePriceUsdCents ?? null,
     });
   } catch (err) {
     await recordSyncError(db, {

@@ -521,4 +521,67 @@ describe("EbayAdapter", () => {
     const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(body.availability.shipToLocationAvailability.quantity).toBe(0);
   });
+
+  it("listRecentSales captures the line item's USD total as salePriceUsdCents", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [
+          {
+            orderId: "order-1",
+            creationDate: "2026-08-01T00:00:00.000Z",
+            lineItems: [{ sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"));
+
+    expect(sales).toEqual([
+      {
+        channel: "ebay",
+        externalProductId: "SKU-1",
+        externalOrderId: "order-1",
+        quantitySold: 2,
+        occurredAt: new Date("2026-08-01T00:00:00.000Z"),
+        salePriceUsdCents: 3998,
+      },
+    ]);
+  });
+
+  it("listRecentSales leaves salePriceUsdCents undefined for a non-USD line item, rather than misreporting it", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [
+          {
+            orderId: "order-1",
+            creationDate: "2026-08-01T00:00:00.000Z",
+            lineItems: [{ sku: "SKU-1", quantity: 1, total: { value: "50.00", currency: "GBP" } }],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date());
+
+    expect(sales[0]?.salePriceUsdCents).toBeUndefined();
+  });
+
+  it("listRecentSales leaves salePriceUsdCents undefined when the line item has no total at all", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [{ orderId: "order-1", creationDate: "2026-08-01T00:00:00.000Z", lineItems: [{ sku: "SKU-1", quantity: 1 }] }],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date());
+
+    expect(sales[0]?.salePriceUsdCents).toBeUndefined();
+  });
 });

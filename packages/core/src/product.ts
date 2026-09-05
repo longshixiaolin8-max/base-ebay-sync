@@ -72,4 +72,10 @@ export interface SaleEvent {
   externalOrderId: string;
   quantitySold: number;
   occurredAt: Date;
+  /** Total amount actually charged for this line item, in the channel's own native
+   *  currency as this platform already tracks it elsewhere (whole JPY for "base", USD cents
+   *  for "ebay") -- undefined when the channel adapter doesn't parse a price out of its
+   *  orders API response for this sale. Only one of these two is ever set, per channel. */
+  salePriceJpy?: number;
+  salePriceUsdCents?: number;
 }
