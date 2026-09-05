@@ -8,3 +8,4 @@ export * from "./anomaly-detection.js";
 export * from "./rate-control.js";
 export * from "./stockout-risk.js";
 export * from "./channel-isolation.js";
+export * from "./sync-trace.js";

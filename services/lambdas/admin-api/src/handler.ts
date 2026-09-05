@@ -14,6 +14,7 @@ import {
   reconstructInventory,
   syncErrors,
   syncJobs,
+  traceSyncHistory,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -423,6 +424,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const recommendation = await computeDynamicSafetyStock(db, id, channel);
       return json(200, recommendation);
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/sync-trace$/.test(path)) {
+      // Item #1 of the third hardening round ("同期原因追跡"): merges inventory_events,
+      // audit_log, and sync_errors for this product into one chronological timeline, so
+      // "why did inventory go from 3 to 2" is answerable without cross-referencing three
+      // separate admin queries by hand.
+      const id = path.split("/")[3]!;
+      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
+      const trace = await traceSyncHistory(db, id, limit);
+      return json(200, trace);
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/stockout-risk$/.test(path)) {

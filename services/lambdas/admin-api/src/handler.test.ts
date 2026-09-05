@@ -46,6 +46,8 @@ const predictStockoutRiskMock = vi.fn().mockResolvedValue({
   windowDays: 7,
 });
 
+const traceSyncHistoryMock = vi.fn().mockResolvedValue({ productId: "product-1", entries: [] });
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
@@ -58,6 +60,7 @@ vi.mock("@ai-ec/db", () => ({
   reconstructInventory: (...args: unknown[]) => reconstructInventoryMock(...args),
   applyReconstructedInventory: (...args: unknown[]) => applyReconstructedInventoryMock(...args),
   predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
+  traceSyncHistory: (...args: unknown[]) => traceSyncHistoryMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -438,6 +441,24 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", highRisk: true, daysUntilStockout: 1.5 });
     expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, "product-1");
+  });
+
+  it("GET /admin/products/{id}/sync-trace returns the merged event/audit/error timeline for a product", async () => {
+    traceSyncHistoryMock.mockResolvedValueOnce({
+      productId: "product-1",
+      entries: [
+        { source: "inventory_event", occurredAt: new Date("2026-09-05T10:00:00Z"), summary: "ebay sale: -1 units [applied]", detail: {} },
+      ],
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", entries: [{ source: "inventory_event" }] });
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", undefined);
+  });
+
+  it("GET /admin/products/{id}/sync-trace passes through a custom limit", async () => {
+    await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace", { limit: "20" }));
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", 20);
   });
 
   it("GET /admin/products/{id}/reconstruct-inventory previews drift without writing anything", async () => {
