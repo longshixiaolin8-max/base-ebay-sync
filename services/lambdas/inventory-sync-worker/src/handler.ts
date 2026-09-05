@@ -1,6 +1,14 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
-import { applySale, channelListings, productMaster } from "@ai-ec/db";
+import {
+  applySale,
+  calculateChannelAvailableQuantity,
+  channelListings,
+  inventoryMaster,
+  isChannelIsolated,
+  productMaster,
+  upsertOrderReceived,
+} from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -84,12 +92,46 @@ export async function processSale(
   productId: string,
   sale: SaleEvent,
 ): Promise<void> {
-  const result = await applySale(db, productId, sale.quantitySold);
+  const result = await applySale(db, productId, sale.quantitySold, {
+    channel: sale.channel,
+    sequenceAt: sale.occurredAt,
+    externalEventId: sale.externalOrderId,
+  });
 
-  if (!result.soldOut || result.alreadyZero) {
-    // Either still in stock, or another event already drove this to zero first — the
-    // double-sell guard: whichever sale arrives first wins, this one is a safe no-op.
+  if (result.alreadyZero) {
+    // Another event already drove this to zero first — the double-sell guard: whichever
+    // sale arrives first wins, this one is a safe no-op.
     return;
+  }
+
+  // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
+  // record alongside applySale above, never a replacement for it -- applySale already made
+  // the real, correctness-critical inventory decision by the time execution reaches here, so
+  // a failure recording the order must never propagate and threaten that. Neither channel's
+  // adapter currently parses a real sale price out of its orders API response (see
+  // listRecentSales in @ai-ec/adapter-base / @ai-ec/adapter-ebay) -- salePriceJpy/
+  // salePriceUsdCents are left null here rather than guessed, until that's built and verified
+  // against a real order.
+  try {
+    const [productForOrder] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
+    await upsertOrderReceived(db, {
+      productId,
+      channel: sale.channel,
+      externalOrderId: sale.externalOrderId,
+      quantity: sale.quantitySold,
+      placedAt: sale.occurredAt,
+      costJpy: productForOrder?.costJpy ?? null,
+      salePriceJpy: sale.salePriceJpy ?? null,
+      salePriceUsdCents: sale.salePriceUsdCents ?? null,
+    });
+  } catch (err) {
+    await recordSyncError(db, {
+      channel: sale.channel,
+      productId,
+      errorCode: "order_record_failed",
+      errorMessage: (err as Error).message,
+      payload: { externalOrderId: sale.externalOrderId },
+    });
   }
 
   const otherChannel = otherChannelOf(sale.channel);
@@ -99,30 +141,78 @@ export async function processSale(
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)))
     .limit(1);
 
-  await db.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
+  if (result.soldOut) {
+    await db.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
+  }
 
   if (otherListing?.status === "published" && otherListing.externalId) {
+    // Item A of the third hardening round ("チャネル障害時の隔離モード"). This is exactly
+    // the scenario a plain "is an account connected?" check can't catch: eBay's
+    // oauth_connections row can be present (accountId found) while its stored access token
+    // is expired with no refresh token to fall back on -- confirmed live, that failure
+    // happens down in getValidAccessToken below, past the connected-account check. Catching
+    // it here instead, before spending an attempt on a call already known likely to fail
+    // the same way, and treating it as a known, tracked condition rather than a fresh
+    // failure to throw and retry-spam on.
+    const isolation = await isChannelIsolated(db, otherChannel);
+    if (isolation.isolated) {
+      await recordAuditLog(db, {
+        actor: "system:inventory-sync-worker",
+        action: "other_channel_isolated_skip",
+        entityType: "product",
+        entityId: productId,
+        after: { isolatedChannel: otherChannel, reasons: isolation.reasons },
+      });
+      return;
+    }
+
     const [accountId] = await listConnectedAccountIds(db, otherChannel);
     if (!accountId) {
-      throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
+      if (result.soldOut) {
+        throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
+      }
+      // Not sold out — the other channel's own next scheduled/triggered sync will catch
+      // this up once it's reconnected; nothing urgent enough to fail the whole sale event.
+      return;
     }
     const adapter = adapters[otherChannel];
     const accessToken = await getValidAccessToken(db, adapter, accountId);
-    await adapter.setInventory(accessToken, otherListing.externalId, 0);
+
+    let pushedQuantity: number;
+    if (result.soldOut) {
+      pushedQuantity = 0;
+    } else {
+      // Item #3 of the second hardening round (即時同期, a reinterpretation of 在庫予約ロック:
+      // neither BASE nor eBay gives this platform a hook to reserve stock *before* a buyer
+      // checks out on either one, so the closest real equivalent is shrinking the window a
+      // sale sits unreflected on the other channel). Previously a partial decrement (still
+      // in stock afterward) just waited for that channel's own next scheduled/triggered sync
+      // cycle to notice — push the freshly-reduced available quantity right now instead.
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
+      const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+      if (!product || !inventory) return; // nothing to push without both rows
+      pushedQuantity = calculateChannelAvailableQuantity(
+        inventory.quantity,
+        inventory.safetyStockBuffer,
+        otherChannel,
+        product.sourceChannel,
+      );
+    }
+    await adapter.setInventory(accessToken, otherListing.externalId, pushedQuantity);
 
     await db
       .update(channelListings)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)));
-  }
 
-  await recordAuditLog(db, {
-    actor: "system:inventory-sync-worker",
-    action: "inventory_zeroed_due_to_sale",
-    entityType: "product",
-    entityId: productId,
-    after: { soldOnChannel: sale.channel, orderId: sale.externalOrderId, zeroedChannel: otherChannel },
-  });
+    await recordAuditLog(db, {
+      actor: "system:inventory-sync-worker",
+      action: result.soldOut ? "inventory_zeroed_due_to_sale" : "inventory_immediate_sync_after_sale",
+      entityType: "product",
+      entityId: productId,
+      after: { soldOnChannel: sale.channel, orderId: sale.externalOrderId, syncedChannel: otherChannel, pushedQuantity },
+    });
+  }
 }
 
 function notImplementedAdapter(channel: string): ChannelAdapter {

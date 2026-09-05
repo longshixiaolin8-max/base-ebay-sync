@@ -56,6 +56,7 @@ describe("EbayAdapter", () => {
       images: ["https://img.example/1.jpg"],
       categoryId: "12345",
       itemSpecifics: { Brand: "Unknown", Size: null },
+      condition: "USED_GOOD",
     });
 
     expect(result.externalId).toBe("SKU-1");
@@ -93,6 +94,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "12345",
       itemSpecifics: {},
+      condition: "NEW",
     });
 
     expect(result.externalId).toBe("SKU-1");
@@ -128,6 +130,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "1",
       itemSpecifics: { Brand: "Coach", Material: null },
+      condition: "USED_GOOD",
     });
 
     const inventoryCallBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
@@ -309,6 +312,7 @@ describe("EbayAdapter", () => {
       images: [],
       categoryId: "1",
       itemSpecifics: {},
+      condition: "NEW",
     });
 
     const offerCallBody = JSON.parse((fetchMock.mock.calls[2]?.[1] as RequestInit).body as string);
@@ -367,6 +371,132 @@ describe("EbayAdapter", () => {
     expect(body.product.title).toBe("Existing Title"); // unspecified fields merged from current
   });
 
+  it("updateListing sends an explicit condition instead of hardcoding NEW", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "NEW",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [] },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { condition: "USED_VERY_GOOD" });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.condition).toBe("USED_VERY_GOOD");
+  });
+
+  it("updateListing carries over the current condition when none is specified", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_GOOD",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [] },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { quantity: 4 });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.condition).toBe("USED_GOOD");
+  });
+
+  it("updateListing carries over existing item-specific aspects when none are specified", async () => {
+    // Regression: eBay's PUT inventory_item is a full replace, not a merge. A quantity-only
+    // update that omitted `aspects` had silently wiped a category-required aspect (Type),
+    // breaking the listing with errorId 25002 on the next republish -- confirmed live.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_EXCELLENT",
+          product: {
+            title: "Existing Title",
+            description: "<p>existing</p>",
+            imageUrls: [],
+            aspects: { Type: ["Bracelet"], Brand: ["Unbranded"] },
+          },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.updateListing("token", "SKU-1", { quantity: 4 });
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    expect(body.product.aspects).toEqual({ Type: ["Bracelet"], Brand: ["Unbranded"] });
+  });
+
+  it("rolls back the content PUT and throws EbayPartialUpdateRolledBackError when the price PUT fails after content already succeeded", async () => {
+    // Item #3 of the second hardening round ("自動ロールバック"). updateListing() makes two
+    // independent calls -- if the content PUT lands but the price PUT then fails, the live
+    // listing would otherwise show a new title/condition next to a stale price. Confirm the
+    // content half gets reverted to exactly what it was, rather than left inconsistent.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_GOOD",
+          product: { title: "Existing Title", description: "<p>existing</p>", imageUrls: [], aspects: { Type: ["Bracelet"] } },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      ) // GET current
+      .mockResolvedValueOnce(jsonResponse({})) // PUT inventory_item (content, succeeds)
+      .mockResolvedValueOnce(jsonResponse({ offers: [{ offerId: "offer-1", sku: "SKU-1" }] })) // GET offer?sku=
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "boom" }] }, 500)) // PUT offer (price, fails)
+      .mockResolvedValueOnce(jsonResponse({})); // PUT inventory_item (rollback)
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+
+    await expect(
+      adapter.updateListing("token", "SKU-1", { titleEn: "New Title", priceUsd: 19.99 }),
+    ).rejects.toThrow(/rolled back to its prior state/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const rollbackCall = fetchMock.mock.calls[4] as [string, RequestInit];
+    expect(rollbackCall[0]).toBe("https://api.example-ebay.test/sell/inventory/v1/inventory_item/SKU-1");
+    expect(rollbackCall[1].method).toBe("PUT");
+    const rollbackBody = JSON.parse(rollbackCall[1].body as string);
+    // Reverted to the pre-update snapshot -- not the "New Title" the failed attempt tried to push.
+    expect(rollbackBody.product.title).toBe("Existing Title");
+    expect(rollbackBody.product.aspects).toEqual({ Type: ["Bracelet"] });
+    expect(rollbackBody.condition).toBe("USED_GOOD");
+  });
+
+  it("does not roll back or wrap the error when only price changes and the price PUT fails", async () => {
+    // No content PUT happened in this call at all, so there is nothing to roll back --
+    // the original error should propagate unchanged.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ offers: [{ offerId: "offer-1", sku: "SKU-1" }] })) // GET offer?sku=
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "boom" }] }, 500)); // PUT offer (price, fails)
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+
+    await expect(adapter.updateListing("token", "SKU-1", { priceUsd: 19.99 })).rejects.toMatchObject({
+      name: "EbayApiError",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // no third (rollback) call
+  });
+
   it("updateListing makes no inventory_item call when nothing relevant changed", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -390,5 +520,68 @@ describe("EbayAdapter", () => {
     );
     const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
     expect(body.availability.shipToLocationAvailability.quantity).toBe(0);
+  });
+
+  it("listRecentSales captures the line item's USD total as salePriceUsdCents", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [
+          {
+            orderId: "order-1",
+            creationDate: "2026-08-01T00:00:00.000Z",
+            lineItems: [{ sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"));
+
+    expect(sales).toEqual([
+      {
+        channel: "ebay",
+        externalProductId: "SKU-1",
+        externalOrderId: "order-1",
+        quantitySold: 2,
+        occurredAt: new Date("2026-08-01T00:00:00.000Z"),
+        salePriceUsdCents: 3998,
+      },
+    ]);
+  });
+
+  it("listRecentSales leaves salePriceUsdCents undefined for a non-USD line item, rather than misreporting it", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [
+          {
+            orderId: "order-1",
+            creationDate: "2026-08-01T00:00:00.000Z",
+            lineItems: [{ sku: "SKU-1", quantity: 1, total: { value: "50.00", currency: "GBP" } }],
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date());
+
+    expect(sales[0]?.salePriceUsdCents).toBeUndefined();
+  });
+
+  it("listRecentSales leaves salePriceUsdCents undefined when the line item has no total at all", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        orders: [{ orderId: "order-1", creationDate: "2026-08-01T00:00:00.000Z", lineItems: [{ sku: "SKU-1", quantity: 1 }] }],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date());
+
+    expect(sales[0]?.salePriceUsdCents).toBeUndefined();
   });
 });

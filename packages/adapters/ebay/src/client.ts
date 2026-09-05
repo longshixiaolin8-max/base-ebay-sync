@@ -24,7 +24,7 @@ interface EbayTokenResponse {
 
 interface EbayInventoryItem {
   sku: string;
-  product: { title: string; description: string; imageUrls: string[] };
+  product: { title: string; description: string; imageUrls: string[]; aspects?: Record<string, string[]> };
   availability: { shipToLocationAvailability: { quantity: number } };
 }
 
@@ -45,9 +45,21 @@ export interface EbayInventoryLocationAddress {
   country: string;
 }
 
+/**
+ * Verified against an independently-generated eBay Fulfillment API SDK (not eBay's own
+ * developer.ebay.com docs, which this environment's network policy blocks fetching directly
+ * -- github.com/sam-ecomdev/ebay-fulfillment-api's LineItem/Amount models, themselves
+ * generated from eBay's real OpenAPI spec): `total` is the buyer-paid amount for this line
+ * item after any line-item-level discount, as an Amount{value, currency} pair.
+ */
+interface EbayAmount {
+  value: string;
+  currency: string;
+}
 interface EbayOrderLineItem {
   sku: string;
   quantity: number;
+  total?: EbayAmount;
 }
 interface EbayOrder {
   orderId: string;
@@ -65,6 +77,24 @@ class EbayApiError extends Error {
   ) {
     super(`eBay API error ${status}: ${body}`);
     this.name = "EbayApiError";
+  }
+}
+
+/**
+ * Item #3 of the second hardening round ("自動ロールバック -- 誤同期した場合、直前の
+ * 正常状態へ自動復元"). updateListing() makes two independent eBay API calls (the
+ * inventory_item content PUT, then a separate offer price PUT) -- if the first succeeds
+ * and the second fails, the live listing is left showing a new title/condition/quantity
+ * next to a stale price, a real inconsistency a buyer could see. When that happens,
+ * updateListing() reverts the content PUT back to what it was a moment before (the exact
+ * state it already fetched to build the update) and throws this instead of the raw error,
+ * so the caller knows a rollback happened and can record it -- the update still counts as
+ * failed and flows through the normal sync_errors/retry path either way.
+ */
+export class EbayPartialUpdateRolledBackError extends Error {
+  constructor(readonly cause: Error) {
+    super(`eBay listing update partially applied then rolled back to its prior state: ${cause.message}`);
+    this.name = "EbayPartialUpdateRolledBackError";
   }
 }
 
@@ -245,6 +275,29 @@ export class EbayAdapter implements ChannelAdapter {
     return (json.aspects ?? []).filter((a) => a.aspectConstraint?.aspectRequired).map((a) => a.localizedAspectName);
   }
 
+  /**
+   * Real, per-category allowed condition values (eBay's Sell Metadata API) -- some
+   * categories (e.g. fine jewelry) only support a subset of the generic ConditionEnum,
+   * and publishing an unsupported one fails with errorId 25059. Never guess; verify.
+   */
+  async getConditionPolicies(
+    appAccessToken: string,
+    categoryId: string,
+  ): Promise<Array<{ conditionId: string; conditionDescription: string }>> {
+    const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
+    const res = await fetch(
+      `${this.apiBaseUrl}/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=categoryIds:{${encodeURIComponent(categoryId)}}`,
+      { headers: { Authorization: `Bearer ${appAccessToken}` } },
+    );
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const json = (await res.json()) as {
+      itemConditionPolicies?: Array<{
+        itemConditions?: Array<{ conditionId: string; conditionDescription: string }>;
+      }>;
+    };
+    return json.itemConditionPolicies?.[0]?.itemConditions ?? [];
+  }
+
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);
@@ -321,7 +374,7 @@ export class EbayAdapter implements ChannelAdapter {
       method: "PUT",
       body: JSON.stringify({
         availability: { shipToLocationAvailability: { quantity: input.quantity } },
-        condition: "NEW",
+        condition: input.condition,
         product: {
           title: input.titleEn,
           description: input.descriptionHtmlEn,
@@ -371,39 +424,77 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async updateListing(accessToken: string, externalId: string, input: UpdateListingInput): Promise<void> {
+    let contentPutApplied = false;
+    let priorInventoryItemBody: Record<string, unknown> | undefined;
+
     if (
       input.titleEn !== undefined ||
       input.descriptionHtmlEn !== undefined ||
       input.images !== undefined ||
-      input.quantity !== undefined
+      input.quantity !== undefined ||
+      input.condition !== undefined ||
+      input.itemSpecifics !== undefined
     ) {
-      const current = await this.getProduct(accessToken, externalId);
+      // eBay's PUT inventory_item is a full replace, not a merge -- any field we omit is
+      // cleared, not left as-is (confirmed live: an update that only touched quantity had
+      // silently wiped the listing's required "Type" aspect, breaking republish with
+      // errorId 25002). Fetch the raw current item so every field not explicitly being
+      // changed here is carried over instead of dropped.
+      const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
+      const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
+      // The exact same body, but with every field defaulted to its pre-update value --
+      // i.e. a full no-op restore of "current" -- kept in case the price PUT below fails
+      // and this content half needs to be rolled back (see EbayPartialUpdateRolledBackError).
+      priorInventoryItemBody = {
+        availability: {
+          shipToLocationAvailability: { quantity: current.availability?.shipToLocationAvailability?.quantity ?? 0 },
+        },
+        condition: current.condition,
+        product: {
+          title: current.product?.title,
+          description: current.product?.description,
+          imageUrls: current.product?.imageUrls,
+          aspects: current.product?.aspects,
+        },
+      };
       await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
         method: "PUT",
         body: JSON.stringify({
           availability: {
-            shipToLocationAvailability: { quantity: input.quantity ?? current?.quantity ?? 0 },
+            shipToLocationAvailability: {
+              quantity: input.quantity ?? current.availability?.shipToLocationAvailability?.quantity ?? 0,
+            },
           },
-          condition: "NEW",
+          condition: input.condition ?? current.condition,
           product: {
-            title: input.titleEn ?? current?.title,
-            description: input.descriptionHtmlEn ?? current?.descriptionHtml,
-            imageUrls: input.images ?? current?.images,
-            aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : undefined,
+            title: input.titleEn ?? current.product?.title,
+            description: input.descriptionHtmlEn ?? current.product?.description,
+            imageUrls: input.images ?? current.product?.imageUrls,
+            aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : current.product?.aspects,
           },
         }),
       });
+      contentPutApplied = true;
     }
 
     if (input.priceUsd !== undefined) {
-      const offerId = await this.findOfferId(accessToken, externalId);
-      if (offerId) {
-        await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}`, {
+      try {
+        const offerId = await this.findOfferId(accessToken, externalId);
+        if (offerId) {
+          await this.authedFetch(accessToken, `/sell/inventory/v1/offer/${offerId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
+            }),
+          });
+        }
+      } catch (err) {
+        if (!contentPutApplied || !priorInventoryItemBody) throw err; // nothing was applied, nothing to roll back
+        await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
           method: "PUT",
-          body: JSON.stringify({
-            pricingSummary: { price: { value: input.priceUsd.toFixed(2), currency: "USD" } },
-          }),
+          body: JSON.stringify(priorInventoryItemBody),
         });
+        throw new EbayPartialUpdateRolledBackError(err as Error);
       }
     }
   }
@@ -432,13 +523,23 @@ export class EbayAdapter implements ChannelAdapter {
     const res = await this.authedFetch(accessToken, `/sell/fulfillment/v1/order?filter=${filter}`);
     const json = (await res.json()) as EbayOrdersResponse;
     return json.orders.flatMap((order) =>
-      order.lineItems.map((lineItem) => ({
-        channel: "ebay" as const,
-        externalProductId: lineItem.sku,
-        externalOrderId: order.orderId,
-        quantitySold: lineItem.quantity,
-        occurredAt: new Date(order.creationDate),
-      })),
+      order.lineItems.map((lineItem) => {
+        // USD is this platform's only supported eBay marketplace currency today (see
+        // pricing.ts) -- a line item settled in another currency is left unpriced here
+        // rather than silently treated as USD.
+        const salePriceUsdCents =
+          lineItem.total && lineItem.total.currency === "USD"
+            ? Math.round(Number(lineItem.total.value) * 100)
+            : undefined;
+        return {
+          channel: "ebay" as const,
+          externalProductId: lineItem.sku,
+          externalOrderId: order.orderId,
+          quantitySold: lineItem.quantity,
+          occurredAt: new Date(order.creationDate),
+          salePriceUsdCents,
+        };
+      }),
     );
   }
 

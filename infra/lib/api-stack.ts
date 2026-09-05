@@ -66,15 +66,19 @@ export class ApiStack extends cdk.Stack {
     addRoute("RetrySyncError", apigwv2.HttpMethod.POST, "/admin/sync-errors/{id}/retry", adminIntegration, true);
     addRoute("GetAuditLog", apigwv2.HttpMethod.GET, "/admin/audit-log", adminIntegration, true);
 
-    // /authorize kicks off the OAuth consent flow and must only be triggerable by a
-    // signed-in admin operator; /callback is hit by BASE/eBay's own redirect (no
-    // Cognito session), so it relies on the signed `state` param for CSRF protection.
+    // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
+    // no state-changing action happens here. It was originally gated behind Cognito on the
+    // assumption the admin app would call it with a session token, but no such UI was ever
+    // built, so a plain browser visit (the only way this is actually used) always 401'd.
+    // /callback (BASE/eBay's own redirect target, which never carries a Cognito session
+    // either) already relies on the signed `state` param for CSRF protection, not Cognito --
+    // /authorize is unauthenticated for the same reason and with the same protection.
     addRoute(
       "OauthBaseAuthorize",
       apigwv2.HttpMethod.GET,
       "/oauth/base/authorize",
       new HttpLambdaIntegration("OauthBaseAuthorizeIntegration", props.oauthBaseAuthorizeFn),
-      true,
+      false,
     );
     addRoute(
       "OauthBaseCallback",
@@ -88,7 +92,7 @@ export class ApiStack extends cdk.Stack {
       apigwv2.HttpMethod.GET,
       "/oauth/ebay/authorize",
       new HttpLambdaIntegration("OauthEbayAuthorizeIntegration", props.oauthEbayAuthorizeFn),
-      true,
+      false,
     );
     addRoute(
       "OauthEbayCallback",

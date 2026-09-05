@@ -9,7 +9,9 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@ai-ec/adapter-base": "workspace:*",
     "@ai-ec/adapter-ebay": "workspace:*",
+    "@ai-ec/ai": "workspace:*",
     "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
     "@ai-ec/lambda-shared": "workspace:*",

@@ -21,4 +21,14 @@ export function getQueueUrls() {
   };
 }
 
+/** Same env var names dlq-redrive already reads (see services/lambdas/dlq-redrive) --
+ *  reused here so admin-api's SLO endpoint can report live DLQ depth. */
+export function getDlqUrls() {
+  return {
+    aiGenerate: requireEnv("AI_GENERATE_DLQ_URL"),
+    ebaySync: requireEnv("EBAY_SYNC_DLQ_URL"),
+    inventorySync: requireEnv("INVENTORY_SYNC_DLQ_URL"),
+  };
+}
+
 export { requireEnv };

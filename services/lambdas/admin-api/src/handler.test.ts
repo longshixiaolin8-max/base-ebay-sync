@@ -1,13 +1,103 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
+  channel: "ebay",
+  score: 100,
+  windowHours: 24,
+  successCount: 0,
+  failureCount: 0,
+  outOfOrderEventCount: 0,
+  totalEventCount: 0,
+});
+
+const computeDynamicSafetyStockMock = vi.fn().mockResolvedValue({
+  productId: "product-1",
+  channel: "ebay",
+  recommendedBuffer: 0,
+  salesPerDay: 0,
+  windowDays: 7,
+  pollIntervalMinutes: 1,
+  confidenceScore: 100,
+  riskMultiplier: 1,
+});
+
+const reconstructInventoryMock = vi.fn().mockResolvedValue({
+  reconstructedQuantity: 3,
+  currentQuantity: 3,
+  drifted: false,
+  eventsReplayed: 1,
+});
+
+const applyReconstructedInventoryMock = vi.fn().mockResolvedValue({
+  reconstructedQuantity: 3,
+  currentQuantity: 3,
+  drifted: false,
+  eventsReplayed: 1,
+  applied: false,
+});
+
+const predictStockoutRiskMock = vi.fn().mockResolvedValue({
+  productId: "product-1",
+  daysUntilStockout: null,
+  highRisk: false,
+  salesPerDay: 0,
+  currentQuantity: 5,
+  windowDays: 7,
+});
+
+const traceSyncHistoryMock = vi.fn().mockResolvedValue({ productId: "product-1", entries: [] });
+
+const finalizeOrderProfitMock = vi.fn();
+const findStaleProductsMock = vi.fn();
+const getInventoryBreakdownMock = vi.fn();
+const getLiveOrderProfitMock = vi.fn();
+const getSnsContentMock = vi.fn();
+const listOrdersMock = vi.fn();
+const listOrdersForProductMock = vi.fn();
+const markSnsStatusMock = vi.fn();
+const transitionOrderStatusMock = vi.fn();
+const upsertSnsScriptMock = vi.fn();
+const computeChannelSyncStateMock = vi.fn();
+
+class InvalidOrderTransitionErrorFake extends Error {}
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
   inventoryMaster: {},
-  syncErrors: {},
+  syncErrors: { createdAt: "createdAt" },
   syncJobs: {},
-  auditLog: {},
+  auditLog: { createdAt: "createdAt" },
+  orders: {},
+  aiListingDraft: { createdAt: "createdAt" },
+  computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
+  computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
+  reconstructInventory: (...args: unknown[]) => reconstructInventoryMock(...args),
+  applyReconstructedInventory: (...args: unknown[]) => applyReconstructedInventoryMock(...args),
+  predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
+  traceSyncHistory: (...args: unknown[]) => traceSyncHistoryMock(...args),
+  finalizeOrderProfit: (...args: unknown[]) => finalizeOrderProfitMock(...args),
+  findStaleProducts: (...args: unknown[]) => findStaleProductsMock(...args),
+  getInventoryBreakdown: (...args: unknown[]) => getInventoryBreakdownMock(...args),
+  getLiveOrderProfit: (...args: unknown[]) => getLiveOrderProfitMock(...args),
+  getSnsContent: (...args: unknown[]) => getSnsContentMock(...args),
+  InvalidOrderTransitionError: InvalidOrderTransitionErrorFake,
+  listOrders: (...args: unknown[]) => listOrdersMock(...args),
+  listOrdersForProduct: (...args: unknown[]) => listOrdersForProductMock(...args),
+  markSnsStatus: (...args: unknown[]) => markSnsStatusMock(...args),
+  transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
+  upsertSnsScript: (...args: unknown[]) => upsertSnsScriptMock(...args),
+  computeChannelSyncState: (...args: unknown[]) => computeChannelSyncStateMock(...args),
+}));
+
+const createAIModelClientMock = vi.fn().mockReturnValue({ generateJson: vi.fn() });
+const generateSnsScriptMock = vi.fn();
+const suggestStaleProductImprovementMock = vi.fn();
+vi.mock("@ai-ec/ai", () => ({
+  createAIModelClient: (...args: unknown[]) => createAIModelClientMock(...args),
+  generateSnsScript: (...args: unknown[]) => generateSnsScriptMock(...args),
+  suggestStaleProductImprovement: (...args: unknown[]) => suggestStaleProductImprovementMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
@@ -49,6 +139,11 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   getRequiredItemAspects: getRequiredItemAspectsMock,
 }));
 
+const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+const getDlqUrlsMock = vi.fn(() => {
+  throw new Error("Missing required environment variable: AI_GENERATE_DLQ_URL");
+});
+const getApproximateMessageCountMock = vi.fn().mockResolvedValue(0);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
@@ -58,6 +153,9 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
+  fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
+  getDlqUrls: () => getDlqUrlsMock(),
+  getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -111,6 +209,19 @@ describe("admin-api handler", () => {
   beforeEach(() => {
     enqueueMock.mockClear();
     recordAuditLogMock.mockClear();
+    finalizeOrderProfitMock.mockClear();
+    findStaleProductsMock.mockClear();
+    getInventoryBreakdownMock.mockClear();
+    getLiveOrderProfitMock.mockClear();
+    getSnsContentMock.mockClear();
+    listOrdersMock.mockClear();
+    listOrdersForProductMock.mockClear();
+    markSnsStatusMock.mockClear();
+    transitionOrderStatusMock.mockReset();
+    upsertSnsScriptMock.mockClear();
+    computeChannelSyncStateMock.mockClear();
+    generateSnsScriptMock.mockClear();
+    suggestStaleProductImprovementMock.mockClear();
   });
 
   it("GET /admin/products returns the product list", async () => {
@@ -286,8 +397,9 @@ describe("admin-api handler", () => {
       nextCursor: undefined,
     });
     fakeDb = createFakeDb([
-      [{ externalId: "base-tracked-1" }], // tracked channel_listings(ebay) rows
-      [{ id: "product-999" }], // product_master lookup for base-999 -> match
+      [{ externalId: "base-tracked-1", productId: "tracked-product-id" }], // tracked channel_listings(ebay) rows
+      [], // candidate product pool for fuzzy matching -- empty, so "hand-listed-sku" gets no suggestion
+      [{ id: "product-999" }], // product_master lookup for base-999 -> deterministic match
     ]);
 
     const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
@@ -298,6 +410,35 @@ describe("admin-api handler", () => {
         { externalId: "hand-listed-sku", title: "Pre-existing, not ours", suggestedProductId: null },
       ],
     });
+  });
+
+  it("GET /admin/ebay/unmanaged-listings suggests a product by title/attribute similarity when there is no deterministic SKU match", async () => {
+    // Item #5 of the third hardening round ("自動商品同一性判定").
+    listProductsMock.mockResolvedValueOnce({
+      items: [{ externalId: "hand-listed-sku", title: "Vintage Sterling Silver Bead Bracelet Cross Charm Taxco Style" }],
+      nextCursor: undefined,
+    });
+    fakeDb = createFakeDb([
+      [], // no tracked channel_listings(ebay) rows at all
+      [
+        {
+          id: "candidate-1",
+          title: "Vintage Sterling Silver Bead Bracelet Cross Charm Taxco",
+          brand: null,
+          material: null,
+          sizeLabel: null,
+        },
+      ],
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
+
+    expect(res.statusCode).toBe(200);
+    const { unmanagedListings } = JSON.parse(res.body!) as {
+      unmanagedListings: Array<{ suggestedProductId: string | null; matchScore?: number }>;
+    };
+    expect(unmanagedListings[0]!.suggestedProductId).toBe("candidate-1");
+    expect(unmanagedListings[0]!.matchScore).toBeGreaterThanOrEqual(50);
   });
 
   it("POST /admin/products/{id}/link-ebay-listing links an unmanaged eBay SKU to a product", async () => {
@@ -337,6 +478,183 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("GET /admin/sync/confidence returns the computed score for a channel", async () => {
+    computeSyncConfidenceMock.mockResolvedValueOnce({
+      channel: "ebay",
+      score: 63,
+      windowHours: 24,
+      successCount: 2,
+      failureCount: 2,
+      outOfOrderEventCount: 1,
+      totalEventCount: 4,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/sync/confidence", { channel: "ebay" }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ channel: "ebay", score: 63 });
+    expect(computeSyncConfidenceMock).toHaveBeenCalledWith(fakeDb, "ebay", undefined);
+  });
+
+  it("GET /admin/sync/confidence returns 400 without a channel", async () => {
+    const res = await callHandler(makeEvent("GET", "/admin/sync/confidence"));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("GET /admin/products/{id}/dynamic-safety-stock returns the recommended buffer for a product", async () => {
+    computeDynamicSafetyStockMock.mockResolvedValueOnce({
+      productId: "product-1",
+      channel: "ebay",
+      recommendedBuffer: 2,
+      salesPerDay: 3,
+      windowDays: 7,
+      pollIntervalMinutes: 1,
+      confidenceScore: 90,
+      riskMultiplier: 1,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-safety-stock"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", recommendedBuffer: 2 });
+    expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, "product-1", "ebay");
+  });
+
+  it("GET /admin/products/{id}/stockout-risk returns the predicted stockout risk for a product", async () => {
+    predictStockoutRiskMock.mockResolvedValueOnce({
+      productId: "product-1",
+      daysUntilStockout: 1.5,
+      highRisk: true,
+      salesPerDay: 2,
+      currentQuantity: 3,
+      windowDays: 7,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/stockout-risk"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", highRisk: true, daysUntilStockout: 1.5 });
+    expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, "product-1");
+  });
+
+  it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(200);
+    expect(fetchFxRateMock).toHaveBeenCalledTimes(1);
+    // costUsd = 67; P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 102.94, fxSource: "test" });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price uses this product's saved shipping/margin overrides", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    // costUsd = 67; P = (67*1.5 + 15 + 0.40) / 0.85 ≈ 136.35
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price lets query params override the saved config for a hypothetical preview", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(
+      makeEvent("GET", "/admin/products/product-1/dynamic-price", { shippingUsd: "15", targetMarginRatio: "0.5" }),
+    );
+
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price returns 404 for a product that doesn't exist", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/missing/dynamic-price"));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/pricing-config persists the shipping/margin overrides", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/product-1/pricing-config", {}, { shippingCostUsd: 15, targetMarginRatio: 0.5 }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "pricing_config_updated",
+        entityId: "product-1",
+        after: { shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 },
+      }),
+    );
+  });
+
+  it("POST /admin/products/{id}/pricing-config clears an override back to the platform default with null", async () => {
+    fakeDb = createFakeDb([]);
+    await callHandler(makeEvent("POST", "/admin/products/product-1/pricing-config", {}, { shippingCostUsd: null }));
+
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ after: { shippingCostUsdCents: null } }),
+    );
+  });
+
+  it("GET /admin/products/{id}/sync-trace returns the merged event/audit/error timeline for a product", async () => {
+    traceSyncHistoryMock.mockResolvedValueOnce({
+      productId: "product-1",
+      entries: [
+        { source: "inventory_event", occurredAt: new Date("2026-09-05T10:00:00Z"), summary: "ebay sale: -1 units [applied]", detail: {} },
+      ],
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", entries: [{ source: "inventory_event" }] });
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", undefined);
+  });
+
+  it("GET /admin/products/{id}/sync-trace passes through a custom limit", async () => {
+    await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace", { limit: "20" }));
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", 20);
+  });
+
+  it("GET /admin/products/{id}/reconstruct-inventory previews drift without writing anything", async () => {
+    reconstructInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 10,
+      drifted: true,
+      eventsReplayed: 2,
+    });
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/reconstruct-inventory"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ reconstructedQuantity: 3, currentQuantity: 10, drifted: true });
+    expect(applyReconstructedInventoryMock).not.toHaveBeenCalled();
+  });
+
+  it("POST /admin/products/{id}/reconstruct-inventory applies drift and records an audit log entry", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 10,
+      drifted: true,
+      eventsReplayed: 2,
+      applied: true,
+    });
+    const res = await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toMatchObject({ applied: true, reconstructedQuantity: 3 });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "inventory_reconstructed", entityId: "product-1" }),
+    );
+  });
+
+  it("POST /admin/products/{id}/reconstruct-inventory records no audit log when there was no drift to apply", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 3,
+      drifted: false,
+      eventsReplayed: 1,
+      applied: false,
+    });
+    const res = await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(res.statusCode).toBe(200);
+    expect(recordAuditLogMock).not.toHaveBeenCalled();
+  });
+
   it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {
     getRequiredItemAspectsMock.mockResolvedValueOnce(["Brand", "Type"]);
     const res = await callHandler(makeEvent("GET", "/admin/ebay/required-aspects", { categoryId: "262003" }));
@@ -368,5 +686,203 @@ describe("admin-api handler", () => {
     fakeDb = createFakeDb([]);
     const res = await callHandler(makeEvent("GET", "/admin/nonexistent"));
     expect(res.statusCode).toBe(404);
+  });
+
+  describe("commercial-features round", () => {
+    it("GET /admin/orders lists orders, optionally filtered by status", async () => {
+      listOrdersMock.mockResolvedValueOnce([{ id: "o1", status: "SHIPPED" }]);
+      const res = await callHandler(makeEvent("GET", "/admin/orders", { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ orders: [{ id: "o1", status: "SHIPPED" }] });
+      expect(listOrdersMock).toHaveBeenCalledWith(expect.anything(), { status: "SHIPPED", limit: undefined });
+    });
+
+    it("GET /admin/products/{id}/orders lists that product's orders", async () => {
+      listOrdersForProductMock.mockResolvedValueOnce([{ id: "o1" }]);
+      const res = await callHandler(makeEvent("GET", "/admin/products/p1/orders"));
+      expect(res.statusCode).toBe(200);
+      expect(listOrdersForProductMock).toHaveBeenCalledWith(expect.anything(), "p1");
+    });
+
+    it("GET /admin/orders/{id}/profit returns a finalized snapshot when already finalized", async () => {
+      fakeDb = createFakeDb([[{ id: "o1", profitFinalizedAt: new Date("2026-01-01"), finalizedNetProfitUsdCents: 500 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/orders/o1/profit"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toMatchObject({ finalized: true, netProfitUsdCents: 500 });
+      expect(getLiveOrderProfitMock).not.toHaveBeenCalled();
+    });
+
+    it("GET /admin/orders/{id}/profit computes live profit when not yet finalized", async () => {
+      fakeDb = createFakeDb([[{ id: "o1", profitFinalizedAt: null }]]);
+      getLiveOrderProfitMock.mockReturnValueOnce({ revenueUsdCents: 5000, costUsdCents: 4000, netProfitUsdCents: 1000, profitMarginBasisPoints: 2000 });
+      const res = await callHandler(makeEvent("GET", "/admin/orders/o1/profit"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toMatchObject({ finalized: false, netProfitUsdCents: 1000 });
+    });
+
+    it("POST /admin/orders/{id}/status applies a valid transition", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "PAID" });
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "PAID" }));
+      expect(res.statusCode).toBe(200);
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "order_status_changed", entityId: "o1" }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status returns 400 for an unrecognized status value", async () => {
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "NOT_A_REAL_STATUS" }));
+      expect(res.statusCode).toBe(400);
+      expect(transitionOrderStatusMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status returns 409 for an illegal transition", async () => {
+      transitionOrderStatusMock.mockRejectedValueOnce(new InvalidOrderTransitionErrorFake("bad transition"));
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(409);
+    });
+
+    it("POST /admin/orders/{id}/finalize-profit snapshots the profit", async () => {
+      finalizeOrderProfitMock.mockResolvedValueOnce({ id: "o1", finalizedNetProfitUsdCents: 1000 });
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/finalize-profit"));
+      expect(res.statusCode).toBe(200);
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "order_profit_finalized", entityId: "o1" }),
+      );
+    });
+
+    it("POST /admin/products/{id}/purchase-info requires costJpy", async () => {
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/purchase-info", {}, {}));
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("POST /admin/products/{id}/purchase-info records the cost and audit log", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/purchase-info", {}, { costJpy: 3000 }));
+      expect(res.statusCode).toBe(200);
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "product_purchased", entityId: "p1" }),
+      );
+    });
+
+    it("GET /admin/products/{id}/inventory-breakdown returns 404 when the product/inventory row is missing", async () => {
+      getInventoryBreakdownMock.mockResolvedValueOnce(null);
+      const res = await callHandler(makeEvent("GET", "/admin/products/p1/inventory-breakdown"));
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("GET /admin/products/{id}/inventory-breakdown returns the breakdown", async () => {
+      getInventoryBreakdownMock.mockResolvedValueOnce({ productId: "p1", onHand: 5, reserved: 1, available: 5, safetyBuffer: 1, sellableByChannel: {} });
+      const res = await callHandler(makeEvent("GET", "/admin/products/p1/inventory-breakdown"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toMatchObject({ onHand: 5, reserved: 1 });
+    });
+
+    it("GET /admin/stale-products lists stale products", async () => {
+      findStaleProductsMock.mockResolvedValueOnce([{ productId: "p1", daysListed: 45, level: "stale_30" }]);
+      const res = await callHandler(makeEvent("GET", "/admin/stale-products"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ staleProducts: [{ productId: "p1", daysListed: 45, level: "stale_30" }] });
+    });
+
+    it("POST /admin/products/{id}/stale-suggestion returns 404 when the product doesn't exist", async () => {
+      fakeDb = createFakeDb([[]]);
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/stale-suggestion"));
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("POST /admin/products/{id}/stale-suggestion generates a live AI suggestion without persisting it", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [], createdAt: new Date(Date.now() - 45 * 86400000) }],
+      ]);
+      suggestStaleProductImprovementMock.mockResolvedValueOnce({ suggestion: "Cut the price.", suggestedActions: ["Cut price by 15%"] });
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/stale-suggestion"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toMatchObject({ productId: "p1", suggestion: "Cut the price." });
+    });
+
+    it("GET /admin/products/{id}/sns returns the sns content row (or null)", async () => {
+      getSnsContentMock.mockResolvedValueOnce(null);
+      const res = await callHandler(makeEvent("GET", "/admin/products/p1/sns"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ snsContent: null });
+    });
+
+    it("POST /admin/products/{id}/sns/script generates and persists a script", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [] }],
+      ]);
+      generateSnsScriptMock.mockResolvedValueOnce({ scriptText: "Check this out!", needsHumanReview: true, reviewNotes: [] });
+      upsertSnsScriptMock.mockResolvedValueOnce({ productId: "p1", scriptText: "Check this out!" });
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/script"));
+      expect(res.statusCode).toBe(200);
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "sns_script_generated", entityId: "p1" }),
+      );
+    });
+
+    it("POST /admin/products/{id}/sns/status marks posting flags", async () => {
+      markSnsStatusMock.mockResolvedValueOnce({ productId: "p1", videoCreated: true });
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/status", {}, { videoCreated: true }));
+      expect(res.statusCode).toBe(200);
+      expect(markSnsStatusMock).toHaveBeenCalledWith(expect.anything(), "p1", { videoCreated: true });
+    });
+
+    it("GET /admin/sync/state requires a channel", async () => {
+      const res = await callHandler(makeEvent("GET", "/admin/sync/state"));
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("GET /admin/sync/state returns the computed state", async () => {
+      computeChannelSyncStateMock.mockResolvedValueOnce({ channel: "ebay", state: "HEALTHY", reasons: [] });
+      const res = await callHandler(makeEvent("GET", "/admin/sync/state", { channel: "ebay" }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", state: "HEALTHY", reasons: [] });
+    });
+
+    it("GET /admin/slo aggregates sync confidence, drift count, AI failure rate, and recent auto-recovery events", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "e1" }], // inventory_drift errors
+        [{ id: "e2" }], // ai_generate_failed errors
+        [], // ai_listing_draft rows in window
+        [{ id: "a1", action: "dlq_redrive_started" }], // recent auto-recovery events
+      ]);
+      const res = await callHandler(makeEvent("GET", "/admin/slo"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.inventoryInconsistencyCount).toBe(1);
+      expect(parsed.aiFailureRate).toEqual({ failureCount: 1, attemptCount: 1, rate: 1 });
+      expect(parsed.recentAutoRecoveryEvents).toEqual([{ id: "a1", action: "dlq_redrive_started" }]);
+      // DLQ URL env vars aren't configured in this test environment -- omitted, not a failure.
+      expect(parsed.dlqDepths).toBeNull();
+    });
+
+    it("GET /admin/commerce-dashboard aggregates per-product commerce data into one view", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", sku: "sku-1", title: "T1", status: "active", createdAt: new Date(Date.now() - 10 * 86400000) }], // products
+        [{ channel: "ebay", status: "published" }], // channel_listings for p1
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 5, reserved: 0, available: 5, safetyBuffer: 0, sellableByChannel: { ebay: 5 } });
+      listOrdersForProductMock.mockResolvedValueOnce([]);
+      getSnsContentMock.mockResolvedValueOnce(null);
+
+      const res = await callHandler(makeEvent("GET", "/admin/commerce-dashboard"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products).toHaveLength(1);
+      expect(parsed.products[0]).toMatchObject({
+        productId: "p1",
+        sku: "sku-1",
+        channelStatus: { ebay: "published" },
+        revenueUsdCents: 0,
+        netProfitUsdCents: 0,
+        daysListed: 10,
+        staleLevel: "fresh",
+        hasReturn: false,
+      });
+    });
   });
 });

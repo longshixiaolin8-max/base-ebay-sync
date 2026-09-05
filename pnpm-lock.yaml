@@ -183,9 +183,15 @@ importers:
 
   services/lambdas/admin-api:
     dependencies:
+      '@ai-ec/adapter-base':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/base
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/ai':
+        specifier: workspace:*
+        version: link:../../../packages/ai
       '@ai-ec/core':
         specifier: workspace:*
         version: link:../../../packages/core
@@ -439,6 +445,9 @@ importers:
       '@ai-ec/core':
         specifier: workspace:*
         version: link:../../../packages/core
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
       '@ai-ec/lambda-shared':
         specifier: workspace:*
         version: link:../shared

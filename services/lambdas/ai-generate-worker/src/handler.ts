@@ -39,10 +39,12 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
         await db.insert(aiListingDraft).values({
           productId: product.id,
+          sourceContentHash: product.contentHash,
           titleEn: listing.titleEn,
           descriptionHtmlEn: listing.descriptionHtmlEn,
           categoryCandidates: listing.categoryCandidates,
           itemSpecifics: listing.itemSpecifics,
+          condition: listing.condition,
           seoKeywords: listing.seoKeywords,
           suggestedPriceUsd: listing.suggestedPriceUsd ? Math.round(listing.suggestedPriceUsd * 100) : null,
           confidenceFlags: listing.confidenceFlags,

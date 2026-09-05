@@ -1,4 +1,5 @@
 import { auditLog, syncErrors, type Database } from "@ai-ec/db";
+import { emitSyncErrorMetric } from "./metrics.js";
 
 export async function recordAuditLog(
   db: Database,
@@ -45,4 +46,9 @@ export async function recordSyncError(
     errorMessage: entry.errorMessage,
     payload: entry.payload ?? null,
   });
+  // A repeated failure (e.g. the Bedrock daily-token-quota outage) can complete every retry
+  // "successfully" from Lambda's own point of view -- caught, logged here, no exception
+  // escapes -- so it never trips CloudWatch's per-function Errors alarm. This metric is the
+  // only thing that lets MonitoringStack notice and email the user about it.
+  emitSyncErrorMetric(entry.channel, entry.errorCode);
 }

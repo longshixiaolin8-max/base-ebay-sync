@@ -20,7 +20,14 @@ function validRawOutput(overrides: Record<string, unknown> = {}) {
     itemSpecifics: { Brand: "Coach", Material: null },
     seoKeywords: ["leather", "bag"],
     suggestedPriceUsd: 60,
-    confidenceFlags: { brand: "confirmed", material: "unknown", size: "unknown", authenticity: "confirmed" },
+    condition: "USED_GOOD",
+    confidenceFlags: {
+      brand: "confirmed",
+      material: "unknown",
+      size: "unknown",
+      authenticity: "confirmed",
+      condition: "confirmed",
+    },
     needsHumanReview: false,
     reviewNotes: [],
     ...overrides,
@@ -41,7 +48,7 @@ describe("enforceGuardrails", () => {
 
   it("rejects a 'confirmed' brand claim when the source product had no brand field, and clears the value", () => {
     const result = enforceGuardrails(
-      validRawOutput({ confidenceFlags: { brand: "confirmed", material: "unknown", size: "unknown", authenticity: "uncertain" } }),
+      validRawOutput({ confidenceFlags: { brand: "confirmed", material: "unknown", size: "unknown", authenticity: "uncertain", condition: "confirmed" } }),
       baseSource, // brand: null
     );
     expect(result.confidenceFlags.brand).toBe("unknown");
@@ -51,7 +58,7 @@ describe("enforceGuardrails", () => {
   it("accepts a 'confirmed' brand claim when the source product actually stated a brand", () => {
     const source: SourceProductFacts = { ...baseSource, brand: "Coach" };
     const result = enforceGuardrails(
-      validRawOutput({ confidenceFlags: { brand: "confirmed", material: "unknown", size: "unknown", authenticity: "uncertain" } }),
+      validRawOutput({ confidenceFlags: { brand: "confirmed", material: "unknown", size: "unknown", authenticity: "uncertain", condition: "confirmed" } }),
       source,
     );
     expect(result.confidenceFlags.brand).toBe("confirmed");
@@ -64,7 +71,7 @@ describe("enforceGuardrails", () => {
     const result = enforceGuardrails(
       validRawOutput({
         needsHumanReview: false,
-        confidenceFlags: { brand: "unknown", material: "unknown", size: "unknown", authenticity: "unknown" },
+        confidenceFlags: { brand: "unknown", material: "unknown", size: "unknown", authenticity: "unknown", condition: "unknown" },
       }),
       baseSource,
     );
@@ -76,7 +83,13 @@ describe("enforceGuardrails", () => {
     const result = enforceGuardrails(
       validRawOutput({
         needsHumanReview: false,
-        confidenceFlags: { brand: "confirmed", material: "confirmed", size: "confirmed", authenticity: "confirmed" },
+        confidenceFlags: {
+          brand: "confirmed",
+          material: "confirmed",
+          size: "confirmed",
+          authenticity: "confirmed",
+          condition: "confirmed",
+        },
       }),
       { ...baseSource, brand: "Coach", material: "Leather", sizeLabel: "One Size" },
     );

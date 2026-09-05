@@ -15,6 +15,48 @@
       "when": 1788335582222,
       "tag": "0001_violet_meteorite",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788340919731,
+      "tag": "0002_empty_screwball",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788517731930,
+      "tag": "0003_skinny_turbo",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788519929462,
+      "tag": "0004_first_chameleon",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788521116722,
+      "tag": "0005_flawless_jazinda",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788622018705,
+      "tag": "0006_glamorous_lily_hollister",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788624927188,
+      "tag": "0007_little_monster_badoon",
+      "breakpoints": true
     }
   ]
 }

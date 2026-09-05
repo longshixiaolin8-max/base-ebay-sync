@@ -12,6 +12,7 @@
     "@ai-ec/adapter-base": "workspace:*",
     "@ai-ec/adapter-ebay": "workspace:*",
     "@ai-ec/core": "workspace:*",
+    "@ai-ec/db": "workspace:*",
     "@ai-ec/lambda-shared": "workspace:*"
   },
   "devDependencies": {

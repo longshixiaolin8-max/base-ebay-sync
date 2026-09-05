@@ -189,6 +189,10 @@ export class LambdaStack extends cdk.Stack {
     this.ebaySyncWorkerFn.addEventSource(
       new SqsEventSource(props.queues.ebaySync, { batchSize: 5, reportBatchItemFailures: true }),
     );
+    // Needed for the AI mis-listing gate (item #5): when a product's content has changed
+    // since its AI draft was generated, publish()/update() enqueue a fresh ai_generate job
+    // instead of pushing a possibly-stale listing.
+    props.queues.aiGenerate.grantSendMessages(this.ebaySyncWorkerFn);
 
     // --- Inventory sync (double-sell prevention) ---
     this.salesPollerFn = makeFn(
@@ -277,18 +281,46 @@ export class LambdaStack extends cdk.Stack {
       "AdminApi",
       "services/lambdas/admin-api/src/handler.ts",
       "handler",
-      { EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications` },
-      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to
-      // our own endpoint during destination creation, so this needs more than the old 15s.
-      cdk.Duration.seconds(30),
+      {
+        EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications`,
+        // Commercial-features round's SLO endpoint (GET /admin/slo) reports live DLQ depth --
+        // same env var names dlq-redrive already reads, reused here read-only.
+        AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
+        EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
+        INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
+      },
+      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
+      // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
+      // several DB round trips per product across up to 30 products by default -- both need
+      // more than the old 15s, and this comfortably covers either.
+      cdk.Duration.seconds(60),
     );
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
+    for (const dlq of [props.dlqs.aiGenerate, props.dlqs.ebaySync, props.dlqs.inventorySync]) {
+      dlq.grant(this.adminApiFn, "sqs:GetQueueAttributes");
+    }
     // Needed for POST /admin/ebay/location, which reads eBay app credentials and the
     // connected account's OAuth token (already granted to every fn via makeFn) to create
     // the seller's ship-from location.
     props.appCredentialSecrets.ebay.grantRead(this.adminApiFn);
+    // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
+    // to fetch a single item's raw detail response (e.g. to compare against product_master).
+    props.appCredentialSecrets.base.grantRead(this.adminApiFn);
+    // Needed for the commercial-features round's AI endpoints (SNS script generation,
+    // stale-product suggestions), which call Bedrock directly the same way
+    // ai-generate-worker does.
+    if (props.config.aiProvider === "openai") {
+      props.appCredentialSecrets.openai.grantRead(this.adminApiFn);
+    } else {
+      this.adminApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["bedrock:InvokeModel"],
+          resources: ["*"], // see the identical grant on aiGenerateWorkerFn above for why.
+        }),
+      );
+    }
 
     // productImagesBucket is provisioned for a future image re-hosting step (see README
     // follow-ups); no lambda writes to it yet, so no grant is issued until one does.

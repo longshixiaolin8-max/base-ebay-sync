@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Database } from "./client.js";
-import { applySale, calculateChannelAvailableQuantity, ConcurrentInventoryUpdateError } from "./inventory.js";
+import {
+  applyBaseStockReport,
+  applyReconstructedInventory,
+  applySale,
+  calculateChannelAvailableQuantity,
+  ConcurrentInventoryUpdateError,
+  reconstructInventory,
+} from "./inventory.js";
 
 describe("calculateChannelAvailableQuantity", () => {
   it("shows the source channel (BASE) full true stock, unbuffered", () => {
@@ -32,6 +39,8 @@ class FakeInventoryRow {
   quantity: number;
   soldOut: boolean;
   version = 0;
+  lastBaseSeq: Date | null = null;
+  ebaySoldSinceBaseSync = 0;
 
   constructor(quantity: number) {
     this.quantity = quantity;
@@ -39,31 +48,55 @@ class FakeInventoryRow {
   }
 
   select() {
-    return { quantity: this.quantity, soldOut: this.soldOut, version: this.version };
+    return {
+      quantity: this.quantity,
+      soldOut: this.soldOut,
+      version: this.version,
+      lastBaseSeq: this.lastBaseSeq,
+      ebaySoldSinceBaseSync: this.ebaySoldSinceBaseSync,
+    };
   }
 
   /** Returns the updated row on success, or undefined if `expectedVersion` is stale. */
-  compareAndSwap(expectedVersion: number, quantity: number, soldOut: boolean) {
+  compareAndSwap(
+    expectedVersion: number,
+    values: { quantity: number; soldOut: boolean; lastBaseSeq?: Date; ebaySoldSinceBaseSync: number },
+  ) {
     if (this.version !== expectedVersion) return undefined;
-    this.quantity = quantity;
-    this.soldOut = soldOut;
+    this.quantity = values.quantity;
+    this.soldOut = values.soldOut;
+    this.ebaySoldSinceBaseSync = values.ebaySoldSinceBaseSync;
+    if (values.lastBaseSeq !== undefined) this.lastBaseSeq = values.lastBaseSeq;
     this.version += 1;
-    return { quantity: this.quantity, soldOut: this.soldOut, version: this.version };
+    return this.select();
   }
+}
+
+interface InsertedEvent {
+  productId: string;
+  channel: string;
+  eventType: string;
+  sequenceAt: Date;
+  quantityDelta?: number;
+  absoluteQuantity?: number;
+  applied: boolean;
+  skippedReason?: string;
 }
 
 interface FakeDb {
   select: () => unknown;
   update: (...args: unknown[]) => unknown;
+  insert: (...args: unknown[]) => unknown;
+  events: InsertedEvent[];
 }
 
 function realUpdate(row: FakeInventoryRow) {
   return () => ({
-    set: (values: { quantity: number; soldOut: boolean; version: number }) => ({
+    set: (values: { quantity: number; soldOut: boolean; version: number; lastBaseSeq?: Date; ebaySoldSinceBaseSync: number }) => ({
       where: () => ({
         returning: async () => {
-          const expectedVersion = values.version - 1; // applySale always sets version: current.version + 1
-          const result = row.compareAndSwap(expectedVersion, values.quantity, values.soldOut);
+          const expectedVersion = values.version - 1; // always sets version: current.version + 1
+          const result = row.compareAndSwap(expectedVersion, values);
           return result ? [result] : [];
         },
       }),
@@ -72,19 +105,32 @@ function realUpdate(row: FakeInventoryRow) {
 }
 
 function fakeDb(row: FakeInventoryRow): FakeDb {
+  const events: InsertedEvent[] = [];
   return {
     select: () => ({
-      from: () => ({
+      from: (table: { name?: string }) => ({
         where: () => ({
           limit: async () => [row.select()],
+          // reconstructInventory's inventory_events query has no .limit() and only wants
+          // applied events, matching its real `where(eq(applied, true))` filter.
+          then: (resolve: (v: unknown) => void) => {
+            void table;
+            resolve(events.filter((e) => e.applied) as unknown);
+          },
         }),
       }),
     }),
     update: realUpdate(row),
+    insert: () => ({
+      values: async (v: InsertedEvent) => {
+        events.push(v);
+      },
+    }),
+    events,
   };
 }
 
-/** applySale only needs .select()/.update() from Database — cast the minimal fake through. */
+/** applySale only needs .select()/.update()/.insert() from Database — cast the fake through. */
 function asDatabase(db: FakeDb): Database {
   return db as unknown as Database;
 }
@@ -92,7 +138,7 @@ function asDatabase(db: FakeDb): Database {
 describe("applySale", () => {
   it("decrements quantity and bumps version on a normal sale", async () => {
     const row = new FakeInventoryRow(5);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 2);
+    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 2, { channel: "base" });
 
     expect(result).toEqual({ quantity: 3, soldOut: false, alreadyZero: false });
     expect(row.version).toBe(1);
@@ -100,14 +146,14 @@ describe("applySale", () => {
 
   it("floors at zero and marks soldOut when the sale exceeds remaining stock", async () => {
     const row = new FakeInventoryRow(2);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 5);
+    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 5, { channel: "base" });
 
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: false });
   });
 
   it("is a no-op once the product is already sold out — this is the double-sell guard", async () => {
     const row = new FakeInventoryRow(0);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1);
+    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1, { channel: "base" });
 
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: true });
     expect(row.version).toBe(0); // no write attempted
@@ -124,15 +170,23 @@ describe("applySale", () => {
     expect(readA.version).toBe(readB.version); // both saw the same pre-race state
 
     // Writer A applies first — succeeds, drives the product to sold out.
-    const writeA = row.compareAndSwap(readA.version, Math.max(0, readA.quantity - 1), true);
-    expect(writeA).toEqual({ quantity: 0, soldOut: true, version: 1 });
+    const writeA = row.compareAndSwap(readA.version, {
+      quantity: Math.max(0, readA.quantity - 1),
+      soldOut: true,
+      ebaySoldSinceBaseSync: readA.ebaySoldSinceBaseSync,
+    });
+    expect(writeA).toMatchObject({ quantity: 0, soldOut: true, version: 1 });
 
     // Writer B's CAS against the stale version it read must fail, forcing a retry —
     // exercised through the real applySale() retry loop this time, not the raw primitive.
-    const staleWrite = row.compareAndSwap(readB.version, Math.max(0, readB.quantity - 1), true);
+    const staleWrite = row.compareAndSwap(readB.version, {
+      quantity: Math.max(0, readB.quantity - 1),
+      soldOut: true,
+      ebaySoldSinceBaseSync: readB.ebaySoldSinceBaseSync,
+    });
     expect(staleWrite).toBeUndefined();
 
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1);
+    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1, { channel: "base" });
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: true });
     expect(row.quantity).toBe(0); // never went negative despite two sales for one unit
   });
@@ -153,7 +207,7 @@ describe("applySale", () => {
       return originalUpdate();
     }) as typeof db.update;
 
-    const result = await applySale(asDatabase(db), "product-1", 1);
+    const result = await applySale(asDatabase(db), "product-1", 1, { channel: "base" });
 
     expect(result).toEqual({ quantity: 2, soldOut: false, alreadyZero: false });
     expect(calls).toBeGreaterThan(1);
@@ -170,6 +224,158 @@ describe("applySale", () => {
       return originalUpdate();
     }) as typeof db.update;
 
-    await expect(applySale(asDatabase(db), "product-1", 1, 3)).rejects.toThrow(ConcurrentInventoryUpdateError);
+    await expect(applySale(asDatabase(db), "product-1", 1, { channel: "base", maxRetries: 3 })).rejects.toThrow(
+      ConcurrentInventoryUpdateError,
+    );
+  });
+});
+
+describe("applyBaseStockReport", () => {
+  it("reconciles a fresh report, subtracting eBay sales BASE doesn't know about", async () => {
+    const row = new FakeInventoryRow(5);
+    row.ebaySoldSinceBaseSync = 2; // 2 units sold on eBay since BASE was last synced
+    const t1 = new Date("2026-09-01T00:00:00Z");
+
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 5, t1);
+
+    expect(result).toEqual({ applied: true, quantity: 3 });
+    expect(row.quantity).toBe(3);
+    expect(row.ebaySoldSinceBaseSync).toBe(0); // reset after reconciling
+    expect(row.lastBaseSeq).toEqual(t1);
+  });
+
+  it("rejects a report whose sequence isn't newer than the last one applied — reversal detection", async () => {
+    const row = new FakeInventoryRow(5);
+    const t1 = new Date("2026-09-02T00:00:00Z");
+    const t0 = new Date("2026-09-01T00:00:00Z"); // older than t1
+    row.lastBaseSeq = t1;
+
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 99, t0);
+
+    expect(result).toEqual({ applied: false, quantity: 5, reason: "out_of_order" });
+    expect(row.quantity).toBe(5); // untouched
+    expect(row.version).toBe(0); // no write attempted
+  });
+
+  it("distinguishes 'nothing changed on BASE' from a genuine reversal", async () => {
+    // A report with the *same* sequence as the watermark just means BASE hasn't changed
+    // since the last poll -- an ordinary, frequent outcome, not a sync-quality problem.
+    const row = new FakeInventoryRow(5);
+    const t1 = new Date("2026-09-02T00:00:00Z");
+    row.lastBaseSeq = t1;
+
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 5, t1);
+
+    expect(result).toEqual({ applied: false, quantity: 5, reason: "unchanged" });
+  });
+
+  it("floors the reconciled quantity at 0 rather than going negative", async () => {
+    const row = new FakeInventoryRow(1);
+    row.ebaySoldSinceBaseSync = 5; // more eBay sales recorded than BASE now reports in stock
+    const t1 = new Date("2026-09-01T00:00:00Z");
+
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 2, t1);
+
+    expect(result).toEqual({ applied: true, quantity: 0 });
+  });
+});
+
+describe("reconstructInventory", () => {
+  it("replays events since the last BASE snapshot and flags drift against the live counter", async () => {
+    const row = new FakeInventoryRow(3); // counter says 3, but the real history implies 2
+    const db = fakeDb(row);
+    db.events.push(
+      { productId: "p1", channel: "base", eventType: "base_stock_report", sequenceAt: new Date("2026-09-01T00:00:00Z"), absoluteQuantity: 5, applied: true },
+      { productId: "p1", channel: "ebay", eventType: "sale", sequenceAt: new Date("2026-09-02T00:00:00Z"), quantityDelta: 2, applied: true },
+      { productId: "p1", channel: "base", eventType: "base_stock_report", sequenceAt: new Date("2026-09-01T12:00:00Z"), absoluteQuantity: 999, applied: false, skippedReason: "out_of_order" },
+    );
+
+    const result = await reconstructInventory(asDatabase(db), "p1");
+
+    expect(result.reconstructedQuantity).toBe(3); // 5 (last snapshot) - 2 (sale after it)
+    expect(result.currentQuantity).toBe(3);
+    expect(result.drifted).toBe(false);
+    expect(result.eventsReplayed).toBe(2);
+  });
+
+  it("reports drift when the live counter disagrees with the replayed history", async () => {
+    const row = new FakeInventoryRow(10); // counter says 10, history implies 3
+    const db = fakeDb(row);
+    db.events.push(
+      { productId: "p1", channel: "base", eventType: "base_stock_report", sequenceAt: new Date("2026-09-01T00:00:00Z"), absoluteQuantity: 5, applied: true },
+      { productId: "p1", channel: "base", eventType: "sale", sequenceAt: new Date("2026-09-02T00:00:00Z"), quantityDelta: 2, applied: true },
+    );
+
+    const result = await reconstructInventory(asDatabase(db), "p1");
+
+    expect(result.reconstructedQuantity).toBe(3);
+    expect(result.currentQuantity).toBe(10);
+    expect(result.drifted).toBe(true);
+  });
+
+  it("starts from 0 when there has never been a BASE stock report", async () => {
+    const row = new FakeInventoryRow(0);
+    const db = fakeDb(row);
+    db.events.push({
+      productId: "p1",
+      channel: "ebay",
+      eventType: "sale",
+      sequenceAt: new Date("2026-09-01T00:00:00Z"),
+      quantityDelta: 1,
+      applied: true,
+    });
+
+    const result = await reconstructInventory(asDatabase(db), "p1");
+
+    expect(result.reconstructedQuantity).toBe(0); // floored, never negative
+  });
+});
+
+describe("applyReconstructedInventory", () => {
+  it("does nothing and reports applied:false when there is no drift", async () => {
+    const row = new FakeInventoryRow(3);
+    const db = fakeDb(row);
+    db.events.push({
+      productId: "p1",
+      channel: "base",
+      eventType: "base_stock_report",
+      sequenceAt: new Date("2026-09-01T00:00:00Z"),
+      absoluteQuantity: 3,
+      applied: true,
+    });
+
+    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+
+    expect(result).toMatchObject({ applied: false, drifted: false, reconstructedQuantity: 3 });
+    expect(row.version).toBe(0); // no write attempted
+  });
+
+  it("writes the reconstructed quantity back via CAS when drift is found", async () => {
+    const row = new FakeInventoryRow(10); // counter wrong, history says 3
+    const db = fakeDb(row);
+    db.events.push(
+      {
+        productId: "p1",
+        channel: "base",
+        eventType: "base_stock_report",
+        sequenceAt: new Date("2026-09-01T00:00:00Z"),
+        absoluteQuantity: 5,
+        applied: true,
+      },
+      {
+        productId: "p1",
+        channel: "ebay",
+        eventType: "sale",
+        sequenceAt: new Date("2026-09-02T00:00:00Z"),
+        quantityDelta: 2,
+        applied: true,
+      },
+    );
+
+    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+
+    expect(result).toMatchObject({ applied: true, drifted: true, reconstructedQuantity: 3, currentQuantity: 10 });
+    expect(row.quantity).toBe(3);
+    expect(row.version).toBe(1);
   });
 });
