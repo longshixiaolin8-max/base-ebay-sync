@@ -341,8 +341,9 @@ describe("admin-api handler", () => {
       nextCursor: undefined,
     });
     fakeDb = createFakeDb([
-      [{ externalId: "base-tracked-1" }], // tracked channel_listings(ebay) rows
-      [{ id: "product-999" }], // product_master lookup for base-999 -> match
+      [{ externalId: "base-tracked-1", productId: "tracked-product-id" }], // tracked channel_listings(ebay) rows
+      [], // candidate product pool for fuzzy matching -- empty, so "hand-listed-sku" gets no suggestion
+      [{ id: "product-999" }], // product_master lookup for base-999 -> deterministic match
     ]);
 
     const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
@@ -353,6 +354,35 @@ describe("admin-api handler", () => {
         { externalId: "hand-listed-sku", title: "Pre-existing, not ours", suggestedProductId: null },
       ],
     });
+  });
+
+  it("GET /admin/ebay/unmanaged-listings suggests a product by title/attribute similarity when there is no deterministic SKU match", async () => {
+    // Item #5 of the third hardening round ("自動商品同一性判定").
+    listProductsMock.mockResolvedValueOnce({
+      items: [{ externalId: "hand-listed-sku", title: "Vintage Sterling Silver Bead Bracelet Cross Charm Taxco Style" }],
+      nextCursor: undefined,
+    });
+    fakeDb = createFakeDb([
+      [], // no tracked channel_listings(ebay) rows at all
+      [
+        {
+          id: "candidate-1",
+          title: "Vintage Sterling Silver Bead Bracelet Cross Charm Taxco",
+          brand: null,
+          material: null,
+          sizeLabel: null,
+        },
+      ],
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
+
+    expect(res.statusCode).toBe(200);
+    const { unmanagedListings } = JSON.parse(res.body!) as {
+      unmanagedListings: Array<{ suggestedProductId: string | null; matchScore?: number }>;
+    };
+    expect(unmanagedListings[0]!.suggestedProductId).toBe("candidate-1");
+    expect(unmanagedListings[0]!.matchScore).toBeGreaterThanOrEqual(50);
   });
 
   it("POST /admin/products/{id}/link-ebay-listing links an unmanaged eBay SKU to a product", async () => {
