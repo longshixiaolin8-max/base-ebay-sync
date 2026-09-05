@@ -102,6 +102,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   getRequiredItemAspects: getRequiredItemAspectsMock,
 }));
 
+const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
@@ -111,6 +112,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
+  fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -441,6 +443,69 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", highRisk: true, daysUntilStockout: 1.5 });
     expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, "product-1");
+  });
+
+  it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(200);
+    expect(fetchFxRateMock).toHaveBeenCalledTimes(1);
+    // costUsd = 67; P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 102.94, fxSource: "test" });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price uses this product's saved shipping/margin overrides", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    // costUsd = 67; P = (67*1.5 + 15 + 0.40) / 0.85 ≈ 136.35
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price lets query params override the saved config for a hypothetical preview", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(
+      makeEvent("GET", "/admin/products/product-1/dynamic-price", { shippingUsd: "15", targetMarginRatio: "0.5" }),
+    );
+
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price returns 404 for a product that doesn't exist", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/missing/dynamic-price"));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/pricing-config persists the shipping/margin overrides", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/product-1/pricing-config", {}, { shippingCostUsd: 15, targetMarginRatio: 0.5 }),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "pricing_config_updated",
+        entityId: "product-1",
+        after: { shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 },
+      }),
+    );
+  });
+
+  it("POST /admin/products/{id}/pricing-config clears an override back to the platform default with null", async () => {
+    fakeDb = createFakeDb([]);
+    await callHandler(makeEvent("POST", "/admin/products/product-1/pricing-config", {}, { shippingCostUsd: null }));
+
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ after: { shippingCostUsdCents: null } }),
+    );
   });
 
   it("GET /admin/products/{id}/sync-trace returns the merged event/audit/error timeline for a product", async () => {

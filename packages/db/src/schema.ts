@@ -17,6 +17,15 @@ export const productMaster = pgTable("product_master", {
   images: jsonb("images").notNull().$type<string[]>().default([]),
   status: text("status").notNull().default("draft"),
   contentHash: text("content_hash").notNull(),
+  /**
+   * Per-product pricing-calculator overrides (item #4 of the third hardening round,
+   * "価格の動的整合") -- both null by default, meaning "use the platform-wide default".
+   * Deliberately per-product rather than one global setting: a heavy item genuinely costs
+   * more to ship than a small one, and a seller may want a slimmer margin on a slow mover.
+   */
+  shippingCostUsdCents: integer("shipping_cost_usd_cents"),
+  /** Basis points, e.g. 3000 = 30.00%. */
+  targetMarginBasisPoints: integer("target_margin_basis_points"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

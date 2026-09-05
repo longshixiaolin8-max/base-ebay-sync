@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
-import { ItemCondition } from "@ai-ec/core";
+import { computeDynamicPrice, DEFAULT_SHIPPING_USD, DEFAULT_TARGET_MARGIN_RATIO, ItemCondition } from "@ai-ec/core";
 import {
   aiListingDraft,
   applyReconstructedInventory,
@@ -19,6 +19,7 @@ import {
 import {
   createEbayAdapter,
   enqueue,
+  fetchFxRate,
   getAppCredentials,
   getDb,
   getQueueUrls,
@@ -444,6 +445,62 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const id = path.split("/")[3]!;
       const risk = await predictStockoutRisk(db, id);
       return json(200, risk);
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/dynamic-price$/.test(path)) {
+      // Item #4 of the third hardening round ("価格の動的整合"). Preview only -- never
+      // writes anything, and never touches suggestedPriceUsd (only used as a *fallback*
+      // when the AI draft has no price of its own). Query params let an operator try a
+      // hypothetical shipping/margin without first persisting it via pricing-config below;
+      // omitted params fall back to this product's saved config, then the platform default.
+      const id = path.split("/")[3]!;
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const fx = await fetchFxRate();
+      const shippingUsd = event.queryStringParameters?.shippingUsd
+        ? Number(event.queryStringParameters.shippingUsd)
+        : product.shippingCostUsdCents !== null
+          ? product.shippingCostUsdCents / 100
+          : DEFAULT_SHIPPING_USD;
+      const targetMarginRatio = event.queryStringParameters?.targetMarginRatio
+        ? Number(event.queryStringParameters.targetMarginRatio)
+        : product.targetMarginBasisPoints !== null
+          ? product.targetMarginBasisPoints / 10000
+          : DEFAULT_TARGET_MARGIN_RATIO;
+
+      const price = computeDynamicPrice({
+        costJpy: product.priceJpy,
+        fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
+        shippingUsd,
+        targetMarginRatio,
+      });
+      return json(200, { ...price, fxSource: fx.source });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/pricing-config$/.test(path)) {
+      // Persists this product's own shipping-cost/margin overrides for the dynamic price
+      // calculator above (and for the fallback price computed at actual publish/update
+      // time) -- null clears an override back to the platform default.
+      const id = path.split("/")[3]!;
+      const body = event.body ? (JSON.parse(event.body) as { shippingCostUsd?: number | null; targetMarginRatio?: number | null }) : {};
+      const values: Record<string, number | null> = {};
+      if ("shippingCostUsd" in body) {
+        values.shippingCostUsdCents = body.shippingCostUsd === null ? null : Math.round(body.shippingCostUsd! * 100);
+      }
+      if ("targetMarginRatio" in body) {
+        values.targetMarginBasisPoints = body.targetMarginRatio === null ? null : Math.round(body.targetMarginRatio! * 10000);
+      }
+      await db.update(productMaster).set(values).where(eq(productMaster.id, id));
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "pricing_config_updated",
+        entityType: "product",
+        entityId: id,
+        after: values,
+      });
+      return json(200, { updated: true });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/reconstruct-inventory$/.test(path)) {

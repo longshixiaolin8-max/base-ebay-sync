@@ -43,6 +43,13 @@
       "when": 1788521116722,
       "tag": "0005_flawless_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788622018705,
+      "tag": "0006_glamorous_lily_hollister",
+      "breakpoints": true
     }
   ]
 }

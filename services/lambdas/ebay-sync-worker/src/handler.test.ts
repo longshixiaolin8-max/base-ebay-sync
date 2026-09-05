@@ -59,10 +59,12 @@ vi.mock("@ai-ec/db", () => ({
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
+const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
 vi.mock("@ai-ec/lambda-shared", () => ({
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   getQueueUrls: () => ({ aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" }),
+  fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
 }));
 
 const { publish, update } = await import("./handler.js");
@@ -97,6 +99,8 @@ const product = {
   priceJpy: 10000,
   contentHash: "hash-1",
   images: ["https://img.example/1.jpg"],
+  shippingCostUsdCents: null,
+  targetMarginBasisPoints: null,
 };
 const draft = {
   titleEn: "Item",
@@ -158,6 +162,8 @@ describe("publish", () => {
     });
     isChannelIsolatedMock.mockClear();
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+    fetchFxRateMock.mockClear();
+    fetchFxRateMock.mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -401,6 +407,40 @@ describe("publish", () => {
 
     expect(adapter.createListing).not.toHaveBeenCalled();
   });
+
+  it("falls back to a real, fee/margin/FX-aware price when the AI draft has no suggested price of its own", async () => {
+    // Item #4 of the third hardening round ("価格の動的整合"). costUsd = 10000*0.0067 = 67;
+    // with the platform defaults (0 shipping, 30% margin, 15% eBay fee, $0.40/order):
+    // P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 87.5/0.85 ≈ 102.94
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
+
+    expect(fetchFxRateMock).toHaveBeenCalledTimes(1);
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ priceUsd: 102.94 }));
+  });
+
+  it("uses this product's own shipping/margin overrides instead of the platform defaults when set", async () => {
+    const customProduct = { ...product, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }; // $15 shipping, 50% margin
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[customProduct], [draft], [listing], [inventory]]), adapter, "token", "p1");
+
+    // costUsd = 67; P = (67*1.5 + 15 + 0.40) / 0.85 ≈ 115.9/0.85 ≈ 136.35
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ priceUsd: 136.35 }));
+  });
+
+  it("falls back to the static FX rate without blocking the sync when the real FX API call fails", async () => {
+    fetchFxRateMock.mockRejectedValue(new Error("network error"));
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ priceUsd: 102.94 }));
+  });
 });
 
 describe("update", () => {
@@ -440,6 +480,8 @@ describe("update", () => {
     });
     isChannelIsolatedMock.mockClear();
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+    fetchFxRateMock.mockClear();
+    fetchFxRateMock.mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
   });
 
   it("blocks update when eBay is isolated, without calling updateListing", async () => {

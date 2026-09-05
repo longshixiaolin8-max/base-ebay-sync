@@ -1,6 +1,9 @@
 import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import {
   buildIdempotencyKey,
+  computeDynamicPrice,
+  DEFAULT_SHIPPING_USD,
+  DEFAULT_TARGET_MARGIN_RATIO,
   findMissingRequiredAspects,
   finalSafetyCheckForNewListing,
   finalSafetyCheckForUpdate,
@@ -23,6 +26,7 @@ import {
 import {
   createEbayAdapter,
   enqueue,
+  fetchFxRate,
   getAppCredentials,
   getDb,
   getIdempotencyStore,
@@ -41,7 +45,30 @@ interface EbaySyncMessage {
   productId: string;
 }
 
-const USD_PER_JPY_FALLBACK = 0.0067; // used only if the AI draft has no suggestedPriceUsd
+const USD_PER_JPY_FALLBACK = 0.0067; // last-resort rate if the real FX API call itself fails
+
+/**
+ * Item #4 of the third hardening round ("価格の動的整合 -- 為替、eBay手数料、送料、
+ * 利益率を加味して販売価格を自動決定"). Used only when the AI draft has no
+ * suggestedPriceUsd of its own -- fetches a real, live FX rate (falling back to the static
+ * rate only if that call itself fails, never blocking the sync over it) and runs it through
+ * computeDynamicPrice with this product's own shipping-cost/margin overrides, or the
+ * platform defaults when it hasn't set any.
+ */
+async function computeFallbackPriceUsd(
+  product: { priceJpy: number; shippingCostUsdCents: number | null; targetMarginBasisPoints: number | null },
+): Promise<number> {
+  let fxRateUsdPerJpy = USD_PER_JPY_FALLBACK;
+  try {
+    fxRateUsdPerJpy = (await fetchFxRate()).fxRateUsdPerJpy;
+  } catch {
+    // Real FX API unreachable -- the static rate above is the documented last resort.
+  }
+  const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : DEFAULT_SHIPPING_USD;
+  const targetMarginRatio =
+    product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO;
+  return computeDynamicPrice({ costJpy: product.priceJpy, fxRateUsdPerJpy, shippingUsd, targetMarginRatio }).recommendedPriceUsd;
+}
 
 /**
  * Below this eBay sync-confidence score (see computeSyncConfidence), new publishes are
@@ -257,7 +284,7 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
 
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
 
-  const priceUsd = draft.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : product.priceJpy * USD_PER_JPY_FALLBACK;
+  const priceUsd = draft.suggestedPriceUsd ? draft.suggestedPriceUsd / 100 : await computeFallbackPriceUsd(product);
   const primaryCategory = draft.categoryCandidates[0];
   if (!primaryCategory) throw new Error(`AI draft for product ${productId} has no category candidate`);
 
