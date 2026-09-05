@@ -189,6 +189,9 @@ importers:
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/ai':
+        specifier: workspace:*
+        version: link:../../../packages/ai
       '@ai-ec/core':
         specifier: workspace:*
         version: link:../../../packages/core

@@ -1,11 +1,14 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
+import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
 import {
+  classifyStaleness,
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
   ItemCondition,
   matchProductIdentity,
+  OrderStatus,
   type ProductIdentityCandidate,
 } from "@ai-ec/core";
 import {
@@ -13,30 +16,55 @@ import {
   applyReconstructedInventory,
   auditLog,
   channelListings,
+  computeChannelSyncState,
   computeDynamicSafetyStock,
   computeSyncConfidence,
+  finalizeOrderProfit,
+  findStaleProducts,
+  getInventoryBreakdown,
+  getLiveOrderProfit,
+  getSnsContent,
+  InvalidOrderTransitionError,
   inventoryMaster,
+  listOrders,
+  listOrdersForProduct,
+  markSnsStatus,
+  orders,
   predictStockoutRisk,
   productMaster,
   reconstructInventory,
   syncErrors,
   syncJobs,
   traceSyncHistory,
+  transitionOrderStatus,
+  upsertSnsScript,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
   enqueue,
   fetchFxRate,
   getAppCredentials,
+  getApproximateMessageCount,
   getDb,
+  getDlqUrls,
   getQueueUrls,
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
+
+const USD_PER_JPY_FALLBACK = 0.0067;
+
+async function currentFxRate(): Promise<number> {
+  try {
+    return (await fetchFxRate()).fxRateUsdPerJpy;
+  } catch {
+    return USD_PER_JPY_FALLBACK;
+  }
+}
 
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
   return {
@@ -563,6 +591,333 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/audit-log") {
       const rows = await db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200);
       return json(200, { auditLog: rows });
+    }
+
+    // --- Commercial-features round: Order model (item #1) ---
+
+    if (method === "GET" && path === "/admin/orders") {
+      const status = OrderStatus.safeParse(event.queryStringParameters?.status);
+      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
+      const orderRows = await listOrders(db, { status: status.success ? status.data : undefined, limit });
+      return json(200, { orders: orderRows });
+    }
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/orders$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const orderRows = await listOrdersForProduct(db, id);
+      return json(200, { orders: orderRows });
+    }
+
+    if (method === "GET" && /^\/admin\/orders\/[^/]+\/profit$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
+      if (!order) return json(404, { error: "order_not_found" });
+
+      if (order.profitFinalizedAt) {
+        return json(200, {
+          finalized: true,
+          netProfitUsdCents: order.finalizedNetProfitUsdCents,
+          profitFinalizedAt: order.profitFinalizedAt,
+        });
+      }
+      const usdPerJpy = await currentFxRate();
+      return json(200, { finalized: false, ...getLiveOrderProfit(order, usdPerJpy) });
+    }
+
+    if (method === "POST" && /^\/admin\/orders\/[^/]+\/status$/.test(path)) {
+      // Every order status change is human-triggered here -- never automatic (matches this
+      // platform's existing rule that AI never changes price/listing state without approval).
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { status?: string; extra?: Record<string, number> };
+      const parsedStatus = OrderStatus.safeParse(body.status);
+      if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
+
+      try {
+        const updated = await transitionOrderStatus(db, id, parsedStatus.data, { extra: body.extra });
+        await recordAuditLog(db, {
+          actor: actorFromEvent(event),
+          action: "order_status_changed",
+          entityType: "order",
+          entityId: id,
+          after: { status: parsedStatus.data },
+        });
+        return json(200, { order: updated });
+      } catch (err) {
+        if (err instanceof InvalidOrderTransitionError) {
+          return json(409, { error: "invalid_transition", message: err.message });
+        }
+        throw err;
+      }
+    }
+
+    if (method === "POST" && /^\/admin\/orders\/[^/]+\/finalize-profit$/.test(path)) {
+      // 利益確定 lifecycle stage. Safe to call more than once (see finalizeOrderProfit) --
+      // e.g. an admin corrects a fee via the status/extra field, then re-finalizes.
+      const id = path.split("/")[3]!;
+      const usdPerJpy = await currentFxRate();
+      const updated = await finalizeOrderProfit(db, id, usdPerJpy);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "order_profit_finalized",
+        entityType: "order",
+        entityId: id,
+        after: { netProfitUsdCents: updated.finalizedNetProfitUsdCents },
+      });
+      return json(200, { order: updated });
+    }
+
+    // --- Commercial-features round: 仕入 (purchase cost entry, item #3/#4) ---
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/purchase-info$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { costJpy?: number; purchasedAt?: string };
+      if (typeof body.costJpy !== "number") return json(400, { error: "costJpy_required" });
+
+      const purchasedAt = body.purchasedAt ? new Date(body.purchasedAt) : new Date();
+      await db
+        .update(productMaster)
+        .set({ costJpy: body.costJpy, purchasedAt, updatedAt: new Date() })
+        .where(eq(productMaster.id, id));
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "product_purchased",
+        entityType: "product",
+        entityId: id,
+        after: { costJpy: body.costJpy, purchasedAt },
+      });
+      return json(200, { productId: id, costJpy: body.costJpy, purchasedAt });
+    }
+
+    // --- Commercial-features round: 在庫を分離 (item #2) ---
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/inventory-breakdown$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const breakdown = await getInventoryBreakdown(db, id);
+      if (!breakdown) return json(404, { error: "not_found" });
+      return json(200, breakdown);
+    }
+
+    // --- Commercial-features round: 滞留商品管理 (item #5) ---
+
+    if (method === "GET" && path === "/admin/stale-products") {
+      const minDays = event.queryStringParameters?.minDays ? Number(event.queryStringParameters.minDays) : undefined;
+      const staleProducts = await findStaleProducts(db, minDays);
+      return json(200, { staleProducts });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/stale-suggestion$/.test(path)) {
+      // Live-generated, never persisted or auto-applied -- any resulting price change or
+      // re-listing still goes through the existing human-approval publish/update gates.
+      const id = path.split("/")[3]!;
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const daysListed = Math.max(0, Math.floor((Date.now() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)));
+      const modelClient = createAIModelClient(process.env);
+      const suggestion = await suggestStaleProductImprovement(
+        modelClient,
+        {
+          titleJa: product.title,
+          descriptionJa: product.descriptionJa,
+          brand: product.brand,
+          material: product.material,
+          sizeLabel: product.sizeLabel,
+          priceJpy: product.priceJpy,
+          imageCount: product.images.length,
+        },
+        daysListed,
+      );
+      return json(200, { productId: id, daysListed, ...suggestion });
+    }
+
+    // --- Commercial-features round: SNS管理 (item #6) ---
+
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/sns$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const content = await getSnsContent(db, id);
+      return json(200, { snsContent: content });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/sns\/script$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const modelClient = createAIModelClient(process.env);
+      const script = await generateSnsScript(modelClient, {
+        titleJa: product.title,
+        descriptionJa: product.descriptionJa,
+        brand: product.brand,
+        material: product.material,
+        sizeLabel: product.sizeLabel,
+        priceJpy: product.priceJpy,
+        imageCount: product.images.length,
+      });
+      const promptVersion = "sns-script-v1";
+      const saved = await upsertSnsScript(db, id, script.scriptText, promptVersion);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "sns_script_generated",
+        entityType: "product",
+        entityId: id,
+      });
+      return json(200, { snsContent: saved, needsHumanReview: script.needsHumanReview, reviewNotes: script.reviewNotes });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/sns\/status$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as {
+        videoCreated?: boolean;
+        instagramPosted?: boolean;
+        tiktokPosted?: boolean;
+      };
+      const updated = await markSnsStatus(db, id, body);
+
+      await recordAuditLog(db, {
+        actor: actorFromEvent(event),
+        action: "sns_status_updated",
+        entityType: "product",
+        entityId: id,
+        after: body,
+      });
+      return json(200, { snsContent: updated });
+    }
+
+    // --- Commercial-features round: 同期状態State Machine (item #8) ---
+
+    if (method === "GET" && path === "/admin/sync/state") {
+      const channel = event.queryStringParameters?.channel;
+      if (!channel) return json(400, { error: "channel_required" });
+      const state = await computeChannelSyncState(db, channel);
+      return json(200, state);
+    }
+
+    // --- Commercial-features round: SLO/監視 (item #9) ---
+
+    if (method === "GET" && path === "/admin/slo") {
+      const windowHours = event.queryStringParameters?.windowHours ? Number(event.queryStringParameters.windowHours) : 24;
+      const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+
+      const [baseConfidence, ebayConfidence] = await Promise.all([
+        computeSyncConfidence(db, "base", windowHours),
+        computeSyncConfidence(db, "ebay", windowHours),
+      ]);
+
+      const driftErrors = await db
+        .select()
+        .from(syncErrors)
+        .where(and(eq(syncErrors.errorCode, "inventory_drift"), gte(syncErrors.createdAt, since)));
+
+      const [aiFailures, aiDrafts] = await Promise.all([
+        db
+          .select()
+          .from(syncErrors)
+          .where(and(eq(syncErrors.errorCode, "ai_generate_failed"), gte(syncErrors.createdAt, since))),
+        db.select().from(aiListingDraft).where(gte(aiListingDraft.createdAt, since)),
+      ]);
+      const aiAttemptCount = aiFailures.length + aiDrafts.length;
+
+      const recentAutoRecoveryEvents = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.action, "dlq_redrive_started"), gte(auditLog.createdAt, since)))
+        .orderBy(desc(auditLog.createdAt))
+        .limit(20);
+
+      // DLQ depth is best-effort: omitted (rather than failing the whole endpoint) if this
+      // Lambda hasn't been redeployed with the DLQ URL env vars yet.
+      let dlqDepths: Record<string, number> | null = null;
+      try {
+        const dlqUrls = getDlqUrls();
+        const [aiGenerate, ebaySync, inventorySync] = await Promise.all([
+          getApproximateMessageCount(dlqUrls.aiGenerate),
+          getApproximateMessageCount(dlqUrls.ebaySync),
+          getApproximateMessageCount(dlqUrls.inventorySync),
+        ]);
+        dlqDepths = { aiGenerate, ebaySync, inventorySync };
+      } catch {
+        // Missing env vars -- see comment above.
+      }
+
+      return json(200, {
+        windowHours,
+        syncSuccessRate: { base: baseConfidence, ebay: ebayConfidence },
+        inventoryInconsistencyCount: driftErrors.length,
+        aiFailureRate: { failureCount: aiFailures.length, attemptCount: aiAttemptCount, rate: aiAttemptCount > 0 ? aiFailures.length / aiAttemptCount : null },
+        dlqDepths,
+        recentAutoRecoveryEvents,
+        // Per-function API latency is already on the CloudWatch dashboard (MonitoringStack) --
+        // not duplicated here; see the round's report for why.
+      });
+    }
+
+    // --- Commercial-features round: unified commerce dashboard (UI, item requested separately) ---
+
+    if (method === "GET" && path === "/admin/commerce-dashboard") {
+      // Each product row costs several DB round trips (channel_listings, inventory
+      // breakdown, orders, sns_content) run in parallel across products -- a modest default
+      // keeps this endpoint's total concurrent RDS Data API calls bounded; pass ?limit= for
+      // a larger catalog at the caller's own risk.
+      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : 30;
+      const products = await db.select().from(productMaster).orderBy(desc(productMaster.updatedAt)).limit(limit);
+      const usdPerJpy = await currentFxRate();
+
+      const rows = await Promise.all(
+        products.map(async (product) => {
+          const [listings, breakdown, productOrders, sns] = await Promise.all([
+            db.select().from(channelListings).where(eq(channelListings.productId, product.id)),
+            getInventoryBreakdown(db, product.id),
+            listOrdersForProduct(db, product.id),
+            getSnsContent(db, product.id),
+          ]);
+
+          let totalRevenueUsdCents = 0;
+          let totalNetProfitUsdCents = 0;
+          for (const order of productOrders) {
+            if (order.profitFinalizedAt) {
+              totalNetProfitUsdCents += order.finalizedNetProfitUsdCents ?? 0;
+            } else {
+              const profit = getLiveOrderProfit(order, usdPerJpy);
+              totalRevenueUsdCents += profit.revenueUsdCents;
+              totalNetProfitUsdCents += profit.netProfitUsdCents;
+            }
+          }
+          const profitMarginBasisPoints =
+            totalRevenueUsdCents > 0 ? Math.round((totalNetProfitUsdCents / totalRevenueUsdCents) * 10000) : null;
+
+          const daysListed = Math.max(0, Math.floor((Date.now() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)));
+          const sortedByPlacedAt = [...productOrders].sort((a, b) => a.placedAt.getTime() - b.placedAt.getTime());
+          const firstOrder = sortedByPlacedAt[0];
+          const daysToFirstSale = firstOrder
+            ? Math.max(0, Math.floor((firstOrder.placedAt.getTime() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)))
+            : null;
+          const latestOrder = sortedByPlacedAt[sortedByPlacedAt.length - 1] ?? null;
+          const hasReturn = productOrders.some((o) => ["RETURN_REQUESTED", "RETURNED", "REFUNDED"].includes(o.status));
+
+          return {
+            productId: product.id,
+            sku: product.sku,
+            title: product.title,
+            status: product.status,
+            channelStatus: Object.fromEntries(listings.map((l) => [l.channel, l.status])),
+            inventory: breakdown,
+            revenueUsdCents: totalRevenueUsdCents,
+            netProfitUsdCents: totalNetProfitUsdCents,
+            profitMarginBasisPoints,
+            daysListed,
+            daysToFirstSale,
+            staleLevel: classifyStaleness(daysListed),
+            latestOrderStatus: latestOrder?.status ?? null,
+            hasReturn,
+            snsStatus: sns,
+          };
+        }),
+      );
+
+      return json(200, { products: rows });
     }
 
     return json(404, { error: "route_not_found" });
