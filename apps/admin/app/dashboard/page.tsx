@@ -6,9 +6,11 @@ import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows } from "@/components/Skeleton";
+import { useToast } from "@/components/Toast";
 
 export default function DashboardPage() {
   const { ready } = useRequireAuth();
+  const { notify } = useToast();
   const [products, setProducts] = useState<ProductMaster[]>([]);
   const [syncErrors, setSyncErrors] = useState<SyncError[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,8 +25,9 @@ export default function DashboardPage() {
         setProducts(p.products);
         setSyncErrors(e.syncErrors);
       })
+      .catch((err) => notify(`ダッシュボードの取得に失敗しました: ${(err as Error).message}`))
       .finally(() => setLoading(false));
-  }, [ready]);
+  }, [ready, notify]);
 
   const pendingApproval = products.filter((p) => p.status === "ai_generated").length;
   const active = products.filter((p) => p.status === "active").length;

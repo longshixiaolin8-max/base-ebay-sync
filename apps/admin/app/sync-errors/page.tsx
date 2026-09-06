@@ -16,9 +16,14 @@ export default function SyncErrorsPage() {
 
   async function load() {
     setLoading(true);
-    const res = await apiGet<{ syncErrors: SyncError[] }>("/admin/sync-errors?resolved=false");
-    setErrors(res.syncErrors);
-    setLoading(false);
+    try {
+      const res = await apiGet<{ syncErrors: SyncError[] }>("/admin/sync-errors?resolved=false");
+      setErrors(res.syncErrors);
+    } catch (err) {
+      notify(`同期エラー一覧の取得に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {

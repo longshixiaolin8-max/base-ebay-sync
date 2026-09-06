@@ -80,9 +80,14 @@ export default function CommercePage() {
 
   async function load() {
     setLoading(true);
-    const res = await apiGet<{ products: CommerceRow[] }>("/admin/commerce-dashboard");
-    setRows(res.products);
-    setLoading(false);
+    try {
+      const res = await apiGet<{ products: CommerceRow[] }>("/admin/commerce-dashboard");
+      setRows(res.products);
+    } catch (err) {
+      notify(`コマース統合ビューの取得に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {

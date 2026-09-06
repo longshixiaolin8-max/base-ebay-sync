@@ -32,9 +32,14 @@ export default function ProductsPage() {
 
   async function load() {
     setLoading(true);
-    const res = await apiGet<{ products: ProductMaster[] }>("/admin/products");
-    setProducts(res.products);
-    setLoading(false);
+    try {
+      const res = await apiGet<{ products: ProductMaster[] }>("/admin/products");
+      setProducts(res.products);
+    } catch (err) {
+      notify(`商品一覧の取得に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {

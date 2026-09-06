@@ -8,6 +8,7 @@ import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 
 type Stage =
   | { step: "credentials" }
+  | { step: "new-password" }
   | { step: "totp-setup"; sharedSecret: string; setupUri: string }
   | { step: "totp-code" };
 
@@ -24,6 +25,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [code, setCode] = useState("");
   const [stage, setStage] = useState<Stage>({ step: "credentials" });
   const [error, setError] = useState<string | null>(null);
@@ -57,9 +59,14 @@ export default function LoginPage() {
       });
     } else if (nextStep.signInStep === "CONFIRM_SIGN_IN_WITH_TOTP_CODE") {
       setStage({ step: "totp-code" });
+    } else if (nextStep.signInStep === "CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED") {
+      // Every admin account is provisioned via admin-create-user (self-signup is
+      // disabled), which always issues a temporary password -- so this challenge fires on
+      // literally every account's first sign-in, not an edge case.
+      setStage({ step: "new-password" });
     } else {
-      // Other challenge types (SMS, custom, new-password) aren't issued by this user
-      // pool's current config -- surfaced as a message rather than silently stuck.
+      // Other challenge types (SMS, custom) aren't issued by this user pool's current
+      // config -- surfaced as a message rather than silently stuck.
       setError(`未対応の追加認証手順です: ${nextStep.signInStep}`);
     }
   }
@@ -71,6 +78,24 @@ export default function LoginPage() {
     try {
       ensureAmplifyConfigured();
       const result = await signIn({ username: email, password });
+      if (result.isSignedIn) {
+        router.replace("/dashboard");
+      } else {
+        handleNextStep(result.nextStep);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function onSubmitNewPassword(e: FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await confirmSignIn({ challengeResponse: newPassword });
       if (result.isSignedIn) {
         router.replace("/dashboard");
       } else {
@@ -99,6 +124,39 @@ export default function LoginPage() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (stage.step === "new-password") {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card">
+          <Brand />
+          <h1>新しいパスワードの設定</h1>
+          <p style={{ marginTop: "0.5rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
+            初回ログインのため、新しいパスワードを設定してください(12文字以上、大文字・小文字・数字・記号を含む)。
+          </p>
+          <form onSubmit={onSubmitNewPassword} style={{ marginTop: "1.25rem" }}>
+            <div className="auth-field">
+              <label>
+                新しいパスワード
+                <input
+                  type="password"
+                  required
+                  minLength={12}
+                  autoFocus
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+              </label>
+            </div>
+            {error && <p className="auth-error">{error}</p>}
+            <button type="submit" disabled={submitting} style={{ width: "100%" }}>
+              {submitting ? "設定中..." : "パスワードを設定してサインイン"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   if (stage.step === "totp-setup" || stage.step === "totp-code") {

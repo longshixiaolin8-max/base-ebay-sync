@@ -5,9 +5,11 @@ import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
+import { useToast } from "@/components/Toast";
 
 export default function AuditLogPage() {
   const { ready } = useRequireAuth();
+  const { notify } = useToast();
   const [entries, setEntries] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -15,8 +17,9 @@ export default function AuditLogPage() {
     if (!ready) return;
     apiGet<{ auditLog: AuditLogEntry[] }>("/admin/audit-log")
       .then((res) => setEntries(res.auditLog))
+      .catch((err) => notify(`監査ログの取得に失敗しました: ${(err as Error).message}`))
       .finally(() => setLoading(false));
-  }, [ready]);
+  }, [ready, notify]);
 
   return (
     <div className="page">
