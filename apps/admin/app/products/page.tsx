@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
+import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 
 const STATUS_BADGE: Record<string, string> = {
@@ -29,6 +30,7 @@ export default function ProductsPage() {
   const [products, setProducts] = useState<ProductMaster[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   async function load() {
     setLoading(true);
@@ -59,8 +61,16 @@ export default function ProductsPage() {
     }
   }
 
+  const filtered = query.trim()
+    ? products.filter(
+        (p) => p.title.toLowerCase().includes(query.toLowerCase()) || p.sku.toLowerCase().includes(query.toLowerCase()),
+      )
+    : products;
+
   return (
-    <div className="page">
+    <>
+      <Topbar onSearch={setQuery} />
+      <div className="page">
       <div className="page-header">
         <div>
           <h1>商品マスター</h1>
@@ -71,9 +81,9 @@ export default function ProductsPage() {
       </div>
       {!ready || loading ? (
         <SkeletonRows />
-      ) : products.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="table-wrapper">
-          <EmptyState>商品がまだ登録されていません。</EmptyState>
+          <EmptyState>{query.trim() ? "該当する商品がありません。" : "商品がまだ登録されていません。"}</EmptyState>
         </div>
       ) : (
         <div className="table-wrapper">
@@ -88,7 +98,7 @@ export default function ProductsPage() {
               </tr>
             </thead>
             <tbody>
-              {products.map((p) => (
+              {filtered.map((p) => (
                 <tr key={p.id}>
                   <td>{p.sku}</td>
                   <td>{p.title}</td>
@@ -109,6 +119,7 @@ export default function ProductsPage() {
           </table>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

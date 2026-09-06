@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
+import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 
 export default function SyncErrorsPage() {
@@ -44,7 +45,9 @@ export default function SyncErrorsPage() {
   }
 
   return (
-    <div className="page">
+    <>
+      <Topbar />
+      <div className="page">
       <div className="page-header">
         <div>
           <h1>同期エラー</h1>
@@ -93,6 +96,7 @@ export default function SyncErrorsPage() {
           </table>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

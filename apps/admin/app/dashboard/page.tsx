@@ -2,11 +2,14 @@
 
 import type { ProductMaster, SyncError } from "@ai-ec/core";
 import Link from "next/link";
+import type { ComponentType, SVGProps } from "react";
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows } from "@/components/Skeleton";
+import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
+import { AlertIcon, BoxIcon, CartIcon, ClockIcon, TagIcon } from "@/components/icons";
 
 export default function DashboardPage() {
   const { ready } = useRequireAuth();
@@ -34,33 +37,55 @@ export default function DashboardPage() {
   const soldOut = products.filter((p) => p.status === "sold_out").length;
 
   return (
-    <div className="page">
-      <div className="page-header">
-        <h1>ダッシュボード</h1>
-      </div>
-      {!ready || loading ? (
-        <SkeletonRows count={2} />
-      ) : (
-        <div className="stat-grid">
-          <StatCard label="商品数" value={products.length} href="/products" />
-          <StatCard label="eBay出品承認待ち" value={pendingApproval} href="/products" />
-          <StatCard label="出品中" value={active} href="/commerce" />
-          <StatCard label="売り切れ" value={soldOut} href="/products" />
-          <StatCard
-            label="未解決の同期エラー"
-            value={syncErrors.length}
-            href="/sync-errors"
-            danger={syncErrors.length > 0}
-          />
+    <>
+      <Topbar />
+      <div className="page">
+        <div className="page-header">
+          <h1>ダッシュボード</h1>
         </div>
-      )}
-    </div>
+        {!ready || loading ? (
+          <SkeletonRows count={2} />
+        ) : (
+          <div className="stat-grid">
+            <StatCard icon={BoxIcon} color="blue" label="商品数" value={products.length} href="/products" />
+            <StatCard icon={ClockIcon} color="orange" label="eBay出品承認待ち" value={pendingApproval} href="/products" />
+            <StatCard icon={TagIcon} color="green" label="出品中" value={active} href="/commerce" />
+            <StatCard icon={CartIcon} color="purple" label="売り切れ" value={soldOut} href="/products" />
+            <StatCard
+              icon={AlertIcon}
+              color="red"
+              label="未解決の同期エラー"
+              value={syncErrors.length}
+              href="/sync-errors"
+              danger={syncErrors.length > 0}
+            />
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
-function StatCard({ label, value, href, danger }: { label: string; value: number; href?: string; danger?: boolean }) {
+function StatCard({
+  icon: Icon,
+  color,
+  label,
+  value,
+  href,
+  danger,
+}: {
+  icon: ComponentType<SVGProps<SVGSVGElement>>;
+  color: "blue" | "orange" | "green" | "purple" | "red";
+  label: string;
+  value: number;
+  href?: string;
+  danger?: boolean;
+}) {
   const content = (
     <>
+      <span className={`stat-card-icon ${color}`}>
+        <Icon width={18} height={18} />
+      </span>
       <div className={`stat-value${danger ? " danger" : ""}`}>{value}</div>
       <div className="stat-label">{label}</div>
     </>

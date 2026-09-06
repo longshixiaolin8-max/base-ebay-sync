@@ -861,9 +861,19 @@ describe("admin-api handler", () => {
     });
 
     it("GET /admin/commerce-dashboard aggregates per-product commerce data into one view", async () => {
+      const lastSyncedAt = new Date("2026-09-01T00:00:00Z");
       fakeDb = createFakeDb([
-        [{ id: "p1", sku: "sku-1", title: "T1", status: "active", createdAt: new Date(Date.now() - 10 * 86400000) }], // products
-        [{ channel: "ebay", status: "published" }], // channel_listings for p1
+        [
+          {
+            id: "p1",
+            sku: "sku-1",
+            title: "T1",
+            status: "active",
+            createdAt: new Date(Date.now() - 10 * 86400000),
+            images: ["https://example.com/photo.jpg"],
+          },
+        ], // products
+        [{ channel: "ebay", status: "published", lastSyncedAt }], // channel_listings for p1
       ]);
       getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 5, reserved: 0, available: 5, safetyBuffer: 0, sellableByChannel: { ebay: 5 } });
       listOrdersForProductMock.mockResolvedValueOnce([]);
@@ -877,6 +887,8 @@ describe("admin-api handler", () => {
         productId: "p1",
         sku: "sku-1",
         channelStatus: { ebay: "published" },
+        images: ["https://example.com/photo.jpg"],
+        lastSyncedAt: { ebay: lastSyncedAt.toISOString() },
         revenueUsdCents: 0,
         netProfitUsdCents: 0,
         daysListed: 10,
