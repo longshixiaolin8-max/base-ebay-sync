@@ -87,6 +87,36 @@ export function findMissingRequiredAspects(
   return requiredAspectNames.filter((name) => !itemSpecifics[name]);
 }
 
+/**
+ * eBay itself endorses a small set of standard placeholder values for a required aspect the
+ * seller genuinely doesn't know -- using one is expected, correct practice, not a
+ * fabrication, and is often simply true for this platform's second-hand goods. This is
+ * deliberately narrow (Brand only): "Unbranded" is a real, common answer for jewelry/
+ * accessories with no maker's mark, but the same reasoning doesn't extend to most other
+ * required aspects (e.g. a jewelry "Type" or "Metal" is informative, not fillable with a
+ * generic placeholder without misleading the buyer) -- add another entry here only when a
+ * standard eBay placeholder is *actually correct*, not merely available.
+ *
+ * Only ever fills a gap still null after guardrail.ts's anti-hallucination null-out --
+ * never overrides a real, already-known value.
+ */
+const STANDARD_ASPECT_FALLBACKS: Record<string, string> = {
+  Brand: "Unbranded",
+};
+
+export function applyStandardAspectFallbacks(
+  itemSpecifics: Record<string, string | null>,
+  requiredAspectNames: string[],
+): Record<string, string | null> {
+  const result = { ...itemSpecifics };
+  for (const name of requiredAspectNames) {
+    if (!result[name] && STANDARD_ASPECT_FALLBACKS[name]) {
+      result[name] = STANDARD_ASPECT_FALLBACKS[name];
+    }
+  }
+  return result;
+}
+
 export const InquiryReplyDraft = z.object({
   replyEn: z.string().min(1),
   replyJa: z.string().min(1),

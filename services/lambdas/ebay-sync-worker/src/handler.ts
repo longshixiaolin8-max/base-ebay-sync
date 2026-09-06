@@ -1,5 +1,6 @@
 import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import {
+  applyStandardAspectFallbacks,
   buildIdempotencyKey,
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
@@ -302,7 +303,12 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
   // unverified facts" principle applied to our own preflight logic too.
   const appAccessToken = await adapter.getApplicationAccessToken();
   const requiredAspects = await adapter.getRequiredItemAspects(appAccessToken, primaryCategory.ebayCategoryId);
-  const missingAspects = findMissingRequiredAspects(draft.itemSpecifics, requiredAspects);
+  // Fill any still-null required aspect eBay itself has a standard, correct placeholder for
+  // (currently: Brand -> "Unbranded") before checking what's genuinely missing -- see
+  // applyStandardAspectFallbacks's own doc comment for why this stays narrow. Real, confirmed
+  // values from the AI draft are never touched.
+  const itemSpecifics = applyStandardAspectFallbacks(draft.itemSpecifics, requiredAspects);
+  const missingAspects = findMissingRequiredAspects(itemSpecifics, requiredAspects);
   if (missingAspects.length > 0) {
     throw new Error(
       `AI draft for product ${productId} is missing eBay-required item specifics for category ` +
@@ -332,7 +338,7 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     productId,
     sku: product.sku,
     ...listingPayload,
-    itemSpecifics: draft.itemSpecifics,
+    itemSpecifics,
   });
 
   await db
@@ -399,6 +405,20 @@ export async function update(
       )
     : undefined;
 
+  // Same standard-placeholder fallback as publish() (see applyStandardAspectFallbacks) --
+  // needed here too, not just at publish time: this function always resends the full
+  // itemSpecifics on every update (see below), so a still-null Brand would otherwise
+  // re-wipe eBay's live listing back to the same missing-required-aspect state on the very
+  // next price/quantity update after a successful publish.
+  const primaryCategory = draft?.categoryCandidates[0];
+  const itemSpecifics =
+    draft && primaryCategory
+      ? applyStandardAspectFallbacks(
+          draft.itemSpecifics,
+          await adapter.getRequiredItemAspects(await adapter.getApplicationAccessToken(), primaryCategory.ebayCategoryId),
+        )
+      : draft?.itemSpecifics;
+
   const updatePayload = {
     titleEn: draft?.titleEn,
     descriptionHtmlEn: draft?.descriptionHtmlEn,
@@ -422,8 +442,9 @@ export async function update(
       // Always resend the draft's item specifics, not just when they change -- eBay's PUT
       // inventory_item is a full replace, so relying on EbayAdapter's "carry over the
       // current value" fallback alone means a required aspect wiped by any earlier failed
-      // PUT never gets restored. The DB draft is the source of truth here.
-      itemSpecifics: draft?.itemSpecifics,
+      // PUT never gets restored. The DB draft (plus the same standard-placeholder fallback
+      // applied above) is the source of truth here.
+      itemSpecifics,
     });
   } catch (err) {
     if (err instanceof EbayPartialUpdateRolledBackError) {

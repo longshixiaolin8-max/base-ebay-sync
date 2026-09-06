@@ -241,13 +241,14 @@ describe("publish", () => {
     expect(adapter.createListing).toHaveBeenCalledWith("token", expect.objectContaining({ quantity: 0 }));
   });
 
-  it("blocks the publish before calling createListing when eBay-required item specifics are missing", async () => {
+  it("blocks the publish before calling createListing when an unfillable required item specific is missing", async () => {
     const inventory = { quantity: 5, safetyStockBuffer: 0 };
     const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
-    // draft.itemSpecifics is {} — neither Brand nor Type is set.
+    // draft.itemSpecifics is {} — Brand gets auto-filled with "Unbranded" (see below), but
+    // Type has no standard placeholder and stays genuinely missing.
 
     await expect(publish(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1")).rejects.toThrow(
-      /Brand, Type/,
+      /: Type$/,
     );
     expect(adapter.createListing).not.toHaveBeenCalled();
   });
@@ -260,6 +261,19 @@ describe("publish", () => {
     await publish(createFakeDb([[product], [draftWithSpecifics], [listing], [inventory]]), adapter, "token", "p1");
 
     expect(adapter.createListing).toHaveBeenCalledTimes(1);
+  });
+
+  it("fills a required but unknown Brand with the standard 'Unbranded' placeholder instead of blocking", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const draftWithType = { ...draft, itemSpecifics: { Type: "Bracelet" } }; // Brand still null
+    const adapter = ebayAdapter({ getRequiredItemAspects: vi.fn().mockResolvedValue(["Brand", "Type"]) });
+
+    await publish(createFakeDb([[product], [draftWithType], [listing], [inventory]]), adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalledWith(
+      "token",
+      expect.objectContaining({ itemSpecifics: { Brand: "Unbranded", Type: "Bracelet" } }),
+    );
   });
 
   it("passes the draft's condition through instead of hardcoding NEW", async () => {
@@ -492,7 +506,11 @@ describe("update", () => {
       windowMinutes: 15,
     });
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await expect(update({} as never, adapter, "token", "p1", "base-1")).rejects.toThrow(/eBay is currently isolated/);
 
@@ -512,7 +530,11 @@ describe("update", () => {
     });
     const inventory = { quantity: 8, safetyStockBuffer: 999 }; // stale stored value must be ignored
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1");
 
@@ -534,7 +556,11 @@ describe("update", () => {
     });
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1");
 
@@ -545,7 +571,11 @@ describe("update", () => {
   it("always resends item specifics, so a required aspect wiped by an earlier failed PUT gets restored", async () => {
     const inventory = { quantity: 8, safetyStockBuffer: 3 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
     const draftWithSpecifics = { ...draft, itemSpecifics: { Type: "Bracelet", Brand: "Unbranded" } };
 
     await update(createFakeDb([[product], [draftWithSpecifics], [listing], [inventory]]), adapter, "token", "p1", "base-1");
@@ -559,7 +589,11 @@ describe("update", () => {
 
   it("leaves quantity undefined when there is no inventory_master row yet", async () => {
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await update(createFakeDb([[product], [draft], [listing], []]), adapter, "token", "p1", "base-1");
 
@@ -570,7 +604,11 @@ describe("update", () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const staleDraft = { ...draft, sourceContentHash: "hash-0" };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await expect(
       update(createFakeDb([[product], [staleDraft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
@@ -599,7 +637,11 @@ describe("update", () => {
     });
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await expect(
       update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
@@ -615,7 +657,11 @@ describe("update", () => {
   it("records the just-updated price as the new lastSyncedPriceJpy baseline", async () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
     const db = createFakeDb([[product], [draft], [listing], [inventory]]);
 
     await update(db, adapter, "token", "p1", "base-1");
@@ -627,7 +673,11 @@ describe("update", () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const priceChangedListing = { lastSyncedPriceJpy: product.priceJpy + 1000 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await update(createFakeDb([[product], [draft], [priceChangedListing], [inventory]]), adapter, "token", "p1", "base-1");
 
@@ -646,7 +696,11 @@ describe("update", () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const samePriceListing = { lastSyncedPriceJpy: product.priceJpy };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await update(createFakeDb([[product], [draft], [samePriceListing], [inventory]]), adapter, "token", "p1", "base-1");
 
@@ -660,7 +714,11 @@ describe("update", () => {
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const rollbackError = new EbayPartialUpdateRolledBackError(new Error("offer PUT failed"));
     const updateListing = vi.fn().mockRejectedValue(rollbackError);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await expect(
       update(createFakeDb([[product], [draft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),
@@ -677,7 +735,11 @@ describe("update", () => {
     const emptyConditionDraft = { ...draft, condition: "" };
     const inventory = { quantity: 8, safetyStockBuffer: 0 };
     const updateListing = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing } as unknown as EbayAdapter;
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
 
     await expect(
       update(createFakeDb([[product], [emptyConditionDraft], [listing], [inventory]]), adapter, "token", "p1", "base-1"),

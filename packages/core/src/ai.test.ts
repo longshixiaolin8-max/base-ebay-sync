@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findMissingRequiredAspects } from "./ai.js";
+import { applyStandardAspectFallbacks, findMissingRequiredAspects } from "./ai.js";
 
 describe("findMissingRequiredAspects", () => {
   it("returns nothing when every required aspect has a real value", () => {
@@ -24,5 +24,36 @@ describe("findMissingRequiredAspects", () => {
 
   it("returns an empty list when eBay requires nothing for this category", () => {
     expect(findMissingRequiredAspects({}, [])).toEqual([]);
+  });
+});
+
+describe("applyStandardAspectFallbacks", () => {
+  it("fills a required, still-null Brand with the standard 'Unbranded' placeholder", () => {
+    const itemSpecifics = { Brand: null, Type: "Bracelet" };
+    expect(applyStandardAspectFallbacks(itemSpecifics, ["Brand", "Type"])).toEqual({
+      Brand: "Unbranded",
+      Type: "Bracelet",
+    });
+  });
+
+  it("never overrides a real, already-known Brand value", () => {
+    const itemSpecifics = { Brand: "Coach", Type: "Bracelet" };
+    expect(applyStandardAspectFallbacks(itemSpecifics, ["Brand", "Type"])).toEqual({
+      Brand: "Coach",
+      Type: "Bracelet",
+    });
+  });
+
+  it("does not fill a required aspect with no standard placeholder (e.g. Type)", () => {
+    const itemSpecifics = { Brand: "Unbranded", Type: null };
+    expect(applyStandardAspectFallbacks(itemSpecifics, ["Brand", "Type"])).toEqual({
+      Brand: "Unbranded",
+      Type: null,
+    });
+  });
+
+  it("does not add Brand when it is not actually required for this category", () => {
+    const itemSpecifics = { Type: "Bracelet" };
+    expect(applyStandardAspectFallbacks(itemSpecifics, ["Type"])).toEqual({ Type: "Bracelet" });
   });
 });
