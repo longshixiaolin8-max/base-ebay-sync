@@ -4,6 +4,7 @@ import type { AuditLogEntry } from "@ai-ec/core";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
+import { getApiBaseUrl } from "@/lib/amplify-config";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
@@ -328,6 +329,16 @@ export default function CommercePage() {
             <span className="connection-badge">
               <span className={`status-dot ${ebayState ? (ebayState.state === "HEALTHY" ? "ok" : "warn") : "warn"}`} />
               eBay {ebayState ? (ebayState.state === "HEALTHY" ? "接続済み" : ebayState.state) : "確認中..."}
+              {ebayState && ebayState.state !== "HEALTHY" && (
+                <a
+                  href={`${getApiBaseUrl()}/oauth/ebay/authorize`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="reconnect-link"
+                >
+                  再接続
+                </a>
+              )}
             </span>
           </div>
         </div>

@@ -310,8 +310,13 @@ h2 {
 .sidebar-status-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.4rem;
   color: var(--fg-muted);
+}
+
+.sidebar-status-row .reconnect-link {
+  margin-left: auto;
 }
 
 .status-dot {
@@ -740,6 +745,17 @@ a.stat-card:hover {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+}
+
+.reconnect-link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.reconnect-link:hover {
+  color: var(--accent-hover);
 }
 
 .commerce-layout {

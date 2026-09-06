@@ -5,7 +5,7 @@ import { fetchUserAttributes, signOut } from "aws-amplify/auth";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ensureAmplifyConfigured } from "@/lib/amplify-config";
+import { ensureAmplifyConfigured, getApiBaseUrl } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AlertIcon, BoxIcon, DashboardIcon, FileIcon, SyncIcon } from "@/components/icons";
@@ -101,6 +101,11 @@ export function Sidebar() {
         <div className="sidebar-status-row">
           <span className={`status-dot ${statusDotClass(ebayState?.state)}`} />
           eBay {ebayState ? (ebayState.state === "HEALTHY" ? "接続済み" : ebayState.state) : "確認中..."}
+          {ebayState && ebayState.state !== "HEALTHY" && (
+            <a href={`${getApiBaseUrl()}/oauth/ebay/authorize`} target="_blank" rel="noopener noreferrer" className="reconnect-link">
+              再接続
+            </a>
+          )}
         </div>
       </div>
 
