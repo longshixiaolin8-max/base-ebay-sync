@@ -298,6 +298,9 @@ importers:
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
       '@ai-ec/lambda-shared':
         specifier: workspace:*
         version: link:../shared
@@ -379,6 +382,9 @@ importers:
       '@ai-ec/adapter-base':
         specifier: workspace:*
         version: link:../../../packages/adapters/base
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
       '@ai-ec/lambda-shared':
         specifier: workspace:*
         version: link:../shared
@@ -398,6 +404,9 @@ importers:
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
       '@ai-ec/lambda-shared':
         specifier: workspace:*
         version: link:../shared

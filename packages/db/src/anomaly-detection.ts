@@ -42,6 +42,7 @@ const PRICE_SWING_RATIO_THRESHOLD = 0.5;
  */
 export async function detectInventoryAnomaly(
   db: Database,
+  tenantId: string,
   productId: string,
   windowMinutes = DEFAULT_WINDOW_MINUTES,
 ): Promise<InventoryAnomalyResult> {
@@ -52,6 +53,7 @@ export async function detectInventoryAnomaly(
     .from(inventoryEvents)
     .where(
       and(
+        eq(inventoryEvents.tenantId, tenantId),
         eq(inventoryEvents.productId, productId),
         eq(inventoryEvents.applied, true),
         gte(inventoryEvents.sequenceAt, since),

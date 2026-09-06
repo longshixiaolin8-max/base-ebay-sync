@@ -8,7 +8,7 @@ describe("getInventoryBreakdown", () => {
       select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
     } as unknown as Database;
 
-    const result = await getInventoryBreakdown(db, "product-1");
+    const result = await getInventoryBreakdown(db, "tenant-a", "product-1");
     expect(result).toBeNull();
   });
 
@@ -38,7 +38,7 @@ describe("getInventoryBreakdown", () => {
       }),
     } as unknown as Database;
 
-    const result = await getInventoryBreakdown(db, "product-1");
+    const result = await getInventoryBreakdown(db, "tenant-a", "product-1");
 
     expect(result).not.toBeNull();
     expect(result!.onHand).toBe(5);

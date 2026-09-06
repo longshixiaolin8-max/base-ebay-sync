@@ -3,6 +3,7 @@ import {
   parseSignatureHeader,
   verifyNotificationSignature,
 } from "@ai-ec/adapter-ebay";
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -72,7 +73,12 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
 
   const db = getDb();
   const queues = getQueueUrls();
-  await pollChannelSales(adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  // eBay's notification delivery carries no tenant hint at all -- unlike the other pollers,
+  // there's no way to derive which tenant this webhook belongs to without a per-tenant
+  // webhook-registration redesign (tracked as a deferred follow-up to the multi-tenant
+  // retrofit). Hardcoded to the one bootstrap tenant, matching the one real registered
+  // eBay webhook destination that exists today.
+  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
 
   return { statusCode: 204 };
 }

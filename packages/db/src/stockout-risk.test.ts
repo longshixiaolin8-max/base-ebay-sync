@@ -20,7 +20,7 @@ function fakeDb(inventory: unknown, sales: Array<{ quantityDelta?: number }>): D
 
 describe("predictStockoutRisk", () => {
   it("is not high risk with no measurable sales velocity", async () => {
-    const result = await predictStockoutRisk(fakeDb({ quantity: 5 }, []), "p1");
+    const result = await predictStockoutRisk(fakeDb({ quantity: 5 }, []), "tenant-a", "p1");
 
     expect(result.highRisk).toBe(false);
     expect(result.daysUntilStockout).toBeNull();
@@ -28,7 +28,7 @@ describe("predictStockoutRisk", () => {
   });
 
   it("is not high risk when already at zero — that's an actual sellout, not a prediction", async () => {
-    const result = await predictStockoutRisk(fakeDb({ quantity: 0 }, [{ quantityDelta: 5 }]), "p1");
+    const result = await predictStockoutRisk(fakeDb({ quantity: 0 }, [{ quantityDelta: 5 }]), "tenant-a", "p1");
 
     expect(result.highRisk).toBe(false);
     expect(result.daysUntilStockout).toBeNull();
@@ -37,7 +37,7 @@ describe("predictStockoutRisk", () => {
   it("flags high risk when the current pace would sell out within the threshold", async () => {
     // 21 units sold over 7 days -> 3/day; 2 units left -> 2/3 = 0.67 days < 3-day threshold
     const sales = Array.from({ length: 21 }, () => ({ quantityDelta: 1 }));
-    const result = await predictStockoutRisk(fakeDb({ quantity: 2 }, sales), "p1");
+    const result = await predictStockoutRisk(fakeDb({ quantity: 2 }, sales), "tenant-a", "p1");
 
     expect(result.salesPerDay).toBe(3);
     expect(result.daysUntilStockout).toBeCloseTo(0.667, 2);
@@ -47,14 +47,14 @@ describe("predictStockoutRisk", () => {
   it("does not flag risk for a slow-moving product with plenty of runway", async () => {
     // 7 units sold over 7 days -> 1/day; 30 units left -> 30 days, well above the threshold
     const sales = Array.from({ length: 7 }, () => ({ quantityDelta: 1 }));
-    const result = await predictStockoutRisk(fakeDb({ quantity: 30 }, sales), "p1");
+    const result = await predictStockoutRisk(fakeDb({ quantity: 30 }, sales), "tenant-a", "p1");
 
     expect(result.daysUntilStockout).toBe(30);
     expect(result.highRisk).toBe(false);
   });
 
   it("treats a product with no inventory_master row as having nothing to protect", async () => {
-    const result = await predictStockoutRisk(fakeDb(undefined, [{ quantityDelta: 5 }]), "p1");
+    const result = await predictStockoutRisk(fakeDb(undefined, [{ quantityDelta: 5 }]), "tenant-a", "p1");
 
     expect(result.currentQuantity).toBe(0);
     expect(result.highRisk).toBe(false);

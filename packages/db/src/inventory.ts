@@ -40,6 +40,7 @@ export interface ApplySaleOptions {
 
 export async function applySale(
   db: Database,
+  tenantId: string,
   productId: string,
   quantitySold: number,
   options: ApplySaleOptions,
@@ -49,7 +50,7 @@ export async function applySale(
     const [current] = await db
       .select()
       .from(inventoryMaster)
-      .where(eq(inventoryMaster.productId, productId))
+      .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
       .limit(1);
 
     if (!current) {
@@ -75,6 +76,7 @@ export async function applySale(
 
     if (updated.length > 0) {
       await db.insert(inventoryEvents).values({
+        tenantId,
         productId,
         channel,
         eventType: "sale",
@@ -114,6 +116,7 @@ export interface ApplyBaseStockReportResult {
  */
 export async function applyBaseStockReport(
   db: Database,
+  tenantId: string,
   productId: string,
   reportedQuantity: number,
   sequenceAt: Date,
@@ -123,7 +126,7 @@ export async function applyBaseStockReport(
     const [current] = await db
       .select()
       .from(inventoryMaster)
-      .where(eq(inventoryMaster.productId, productId))
+      .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
       .limit(1);
 
     if (!current) {
@@ -139,6 +142,7 @@ export async function applyBaseStockReport(
       const isGenuineReversal = sequenceAt.getTime() < current.lastBaseSeq.getTime();
       const reason = isGenuineReversal ? "out_of_order" : "unchanged";
       await db.insert(inventoryEvents).values({
+        tenantId,
         productId,
         channel: "base",
         eventType: "base_stock_report",
@@ -166,6 +170,7 @@ export async function applyBaseStockReport(
 
     if (updated.length > 0) {
       await db.insert(inventoryEvents).values({
+        tenantId,
         productId,
         channel: "base",
         eventType: "base_stock_report",
@@ -197,8 +202,12 @@ export interface ReconstructInventoryResult {
   eventsReplayed: number;
 }
 
-export async function reconstructInventory(db: Database, productId: string): Promise<ReconstructInventoryResult> {
-  const [current] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+export async function reconstructInventory(db: Database, tenantId: string, productId: string): Promise<ReconstructInventoryResult> {
+  const [current] = await db
+    .select()
+    .from(inventoryMaster)
+    .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
+    .limit(1);
   if (!current) {
     throw new Error(`inventory_master row missing for product ${productId}`);
   }
@@ -206,7 +215,7 @@ export async function reconstructInventory(db: Database, productId: string): Pro
   const events = await db
     .select()
     .from(inventoryEvents)
-    .where(and(eq(inventoryEvents.productId, productId), eq(inventoryEvents.applied, true)));
+    .where(and(eq(inventoryEvents.tenantId, tenantId), eq(inventoryEvents.productId, productId), eq(inventoryEvents.applied, true)));
 
   const sorted = [...events].sort((a, b) => a.sequenceAt.getTime() - b.sequenceAt.getTime());
 
@@ -251,11 +260,12 @@ export interface ApplyReconstructedInventoryResult extends ReconstructInventoryR
  */
 export async function applyReconstructedInventory(
   db: Database,
+  tenantId: string,
   productId: string,
   maxRetries = 5,
 ): Promise<ApplyReconstructedInventoryResult> {
   for (let attempt = 0; attempt < maxRetries; attempt += 1) {
-    const result = await reconstructInventory(db, productId);
+    const result = await reconstructInventory(db, tenantId, productId);
     if (!result.drifted) {
       return { ...result, applied: false };
     }
@@ -263,7 +273,7 @@ export async function applyReconstructedInventory(
     const [current] = await db
       .select()
       .from(inventoryMaster)
-      .where(eq(inventoryMaster.productId, productId))
+      .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
       .limit(1);
     if (!current) throw new Error(`inventory_master row missing for product ${productId}`);
 

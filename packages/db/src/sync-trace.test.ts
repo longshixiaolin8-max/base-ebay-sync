@@ -22,7 +22,7 @@ function fakeDb(fixtures: { events?: unknown[]; auditRows?: unknown[]; errorRows
 
 describe("traceSyncHistory", () => {
   it("returns an empty trace for a product with no history at all", async () => {
-    const result = await traceSyncHistory(fakeDb({}), "p1");
+    const result = await traceSyncHistory(fakeDb({}), "tenant-a", "p1");
 
     expect(result.entries).toEqual([]);
   });
@@ -43,6 +43,7 @@ describe("traceSyncHistory", () => {
           },
         ],
       }),
+      "tenant-a",
       "p1",
     );
 
@@ -67,6 +68,7 @@ describe("traceSyncHistory", () => {
           },
         ],
       }),
+      "tenant-a",
       "p1",
     );
 
@@ -107,6 +109,7 @@ describe("traceSyncHistory", () => {
           },
         ],
       }),
+      "tenant-a",
       "p1",
     );
 

@@ -51,9 +51,11 @@ import {
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
+  requireEnv,
+  signState,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, or } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -74,11 +76,33 @@ function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
   };
 }
 
+function claimsFromEvent(event: APIGatewayProxyEventV2): Record<string, string> | undefined {
+  return (event.requestContext as unknown as { authorizer?: { jwt?: { claims?: Record<string, string> } } }).authorizer
+    ?.jwt?.claims;
+}
+
 /** Identity of the signed-in admin operator, as attached by the Cognito JWT authorizer. */
 function actorFromEvent(event: APIGatewayProxyEventV2): string {
-  const claims = (event.requestContext as unknown as { authorizer?: { jwt?: { claims?: Record<string, string> } } })
-    .authorizer?.jwt?.claims;
+  const claims = claimsFromEvent(event);
   return claims?.email ?? claims?.sub ?? "unknown-admin";
+}
+
+export class MissingTenantClaimError extends Error {
+  constructor() {
+    super("Request is missing the custom:tenant_id claim");
+    this.name = "MissingTenantClaimError";
+  }
+}
+
+/**
+ * Which tenant this request acts on. Fails closed (never falls back to any default tenant)
+ * so a misconfigured Cognito user or a bug stripping the claim can never silently act as a
+ * different tenant -- every route in this file relies on this, not a per-route judgment call.
+ */
+function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
+  const tenantId = claimsFromEvent(event)?.["custom:tenant_id"];
+  if (!tenantId) throw new MissingTenantClaimError();
+  return tenantId;
 }
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
@@ -87,17 +111,35 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   const path = event.rawPath;
 
   try {
+    const tenantId = tenantIdFromEvent(event);
+
     if (method === "GET" && path === "/admin/products") {
-      const products = await db.select().from(productMaster).orderBy(desc(productMaster.updatedAt)).limit(200);
+      const products = await db
+        .select()
+        .from(productMaster)
+        .where(eq(productMaster.tenantId, tenantId))
+        .orderBy(desc(productMaster.updatedAt))
+        .limit(200);
       return json(200, { products });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+$/.test(path)) {
       const id = path.split("/")[3]!;
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
       if (!product) return json(404, { error: "not_found" });
-      const listings = await db.select().from(channelListings).where(eq(channelListings.productId, id));
-      const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, id)).limit(1);
+      const listings = await db
+        .select()
+        .from(channelListings)
+        .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, id)));
+      const [inventory] = await db
+        .select()
+        .from(inventoryMaster)
+        .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, id)))
+        .limit(1);
       return json(200, { product, listings, inventory });
     }
 
@@ -106,15 +148,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const [ebayListing] = await db
         .select()
         .from(channelListings)
-        .where(and(eq(channelListings.productId, id), eq(channelListings.channel, "ebay")))
+        .where(
+          and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, id), eq(channelListings.channel, "ebay")),
+        )
         .limit(1);
       if (!ebayListing) return json(404, { error: "no_ebay_draft_for_product" });
       if (ebayListing.status === "published") return json(409, { error: "already_published" });
 
       const queues = getQueueUrls();
-      await enqueue(queues.ebaySync, { type: "ebay_publish", productId: id }, `ebay-publish:${id}`);
+      await enqueue(queues.ebaySync, { type: "ebay_publish", tenantId, productId: id }, `${tenantId}:ebay-publish:${id}`);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ebay_listing_publish_approved",
         entityType: "product",
@@ -133,7 +178,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const [draft] = await db
         .select()
         .from(aiListingDraft)
-        .where(eq(aiListingDraft.productId, id))
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
         .orderBy(desc(aiListingDraft.createdAt))
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
@@ -141,6 +186,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       await db.update(aiListingDraft).set({ condition: parsed.data }).where(eq(aiListingDraft.id, draft.id));
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ai_draft_condition_corrected",
         entityType: "ai_listing_draft",
@@ -157,7 +203,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const rows = await db
         .select()
         .from(syncErrors)
-        .where(eq(syncErrors.resolved, resolvedOnly))
+        .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.resolved, resolvedOnly)))
         .orderBy(desc(syncErrors.createdAt))
         .limit(200);
       return json(200, { syncErrors: rows });
@@ -165,20 +211,33 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "POST" && /^\/admin\/sync-errors\/[^/]+\/retry$/.test(path)) {
       const id = path.split("/")[3]!;
-      const [error] = await db.select().from(syncErrors).where(eq(syncErrors.id, id)).limit(1);
+      const [error] = await db
+        .select()
+        .from(syncErrors)
+        .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.id, id)))
+        .limit(1);
       if (!error) return json(404, { error: "not_found" });
       if (!error.jobId) return json(400, { error: "error_has_no_retryable_job" });
 
-      const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, error.jobId)).limit(1);
+      const [job] = await db
+        .select()
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, error.jobId)))
+        .limit(1);
       if (!job) return json(404, { error: "original_job_not_found" });
 
       const queues = getQueueUrls();
       const queueUrl =
         job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
-      await enqueue(queueUrl, { type: job.type, productId: job.productId, ...job.payload }, `retry:${id}:${Date.now()}`);
+      await enqueue(
+        queueUrl,
+        { type: job.type, tenantId, productId: job.productId, ...job.payload },
+        `${tenantId}:retry:${id}:${Date.now()}`,
+      );
       await db.update(syncErrors).set({ resolved: true }).where(eq(syncErrors.id, id));
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "sync_error_retried",
         entityType: "sync_error",
@@ -199,13 +258,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
 
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
       await adapter.createInventoryLocation(accessToken, body.merchantLocationKey, body.address);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ebay_inventory_location_created",
         entityType: "ebay_location",
@@ -218,10 +278,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "POST" && path === "/admin/ebay/policies") {
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
 
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
       await adapter.optInToBusinessPolicies(accessToken);
       const [fulfillmentPolicyId, paymentPolicyId, returnPolicyId] = await Promise.all([
         adapter.createFulfillmentPolicy(accessToken, "Standard Shipping"),
@@ -230,6 +290,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       ]);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ebay_business_policies_created",
         entityType: "ebay_account",
@@ -245,10 +306,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
 
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
       const item = await adapter.getRawInventoryItem(accessToken, sku);
       return json(200, { item });
     }
@@ -259,10 +320,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
 
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
       const offer = await adapter.getRawOffer(accessToken, sku);
       return json(200, { offer });
     }
@@ -281,9 +342,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // LISTING (and other USER-scoped topics) require the connected seller's own OAuth
       // token carrying sell.listing[.read] -- an app-level client_credentials token gets a
       // generic "Internal error" (errorId 2003) instead of a clear scope-denied response.
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
-      const userAccessToken = await getValidAccessToken(db, adapter, accountId);
+      const userAccessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
       await adapter.updateNotificationConfig(userAccessToken, body.alertEmail);
       const { destinationId } = await adapter.createNotificationDestination(
@@ -295,6 +356,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const { subscriptionId } = await adapter.createNotificationSubscription(userAccessToken, body.topicId, destinationId);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ebay_webhook_subscribed",
         entityType: "ebay_account",
@@ -316,17 +378,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/ebay/unmanaged-listings") {
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "ebay");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
-      const ebayListings = await db.select().from(channelListings).where(eq(channelListings.channel, "ebay"));
+      const ebayListings = await db
+        .select()
+        .from(channelListings)
+        .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.channel, "ebay")));
       const trackedExternalIds = new Set(ebayListings.map((l) => l.externalId).filter((id): id is string => id !== null));
       // Item #5 of the third hardening round ("自動商品同一性判定"): the only products
       // that could possibly be "this unmanaged listing, just not linked yet" are ones that
       // don't already have an eBay listing of their own.
       const trackedProductIds = new Set(ebayListings.map((l) => l.productId));
-      const candidateProducts: ProductIdentityCandidate[] = (await db.select().from(productMaster))
+      const candidateProducts: ProductIdentityCandidate[] = (
+        await db.select().from(productMaster).where(eq(productMaster.tenantId, tenantId))
+      )
         .filter((p) => !trackedProductIds.has(p.id))
         .map((p) => ({ productId: p.id, title: p.title, brand: p.brand, material: p.material, sizeLabel: p.sizeLabel }));
 
@@ -349,7 +416,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           // it is the same identifier our own pipeline would have used.
           let suggestedProductId: string | null = null;
           if (item.externalId.startsWith("base-")) {
-            const [match] = await db.select().from(productMaster).where(eq(productMaster.sku, item.externalId)).limit(1);
+            const [match] = await db
+              .select()
+              .from(productMaster)
+              .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.sku, item.externalId)))
+              .limit(1);
             if (match) suggestedProductId = match.id;
           }
 
@@ -379,24 +450,35 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const body = JSON.parse(event.body ?? "{}") as { externalId?: string };
       if (!body.externalId) return json(400, { error: "externalId_required" });
 
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
       const [existing] = await db
         .select()
         .from(channelListings)
-        .where(and(eq(channelListings.productId, id), eq(channelListings.channel, "ebay")))
+        .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, id), eq(channelListings.channel, "ebay")))
         .limit(1);
       if (existing) return json(409, { error: "product_already_has_an_ebay_listing" });
 
       const [conflictingExternalId] = await db
         .select()
         .from(channelListings)
-        .where(and(eq(channelListings.channel, "ebay"), eq(channelListings.externalId, body.externalId)))
+        .where(
+          and(
+            eq(channelListings.tenantId, tenantId),
+            eq(channelListings.channel, "ebay"),
+            eq(channelListings.externalId, body.externalId),
+          ),
+        )
         .limit(1);
       if (conflictingExternalId) return json(409, { error: "ebay_listing_already_linked_to_another_product" });
 
       await db.insert(channelListings).values({
+        tenantId,
         productId: id,
         channel: "ebay",
         externalId: body.externalId,
@@ -405,6 +487,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "ebay_listing_linked",
         entityType: "product",
@@ -457,9 +540,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
       const creds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
       const adapter = new BaseAdapter(creds);
-      const [accountId] = await listConnectedAccountIds(db, "base");
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "base");
       if (!accountId) return json(409, { error: "no_base_account_connected" });
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
       const product = await adapter.getProduct(accessToken, itemId);
       return json(200, { product });
@@ -472,7 +555,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         ? Number(event.queryStringParameters.windowHours)
         : undefined;
 
-      const confidence = await computeSyncConfidence(db, channel, windowHours);
+      const confidence = await computeSyncConfidence(db, tenantId, channel, windowHours);
       return json(200, confidence);
     }
 
@@ -480,7 +563,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const id = path.split("/")[3]!;
       const channel = event.queryStringParameters?.channel ?? "ebay";
 
-      const recommendation = await computeDynamicSafetyStock(db, id, channel);
+      const recommendation = await computeDynamicSafetyStock(db, tenantId, id, channel);
       return json(200, recommendation);
     }
 
@@ -491,7 +574,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // separate admin queries by hand.
       const id = path.split("/")[3]!;
       const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
-      const trace = await traceSyncHistory(db, id, limit);
+      const trace = await traceSyncHistory(db, tenantId, id, limit);
       return json(200, trace);
     }
 
@@ -500,7 +583,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // stockout-risk prediction resolveSafetyStockBuffer already applies during sync,
       // so an operator can see *why* a product's public quantity was cut further.
       const id = path.split("/")[3]!;
-      const risk = await predictStockoutRisk(db, id);
+      const risk = await predictStockoutRisk(db, tenantId, id);
       return json(200, risk);
     }
 
@@ -511,7 +594,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // hypothetical shipping/margin without first persisting it via pricing-config below;
       // omitted params fall back to this product's saved config, then the platform default.
       const id = path.split("/")[3]!;
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
       const fx = await fetchFxRate();
@@ -548,9 +635,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if ("targetMarginRatio" in body) {
         values.targetMarginBasisPoints = body.targetMarginRatio === null ? null : Math.round(body.targetMarginRatio! * 10000);
       }
-      await db.update(productMaster).set(values).where(eq(productMaster.id, id));
+      await db
+        .update(productMaster)
+        .set(values)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)));
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "pricing_config_updated",
         entityType: "product",
@@ -564,7 +655,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // Preview only -- never writes. Item #3 ("状態再構築"): shows what the event history
       // says quantity should be, vs. what's currently stored, without touching either.
       const id = path.split("/")[3]!;
-      const preview = await reconstructInventory(db, id);
+      const preview = await reconstructInventory(db, tenantId, id);
       return json(200, preview);
     }
 
@@ -572,10 +663,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // Applies the recomputed quantity, but only if reconstructInventory found real drift
       // -- always a human-triggered admin action, never automatic (see applyReconstructedInventory).
       const id = path.split("/")[3]!;
-      const result = await applyReconstructedInventory(db, id);
+      const result = await applyReconstructedInventory(db, tenantId, id);
 
       if (result.applied) {
         await recordAuditLog(db, {
+          tenantId,
           actor: actorFromEvent(event),
           action: "inventory_reconstructed",
           entityType: "product",
@@ -589,7 +681,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
     if (method === "GET" && path === "/admin/audit-log") {
-      const rows = await db.select().from(auditLog).orderBy(desc(auditLog.createdAt)).limit(200);
+      // tenant_id IS NULL surfaces genuine platform-level events (e.g. dlq-redrive) alongside
+      // this tenant's own history -- see auditLog's schema comment for why those stay nullable.
+      const rows = await db
+        .select()
+        .from(auditLog)
+        .where(or(eq(auditLog.tenantId, tenantId), isNull(auditLog.tenantId)))
+        .orderBy(desc(auditLog.createdAt))
+        .limit(200);
       return json(200, { auditLog: rows });
     }
 
@@ -598,19 +697,23 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/orders") {
       const status = OrderStatus.safeParse(event.queryStringParameters?.status);
       const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
-      const orderRows = await listOrders(db, { status: status.success ? status.data : undefined, limit });
+      const orderRows = await listOrders(db, tenantId, { status: status.success ? status.data : undefined, limit });
       return json(200, { orders: orderRows });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/orders$/.test(path)) {
       const id = path.split("/")[3]!;
-      const orderRows = await listOrdersForProduct(db, id);
+      const orderRows = await listOrdersForProduct(db, tenantId, id);
       return json(200, { orders: orderRows });
     }
 
     if (method === "GET" && /^\/admin\/orders\/[^/]+\/profit$/.test(path)) {
       const id = path.split("/")[3]!;
-      const [order] = await db.select().from(orders).where(eq(orders.id, id)).limit(1);
+      const [order] = await db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.tenantId, tenantId), eq(orders.id, id)))
+        .limit(1);
       if (!order) return json(404, { error: "order_not_found" });
 
       if (order.profitFinalizedAt) {
@@ -633,8 +736,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
 
       try {
-        const updated = await transitionOrderStatus(db, id, parsedStatus.data, { extra: body.extra });
+        const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, { extra: body.extra });
         await recordAuditLog(db, {
+          tenantId,
           actor: actorFromEvent(event),
           action: "order_status_changed",
           entityType: "order",
@@ -655,9 +759,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // e.g. an admin corrects a fee via the status/extra field, then re-finalizes.
       const id = path.split("/")[3]!;
       const usdPerJpy = await currentFxRate();
-      const updated = await finalizeOrderProfit(db, id, usdPerJpy);
+      const updated = await finalizeOrderProfit(db, tenantId, id, usdPerJpy);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "order_profit_finalized",
         entityType: "order",
@@ -678,9 +783,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       await db
         .update(productMaster)
         .set({ costJpy: body.costJpy, purchasedAt, updatedAt: new Date() })
-        .where(eq(productMaster.id, id));
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)));
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "product_purchased",
         entityType: "product",
@@ -694,7 +800,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/inventory-breakdown$/.test(path)) {
       const id = path.split("/")[3]!;
-      const breakdown = await getInventoryBreakdown(db, id);
+      const breakdown = await getInventoryBreakdown(db, tenantId, id);
       if (!breakdown) return json(404, { error: "not_found" });
       return json(200, breakdown);
     }
@@ -703,7 +809,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "GET" && path === "/admin/stale-products") {
       const minDays = event.queryStringParameters?.minDays ? Number(event.queryStringParameters.minDays) : undefined;
-      const staleProducts = await findStaleProducts(db, minDays);
+      const staleProducts = await findStaleProducts(db, tenantId, minDays);
       return json(200, { staleProducts });
     }
 
@@ -711,7 +817,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // Live-generated, never persisted or auto-applied -- any resulting price change or
       // re-listing still goes through the existing human-approval publish/update gates.
       const id = path.split("/")[3]!;
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
       const daysListed = Math.max(0, Math.floor((Date.now() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)));
@@ -736,13 +846,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/sns$/.test(path)) {
       const id = path.split("/")[3]!;
-      const content = await getSnsContent(db, id);
+      const content = await getSnsContent(db, tenantId, id);
       return json(200, { snsContent: content });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/sns\/script$/.test(path)) {
       const id = path.split("/")[3]!;
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, id)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
       const modelClient = createAIModelClient(process.env);
@@ -756,9 +870,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         imageCount: product.images.length,
       });
       const promptVersion = "sns-script-v1";
-      const saved = await upsertSnsScript(db, id, script.scriptText, promptVersion);
+      const saved = await upsertSnsScript(db, tenantId, id, script.scriptText, promptVersion);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "sns_script_generated",
         entityType: "product",
@@ -774,9 +889,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         instagramPosted?: boolean;
         tiktokPosted?: boolean;
       };
-      const updated = await markSnsStatus(db, id, body);
+      const updated = await markSnsStatus(db, tenantId, id, body);
 
       await recordAuditLog(db, {
+        tenantId,
         actor: actorFromEvent(event),
         action: "sns_status_updated",
         entityType: "product",
@@ -791,8 +907,28 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/sync/state") {
       const channel = event.queryStringParameters?.channel;
       if (!channel) return json(400, { error: "channel_required" });
-      const state = await computeChannelSyncState(db, channel);
+      const state = await computeChannelSyncState(db, tenantId, channel);
       return json(200, state);
+    }
+
+    // --- New in the multi-tenant retrofit: mint the signed OAuth authorize URL server-side
+    // from this caller's own tenantId, rather than trusting a client-supplied tenant hint on
+    // the public /oauth/.../authorize routes (see services/lambdas/oauth-{base,ebay}). ---
+
+    if (method === "GET" && /^\/admin\/oauth\/(base|ebay)\/authorize-url$/.test(path)) {
+      const channel = path.split("/")[3] as "base" | "ebay";
+      if (channel === "ebay") {
+        const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+        const adapter = createEbayAdapter(creds);
+        const state = signState(creds.clientSecret, tenantId);
+        const url = adapter.getAuthorizationUrl(state, creds.ruName);
+        return json(200, { url });
+      }
+      const creds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
+      const adapter = new BaseAdapter(creds);
+      const state = signState(creds.clientSecret, tenantId);
+      const url = adapter.getAuthorizationUrl(state, requireEnv("BASE_OAUTH_REDIRECT_URI"));
+      return json(200, { url });
     }
 
     // --- Commercial-features round: SLO/監視 (item #9) ---
@@ -802,28 +938,33 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
       const [baseConfidence, ebayConfidence] = await Promise.all([
-        computeSyncConfidence(db, "base", windowHours),
-        computeSyncConfidence(db, "ebay", windowHours),
+        computeSyncConfidence(db, tenantId, "base", windowHours),
+        computeSyncConfidence(db, tenantId, "ebay", windowHours),
       ]);
 
       const driftErrors = await db
         .select()
         .from(syncErrors)
-        .where(and(eq(syncErrors.errorCode, "inventory_drift"), gte(syncErrors.createdAt, since)));
+        .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.errorCode, "inventory_drift"), gte(syncErrors.createdAt, since)));
 
       const [aiFailures, aiDrafts] = await Promise.all([
         db
           .select()
           .from(syncErrors)
-          .where(and(eq(syncErrors.errorCode, "ai_generate_failed"), gte(syncErrors.createdAt, since))),
-        db.select().from(aiListingDraft).where(gte(aiListingDraft.createdAt, since)),
+          .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.errorCode, "ai_generate_failed"), gte(syncErrors.createdAt, since))),
+        db
+          .select()
+          .from(aiListingDraft)
+          .where(and(eq(aiListingDraft.tenantId, tenantId), gte(aiListingDraft.createdAt, since))),
       ]);
       const aiAttemptCount = aiFailures.length + aiDrafts.length;
 
+      // Platform-level (tenant_id IS NULL): a DLQ redrive moves whatever's in the shared
+      // queue regardless of whose messages they are, so this is intentionally NOT tenant-filtered.
       const recentAutoRecoveryEvents = await db
         .select()
         .from(auditLog)
-        .where(and(eq(auditLog.action, "dlq_redrive_started"), gte(auditLog.createdAt, since)))
+        .where(and(isNull(auditLog.tenantId), eq(auditLog.action, "dlq_redrive_started"), gte(auditLog.createdAt, since)))
         .orderBy(desc(auditLog.createdAt))
         .limit(20);
 
@@ -862,16 +1003,24 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // keeps this endpoint's total concurrent RDS Data API calls bounded; pass ?limit= for
       // a larger catalog at the caller's own risk.
       const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : 30;
-      const products = await db.select().from(productMaster).orderBy(desc(productMaster.updatedAt)).limit(limit);
+      const products = await db
+        .select()
+        .from(productMaster)
+        .where(eq(productMaster.tenantId, tenantId))
+        .orderBy(desc(productMaster.updatedAt))
+        .limit(limit);
       const usdPerJpy = await currentFxRate();
 
       const rows = await Promise.all(
         products.map(async (product) => {
           const [listings, breakdown, productOrders, sns] = await Promise.all([
-            db.select().from(channelListings).where(eq(channelListings.productId, product.id)),
-            getInventoryBreakdown(db, product.id),
-            listOrdersForProduct(db, product.id),
-            getSnsContent(db, product.id),
+            db
+              .select()
+              .from(channelListings)
+              .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, product.id))),
+            getInventoryBreakdown(db, tenantId, product.id),
+            listOrdersForProduct(db, tenantId, product.id),
+            getSnsContent(db, tenantId, product.id),
           ]);
 
           let totalRevenueUsdCents = 0;
@@ -942,8 +1091,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const since = trendStart < prevMonthStart ? trendStart : prevMonthStart;
 
       const usdPerJpy = await currentFxRate();
-      const relevantOrders = await db.select().from(orders).where(gte(orders.placedAt, since));
-      const products = await db.select().from(productMaster).limit(productLimit);
+      const relevantOrders = await db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.tenantId, tenantId), gte(orders.placedAt, since)));
+      const products = await db
+        .select()
+        .from(productMaster)
+        .where(eq(productMaster.tenantId, tenantId))
+        .limit(productLimit);
       const productById = new Map(products.map((p) => [p.id, p]));
 
       // Computed once per order (rather than re-derived every time it's touched below) so a
@@ -1032,7 +1188,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           };
         });
 
-      const breakdowns = await Promise.all(products.map((p) => getInventoryBreakdown(db, p.id)));
+      const breakdowns = await Promise.all(products.map((p) => getInventoryBreakdown(db, tenantId, p.id)));
       let totalAvailable = 0;
       let lowStockCount = 0;
       for (const b of breakdowns) {
@@ -1052,6 +1208,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     return json(404, { error: "route_not_found" });
   } catch (err) {
+    if (err instanceof MissingTenantClaimError) {
+      return json(403, { error: "missing_tenant_claim" });
+    }
     return json(500, { error: "internal_error", message: (err as Error).message });
   }
 }

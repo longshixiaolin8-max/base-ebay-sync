@@ -15,6 +15,7 @@ import {
 function baseOrder(overrides: Partial<OrderRow> = {}): OrderRow {
   return {
     id: "order-1",
+    tenantId: "tenant-a",
     productId: "product-1",
     channel: "ebay",
     externalOrderId: "ext-1",
@@ -61,6 +62,7 @@ describe("upsertOrderReceived", () => {
     } as unknown as Database;
 
     const row = await upsertOrderReceived(db, {
+      tenantId: "tenant-a",
       productId: "product-1",
       channel: "ebay",
       externalOrderId: "ext-1",
@@ -80,6 +82,7 @@ describe("upsertOrderReceived", () => {
     } as unknown as Database;
 
     const row = await upsertOrderReceived(db, {
+      tenantId: "tenant-a",
       productId: "product-1",
       channel: "ebay",
       externalOrderId: "ext-1",
@@ -115,7 +118,7 @@ describe("transitionOrderStatus", () => {
     const current = baseOrder({ status: "ORDER_RECEIVED" });
     const { db, getSet } = fakeOrderDb(current);
 
-    const updated = await transitionOrderStatus(db, "order-1", "PAID");
+    const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "PAID");
 
     expect(updated.status).toBe("PAID");
     expect(getSet()?.paidAt).toBeInstanceOf(Date);
@@ -125,14 +128,14 @@ describe("transitionOrderStatus", () => {
     const current = baseOrder({ status: "ORDER_RECEIVED" });
     const { db } = fakeOrderDb(current);
 
-    await expect(transitionOrderStatus(db, "order-1", "SHIPPED")).rejects.toThrow(InvalidOrderTransitionError);
+    await expect(transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED")).rejects.toThrow(InvalidOrderTransitionError);
   });
 
   it("merges extra financial fields supplied at transition time", async () => {
     const current = baseOrder({ status: "RETURN_REQUESTED" });
     const { db, getSet } = fakeOrderDb(current);
 
-    const updated = await transitionOrderStatus(db, "order-1", "RETURNED", { extra: { returnAmountUsdCents: 5000 } });
+    const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "RETURNED", { extra: { returnAmountUsdCents: 5000 } });
 
     expect(updated.status).toBe("RETURNED");
     expect(getSet()?.returnAmountUsdCents).toBe(5000);
@@ -152,13 +155,13 @@ describe("getLiveOrderProfit / finalizeOrderProfit", () => {
     const order = baseOrder({ salePriceUsdCents: 5000, ebayFeeUsdCents: 750 });
     const { db, getSet } = fakeOrderDb(order);
 
-    const finalized = await finalizeOrderProfit(db, "order-1", 0.0067);
+    const finalized = await finalizeOrderProfit(db, "tenant-a", "order-1", 0.0067);
     expect(finalized.finalizedNetProfitUsdCents).toBe(5000 - 750);
     expect(getSet()?.profitFinalizedAt).toBeInstanceOf(Date);
 
     // Re-finalizing from the same underlying row must reproduce the same number, not add to it.
     const { db: db2 } = fakeOrderDb(order);
-    const finalizedAgain = await finalizeOrderProfit(db2, "order-1", 0.0067);
+    const finalizedAgain = await finalizeOrderProfit(db2, "tenant-a", "order-1", 0.0067);
     expect(finalizedAgain.finalizedNetProfitUsdCents).toBe(finalized.finalizedNetProfitUsdCents);
   });
 });
@@ -167,7 +170,7 @@ describe("list helpers", () => {
   it("listOrdersForProduct filters to the given product", async () => {
     const rows = [baseOrder({ id: "o1" })];
     const db = { select: () => ({ from: () => ({ where: () => ({ orderBy: async () => rows }) }) }) } as unknown as Database;
-    const result = await listOrdersForProduct(db, "product-1");
+    const result = await listOrdersForProduct(db, "tenant-a", "product-1");
     expect(result).toEqual(rows);
   });
 
@@ -178,14 +181,14 @@ describe("list helpers", () => {
         from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => rows }) }) }),
       }),
     } as unknown as Database;
-    const result = await listOrders(db, { status: "SHIPPED" });
+    const result = await listOrders(db, "tenant-a", { status: "SHIPPED" });
     expect(result).toEqual(rows);
   });
 
   it("listReservedOrdersForProduct only matches non-terminal, non-shipped statuses", async () => {
     const rows = [baseOrder({ status: "PAID" })];
     const db = { select: () => ({ from: () => ({ where: async () => rows }) }) } as unknown as Database;
-    const result = await listReservedOrdersForProduct(db, "product-1");
+    const result = await listReservedOrdersForProduct(db, "tenant-a", "product-1");
     expect(result).toEqual(rows);
   });
 });

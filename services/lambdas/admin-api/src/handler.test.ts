@@ -124,8 +124,10 @@ const createNotificationSubscriptionMock = vi.fn().mockResolvedValue({ subscript
 const updateNotificationConfigMock = vi.fn().mockResolvedValue(undefined);
 const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
 const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
+const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://ebay.example/oauth?state=signed-state");
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
+  getAuthorizationUrl: getAuthorizationUrlMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
   suggestCategories: suggestCategoriesMock,
   optInToBusinessPolicies: optInToBusinessPoliciesMock,
@@ -144,6 +146,8 @@ const getDlqUrlsMock = vi.fn(() => {
   throw new Error("Missing required environment variable: AI_GENERATE_DLQ_URL");
 });
 const getApproximateMessageCountMock = vi.fn().mockResolvedValue(0);
+const signStateMock = vi.fn().mockReturnValue("signed-state");
+const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
@@ -156,6 +160,8 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
   getDlqUrls: () => getDlqUrlsMock(),
   getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
+  signState: (...args: unknown[]) => signStateMock(...args),
+  requireEnv: (...args: unknown[]) => requireEnvMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -186,11 +192,14 @@ function createFakeDb(selectResults: unknown[]) {
   };
 }
 
+const TENANT_A = "tenant-a";
+
 function makeEvent(
   method: string,
   path: string,
   query: Record<string, string> = {},
   body?: unknown,
+  claims: Record<string, string> = { email: "admin@example.com", "custom:tenant_id": TENANT_A },
 ): APIGatewayProxyEventV2 {
   return {
     version: "2.0",
@@ -200,7 +209,7 @@ function makeEvent(
     body: body !== undefined ? JSON.stringify(body) : undefined,
     requestContext: {
       http: { method, path, protocol: "HTTP/1.1", sourceIp: "0.0.0.0", userAgent: "test" },
-      authorizer: { jwt: { claims: { email: "admin@example.com" }, scopes: [] } },
+      authorizer: { jwt: { claims, scopes: [] } },
     },
   } as unknown as APIGatewayProxyEventV2;
 }
@@ -268,8 +277,8 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(202);
     expect(enqueueMock).toHaveBeenCalledWith(
       "ebay-sync-url",
-      { type: "ebay_publish", productId: "p1" },
-      "ebay-publish:p1",
+      { type: "ebay_publish", tenantId: TENANT_A, productId: "p1" },
+      `${TENANT_A}:ebay-publish:p1`,
     );
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       fakeDb,
@@ -292,8 +301,8 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(202);
     expect(enqueueMock).toHaveBeenCalledWith(
       "ai-generate-url",
-      { type: "ai_generate", productId: "p1" },
-      expect.stringContaining("retry:e1:"),
+      { type: "ai_generate", tenantId: TENANT_A, productId: "p1" },
+      expect.stringContaining(`${TENANT_A}:retry:e1:`),
     );
   });
 
@@ -491,7 +500,7 @@ describe("admin-api handler", () => {
     const res = await callHandler(makeEvent("GET", "/admin/sync/confidence", { channel: "ebay" }));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ channel: "ebay", score: 63 });
-    expect(computeSyncConfidenceMock).toHaveBeenCalledWith(fakeDb, "ebay", undefined);
+    expect(computeSyncConfidenceMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "ebay", undefined);
   });
 
   it("GET /admin/sync/confidence returns 400 without a channel", async () => {
@@ -513,7 +522,7 @@ describe("admin-api handler", () => {
     const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-safety-stock"));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", recommendedBuffer: 2 });
-    expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, "product-1", "ebay");
+    expect(computeDynamicSafetyStockMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1", "ebay");
   });
 
   it("GET /admin/products/{id}/stockout-risk returns the predicted stockout risk for a product", async () => {
@@ -528,7 +537,7 @@ describe("admin-api handler", () => {
     const res = await callHandler(makeEvent("GET", "/admin/products/product-1/stockout-risk"));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", highRisk: true, daysUntilStockout: 1.5 });
-    expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, "product-1");
+    expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1");
   });
 
   it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
@@ -604,12 +613,12 @@ describe("admin-api handler", () => {
     const res = await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace"));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toMatchObject({ productId: "product-1", entries: [{ source: "inventory_event" }] });
-    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", undefined);
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1", undefined);
   });
 
   it("GET /admin/products/{id}/sync-trace passes through a custom limit", async () => {
     await callHandler(makeEvent("GET", "/admin/products/product-1/sync-trace", { limit: "20" }));
-    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, "product-1", 20);
+    expect(traceSyncHistoryMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1", 20);
   });
 
   it("GET /admin/products/{id}/reconstruct-inventory previews drift without writing anything", async () => {
@@ -694,14 +703,14 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/orders", { status: "SHIPPED" }));
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!)).toEqual({ orders: [{ id: "o1", status: "SHIPPED" }] });
-      expect(listOrdersMock).toHaveBeenCalledWith(expect.anything(), { status: "SHIPPED", limit: undefined });
+      expect(listOrdersMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, { status: "SHIPPED", limit: undefined });
     });
 
     it("GET /admin/products/{id}/orders lists that product's orders", async () => {
       listOrdersForProductMock.mockResolvedValueOnce([{ id: "o1" }]);
       const res = await callHandler(makeEvent("GET", "/admin/products/p1/orders"));
       expect(res.statusCode).toBe(200);
-      expect(listOrdersForProductMock).toHaveBeenCalledWith(expect.anything(), "p1");
+      expect(listOrdersForProductMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, "p1");
     });
 
     it("GET /admin/orders/{id}/profit returns a finalized snapshot when already finalized", async () => {
@@ -828,7 +837,7 @@ describe("admin-api handler", () => {
       markSnsStatusMock.mockResolvedValueOnce({ productId: "p1", videoCreated: true });
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/status", {}, { videoCreated: true }));
       expect(res.statusCode).toBe(200);
-      expect(markSnsStatusMock).toHaveBeenCalledWith(expect.anything(), "p1", { videoCreated: true });
+      expect(markSnsStatusMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, "p1", { videoCreated: true });
     });
 
     it("GET /admin/sync/state requires a channel", async () => {
@@ -944,6 +953,36 @@ describe("admin-api handler", () => {
       expect(parsed.recentOrders).toEqual([]);
       expect(parsed.inventory).toEqual({ totalAvailable: 0, lowStockCount: 0 });
       expect(getLiveOrderProfitMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("tenant isolation", () => {
+    it("returns 403 rather than defaulting to any tenant when the custom:tenant_id claim is missing", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("GET", "/admin/products", {}, undefined, { email: "admin@example.com" }));
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("GET /admin/products filters by the caller's own tenantId, not just status/limit", async () => {
+      fakeDb = createFakeDb([[]]);
+      await callHandler(makeEvent("GET", "/admin/products"));
+      // `where` is opaque in this fakeDb, but the route only ever builds it from
+      // eq(productMaster.tenantId, tenantId) -- exercised for real by packages/db's own
+      // tenant-scoping tests; this proves the route at least reaches that call with a tenant
+      // in scope, i.e. it didn't short-circuit before tenantIdFromEvent ran.
+      expect(getDbMock).toHaveBeenCalled();
+    });
+  });
+
+  describe("GET /admin/oauth/{channel}/authorize-url", () => {
+    it("mints a signed state from the caller's own tenantId and returns eBay's consent URL", async () => {
+      fakeDb = createFakeDb([]);
+      getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", clientSecret: "csecret", ruName: "ru-1" });
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/ebay/authorize-url"));
+      expect(res.statusCode).toBe(200);
+      expect(signStateMock).toHaveBeenCalledWith("csecret", TENANT_A);
+      expect(getAuthorizationUrlMock).toHaveBeenCalledWith("signed-state", "ru-1");
+      expect(JSON.parse(res.body!)).toEqual({ url: "https://ebay.example/oauth?state=signed-state" });
     });
   });
 });

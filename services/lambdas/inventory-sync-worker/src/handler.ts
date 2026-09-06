@@ -25,6 +25,7 @@ import type { SQSEvent, SQSHandler } from "aws-lambda";
 
 interface SaleDetectedMessage {
   type: "sale_detected";
+  tenantId: string;
   sale: SaleEvent;
 }
 
@@ -34,7 +35,6 @@ function otherChannelOf(channel: ChannelType): ChannelType {
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
-  const idempotencyStore = getIdempotencyStore();
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
   const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
@@ -50,13 +50,24 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as SaleDetectedMessage;
-    const { sale } = message;
+    const { tenantId, sale } = message;
+    const idempotencyStore = getIdempotencyStore(tenantId);
 
     try {
+      // Scoping this lookup by tenantId (not just channel+externalId) is load-bearing, not
+      // defense-in-depth: BASE/eBay item ids are only unique within one seller's own account,
+      // so without tenantId here a second tenant's sale could resolve to -- and decrement --
+      // the wrong tenant's inventory.
       const [listing] = await db
         .select()
         .from(channelListings)
-        .where(and(eq(channelListings.channel, sale.channel), eq(channelListings.externalId, sale.externalProductId)))
+        .where(
+          and(
+            eq(channelListings.tenantId, tenantId),
+            eq(channelListings.channel, sale.channel),
+            eq(channelListings.externalId, sale.externalProductId),
+          ),
+        )
         .limit(1);
       if (!listing) {
         throw new Error(
@@ -64,14 +75,15 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         );
       }
 
-      const key = buildIdempotencyKey(["sale", sale.channel, sale.externalOrderId, sale.externalProductId]);
+      const key = buildIdempotencyKey(tenantId, ["sale", sale.channel, sale.externalOrderId, sale.externalProductId]);
       await withIdempotency(idempotencyStore, key, () =>
-        processSale(db, adapters, listing.productId, sale),
+        processSale(db, tenantId, adapters, listing.productId, sale),
       );
     } catch (err) {
       const error = err as Error;
       if (error.name !== "IdempotencyInProgressError") {
         await recordSyncError(db, {
+          tenantId,
           channel: sale.channel,
           productId: null,
           errorCode: "inventory_sync_failed",
@@ -88,11 +100,12 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
 export async function processSale(
   db: ReturnType<typeof getDb>,
+  tenantId: string,
   adapters: Record<ChannelType, ChannelAdapter>,
   productId: string,
   sale: SaleEvent,
 ): Promise<void> {
-  const result = await applySale(db, productId, sale.quantitySold, {
+  const result = await applySale(db, tenantId, productId, sale.quantitySold, {
     channel: sale.channel,
     sequenceAt: sale.occurredAt,
     externalEventId: sale.externalOrderId,
@@ -115,6 +128,7 @@ export async function processSale(
   try {
     const [productForOrder] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
     await upsertOrderReceived(db, {
+      tenantId,
       productId,
       channel: sale.channel,
       externalOrderId: sale.externalOrderId,
@@ -126,6 +140,7 @@ export async function processSale(
     });
   } catch (err) {
     await recordSyncError(db, {
+      tenantId,
       channel: sale.channel,
       productId,
       errorCode: "order_record_failed",
@@ -154,9 +169,10 @@ export async function processSale(
     // it here instead, before spending an attempt on a call already known likely to fail
     // the same way, and treating it as a known, tracked condition rather than a fresh
     // failure to throw and retry-spam on.
-    const isolation = await isChannelIsolated(db, otherChannel);
+    const isolation = await isChannelIsolated(db, tenantId, otherChannel);
     if (isolation.isolated) {
       await recordAuditLog(db, {
+        tenantId,
         actor: "system:inventory-sync-worker",
         action: "other_channel_isolated_skip",
         entityType: "product",
@@ -166,7 +182,7 @@ export async function processSale(
       return;
     }
 
-    const [accountId] = await listConnectedAccountIds(db, otherChannel);
+    const [accountId] = await listConnectedAccountIds(db, tenantId, otherChannel);
     if (!accountId) {
       if (result.soldOut) {
         throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
@@ -176,7 +192,7 @@ export async function processSale(
       return;
     }
     const adapter = adapters[otherChannel];
-    const accessToken = await getValidAccessToken(db, adapter, accountId);
+    const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
     let pushedQuantity: number;
     if (result.soldOut) {
@@ -206,6 +222,7 @@ export async function processSale(
       .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)));
 
     await recordAuditLog(db, {
+      tenantId,
       actor: "system:inventory-sync-worker",
       action: result.soldOut ? "inventory_zeroed_due_to_sale" : "inventory_immediate_sync_after_sale",
       entityType: "product",

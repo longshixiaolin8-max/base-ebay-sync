@@ -5,6 +5,7 @@ import {
   channelListings,
   inventoryMaster,
   isChannelIsolated,
+  listActiveTenants,
   productMaster,
   type Database,
 } from "@ai-ec/db";
@@ -34,7 +35,14 @@ interface BaseAppCredentials {
 export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
+  const tenants = await listActiveTenants(db);
 
+  for (const tenant of tenants) {
+    await pollTenant(db, queues, tenant.id);
+  }
+}
+
+async function pollTenant(db: Database, queues: ReturnType<typeof getQueueUrls>, tenantId: string): Promise<void> {
   // Item A of the third hardening round ("チャネル障害時の隔離モード"), superseding item #4
   // of the second round ("チャネル別レート制御") -- isChannelIsolated() composes that same
   // 429/5xx signal and also reacts to a real authentication failure (an expired token with
@@ -42,10 +50,11 @@ export async function handler(): Promise<void> {
   // retrying. CDK owns this Lambda's EventBridge schedule, so rewriting the cron expression
   // at runtime would just get reset on the next deploy; skipping this cycle's poll is the
   // effective-frequency-reduction that's actually safe to do from inside the function itself.
-  const isolation = await isChannelIsolated(db, "base");
+  const isolation = await isChannelIsolated(db, tenantId, "base");
   if (isolation.isolated) {
     emitChannelIsolatedMetric("base");
     await recordAuditLog(db, {
+      tenantId,
       actor: "system:product-fetch",
       action: "channel_isolated_skip",
       entityType: "channel",
@@ -59,9 +68,9 @@ export async function handler(): Promise<void> {
     const creds = await getAppCredentials<BaseAppCredentials>("base");
     const adapter = new BaseAdapter(creds);
 
-    const accountIds = await listConnectedAccountIds(db, "base");
+    const accountIds = await listConnectedAccountIds(db, tenantId, "base");
     for (const accountId of accountIds) {
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
       let cursor: string | undefined;
       do {
@@ -73,7 +82,7 @@ export async function handler(): Promise<void> {
           // photos would silently lose the rest if we trusted the list response's images,
           // so re-fetch the authoritative per-item detail before upserting.
           const detail = await adapter.getProduct(accessToken, item.externalId);
-          await upsertProduct(db, queues, detail ?? item);
+          await upsertProduct(db, queues, tenantId, detail ?? item);
         }
         cursor = nextCursor;
       } while (cursor);
@@ -83,6 +92,7 @@ export async function handler(): Promise<void> {
     // whole invocation with no channel-tagged record of why -- invisible to
     // isChannelIsolated/computeSyncConfidence, which only ever read sync_errors.
     await recordSyncError(db, {
+      tenantId,
       channel: "base",
       productId: null,
       errorCode: "product_fetch_failed",
@@ -94,6 +104,7 @@ export async function handler(): Promise<void> {
 export async function upsertProduct(
   db: Database,
   queues: ReturnType<typeof getQueueUrls>,
+  tenantId: string,
   item: ExternalProduct,
 ): Promise<void> {
   const sku = `base-${item.externalId}`;
@@ -104,7 +115,11 @@ export async function upsertProduct(
     images: item.images,
   });
 
-  const [existing] = await db.select().from(productMaster).where(eq(productMaster.sku, sku)).limit(1);
+  const [existing] = await db
+    .select()
+    .from(productMaster)
+    .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.sku, sku)))
+    .limit(1);
 
   if (existing) {
     // contentHash covers title/description/price/images only, not stock -- a poll where
@@ -112,7 +127,7 @@ export async function upsertProduct(
     // reports as an "order") would otherwise never reach inventory_master at all. Always
     // reconcile the reported stock; applyBaseStockReport itself is the no-op guard when
     // nothing has actually changed on BASE (its out-of-order check on item.updatedAt).
-    await applyBaseStockReport(db, existing.id, item.quantity, item.updatedAt);
+    await applyBaseStockReport(db, tenantId, existing.id, item.quantity, item.updatedAt);
   }
 
   if (existing && existing.contentHash === hash) {
@@ -137,6 +152,7 @@ export async function upsertProduct(
     const [inserted] = await db
       .insert(productMaster)
       .values({
+        tenantId,
         sku,
         sourceChannel: "base",
         title: item.title,
@@ -150,6 +166,7 @@ export async function upsertProduct(
     productId = inserted!.id;
 
     await db.insert(inventoryMaster).values({
+      tenantId,
       productId,
       quantity: item.quantity,
       version: 0,
@@ -159,6 +176,7 @@ export async function upsertProduct(
       lastBaseSeq: item.updatedAt,
     });
     await db.insert(channelListings).values({
+      tenantId,
       productId,
       channel: "base",
       externalId: item.externalId,
@@ -171,6 +189,7 @@ export async function upsertProduct(
     // separate, human-entered stage (see admin-api's purchase-info endpoint), since BASE's
     // own API has no concept of acquisition cost.
     await recordAuditLog(db, {
+      tenantId,
       actor: "system:product-fetch",
       action: "product_listed_base",
       entityType: "product",
@@ -178,7 +197,7 @@ export async function upsertProduct(
       after: { sku, title: item.title },
     });
 
-    await enqueue(queues.aiGenerate, { type: "ai_generate", productId }, `ai-generate:${productId}`);
+    await enqueue(queues.aiGenerate, { type: "ai_generate", tenantId, productId }, `${tenantId}:ai-generate:${productId}`);
     return;
   }
 
@@ -191,6 +210,10 @@ export async function upsertProduct(
   // Only push edits automatically for a listing a human already approved & published.
   // A listing still pending approval is left alone — the pending draft/approval flow owns it.
   if (ebayListing?.status === "published") {
-    await enqueue(queues.ebaySync, { type: "ebay_update", productId }, `ebay-update:${productId}:${hash}`);
+    await enqueue(
+      queues.ebaySync,
+      { type: "ebay_update", tenantId, productId },
+      `${tenantId}:ebay-update:${productId}:${hash}`,
+    );
   }
 }

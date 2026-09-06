@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { calculateChannelAvailableQuantity } from "./inventory.js";
 import { listReservedOrdersForProduct } from "./orders.js";
@@ -25,15 +25,26 @@ export interface InventoryBreakdown {
  * subtracted from on_hand/available, since applySale already subtracted those units from
  * true stock the moment the sale was detected -- subtracting them again here would double-count.
  */
-export async function getInventoryBreakdown(db: Database, productId: string): Promise<InventoryBreakdown | null> {
-  const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
-  const [inv] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+export async function getInventoryBreakdown(db: Database, tenantId: string, productId: string): Promise<InventoryBreakdown | null> {
+  const [product] = await db
+    .select()
+    .from(productMaster)
+    .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, productId)))
+    .limit(1);
+  const [inv] = await db
+    .select()
+    .from(inventoryMaster)
+    .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
+    .limit(1);
   if (!product || !inv) return null;
 
-  const reservedOrders = await listReservedOrdersForProduct(db, productId);
+  const reservedOrders = await listReservedOrdersForProduct(db, tenantId, productId);
   const reserved = reservedOrders.reduce((sum, o) => sum + o.quantity, 0);
 
-  const listings = await db.select().from(channelListings).where(eq(channelListings.productId, productId));
+  const listings = await db
+    .select()
+    .from(channelListings)
+    .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, productId)));
   const sellableByChannel: Record<string, number> = {};
   for (const listing of listings) {
     sellableByChannel[listing.channel] = calculateChannelAvailableQuantity(

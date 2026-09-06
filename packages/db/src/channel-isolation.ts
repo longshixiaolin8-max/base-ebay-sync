@@ -33,6 +33,7 @@ const AUTH_FAILURE_PATTERN = /access token.*expired|no refresh token is stored|n
  */
 export async function isChannelIsolated(
   db: Database,
+  tenantId: string,
   channel: string,
   windowMinutes = DEFAULT_WINDOW_MINUTES,
 ): Promise<ChannelIsolationDecision> {
@@ -42,7 +43,7 @@ export async function isChannelIsolated(
   const recentErrors = await db
     .select()
     .from(syncErrors)
-    .where(and(eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
+    .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
   if (recentErrors.some((e) => AUTH_FAILURE_PATTERN.test(e.errorMessage))) {
     reasons.push(
       `an authentication failure was recorded for ${channel} in the last ${windowMinutes}min -- this needs a ` +
@@ -50,7 +51,7 @@ export async function isChannelIsolated(
     );
   }
 
-  const throttle = await shouldThrottleChannel(db, channel, windowMinutes);
+  const throttle = await shouldThrottleChannel(db, tenantId, channel, windowMinutes);
   reasons.push(...throttle.reasons);
 
   return { channel, isolated: reasons.length > 0, reasons, windowMinutes };

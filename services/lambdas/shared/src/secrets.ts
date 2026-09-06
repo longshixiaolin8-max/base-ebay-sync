@@ -37,10 +37,15 @@ function secretName(channel: string, externalAccountId: string): string {
  */
 export async function saveOAuthToken(
   db: Database,
+  tenantId: string,
   channel: string,
   externalAccountId: string,
   tokens: OAuthTokenSet,
 ): Promise<void> {
+  // Secret name is intentionally NOT tenant-segmented -- Secrets Manager names are already
+  // globally unique per (channel, externalAccountId) in practice (a real BASE/eBay account
+  // id), and the tenant boundary that actually matters is enforced at the oauth_connections
+  // row (below), which is what every read of this connection goes through first.
   const name = secretName(channel, externalAccountId);
   const value: StoredToken = {
     accessToken: tokens.accessToken,
@@ -65,9 +70,9 @@ export async function saveOAuthToken(
 
   await db
     .insert(oauthConnections)
-    .values({ channel, externalAccountId, secretArn, expiresAt: tokens.expiresAt })
+    .values({ tenantId, channel, externalAccountId, secretArn, expiresAt: tokens.expiresAt })
     .onConflictDoUpdate({
-      target: [oauthConnections.channel, oauthConnections.externalAccountId],
+      target: [oauthConnections.tenantId, oauthConnections.channel, oauthConnections.externalAccountId],
       set: { secretArn, expiresAt: tokens.expiresAt, updatedAt: new Date() },
     });
 }
@@ -78,13 +83,20 @@ export async function saveOAuthToken(
  */
 export async function getValidAccessToken(
   db: Database,
+  tenantId: string,
   adapter: ChannelAdapter,
   externalAccountId: string,
 ): Promise<string> {
   const [connection] = await db
     .select()
     .from(oauthConnections)
-    .where(and(eq(oauthConnections.channel, adapter.channel), eq(oauthConnections.externalAccountId, externalAccountId)))
+    .where(
+      and(
+        eq(oauthConnections.tenantId, tenantId),
+        eq(oauthConnections.channel, adapter.channel),
+        eq(oauthConnections.externalAccountId, externalAccountId),
+      ),
+    )
     .limit(1);
 
   if (!connection) {
@@ -106,7 +118,7 @@ export async function getValidAccessToken(
   }
 
   const refreshed = await adapter.refreshToken(stored.refreshToken);
-  await saveOAuthToken(db, adapter.channel, externalAccountId, refreshed);
+  await saveOAuthToken(db, tenantId, adapter.channel, externalAccountId, refreshed);
   return refreshed.accessToken;
 }
 
@@ -127,10 +139,10 @@ export async function getAppCredentials<T>(channel: string): Promise<T> {
   return value;
 }
 
-export async function listConnectedAccountIds(db: Database, channel: string): Promise<string[]> {
+export async function listConnectedAccountIds(db: Database, tenantId: string, channel: string): Promise<string[]> {
   const rows = await db
     .select({ externalAccountId: oauthConnections.externalAccountId })
     .from(oauthConnections)
-    .where(eq(oauthConnections.channel, channel));
+    .where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)));
   return rows.map((r) => r.externalAccountId);
 }

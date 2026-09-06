@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ai-ec/adapter-base": "workspace:*",
+    "@ai-ec/db": "workspace:*",
     "@ai-ec/lambda-shared": "workspace:*"
   },
   "devDependencies": {

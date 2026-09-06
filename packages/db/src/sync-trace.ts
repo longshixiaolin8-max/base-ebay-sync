@@ -35,16 +35,26 @@ function summarizeInventoryEvent(e: typeof inventoryEvents.$inferSelect): string
  * -- a stale-content block, a rollback, an isolation skip, an anomaly pause, a real error --
  * without guessing which of three tables to check next.
  */
-export async function traceSyncHistory(db: Database, productId: string, limit = DEFAULT_LIMIT): Promise<SyncTraceResult> {
+export async function traceSyncHistory(db: Database, tenantId: string, productId: string, limit = DEFAULT_LIMIT): Promise<SyncTraceResult> {
   const [events, auditRows, errorRows] = await Promise.all([
-    db.select().from(inventoryEvents).where(eq(inventoryEvents.productId, productId)).orderBy(desc(inventoryEvents.sequenceAt)).limit(limit),
+    db
+      .select()
+      .from(inventoryEvents)
+      .where(and(eq(inventoryEvents.tenantId, tenantId), eq(inventoryEvents.productId, productId)))
+      .orderBy(desc(inventoryEvents.sequenceAt))
+      .limit(limit),
     db
       .select()
       .from(auditLog)
-      .where(and(eq(auditLog.entityType, "product"), eq(auditLog.entityId, productId)))
+      .where(and(eq(auditLog.tenantId, tenantId), eq(auditLog.entityType, "product"), eq(auditLog.entityId, productId)))
       .orderBy(desc(auditLog.createdAt))
       .limit(limit),
-    db.select().from(syncErrors).where(eq(syncErrors.productId, productId)).orderBy(desc(syncErrors.createdAt)).limit(limit),
+    db
+      .select()
+      .from(syncErrors)
+      .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.productId, productId)))
+      .orderBy(desc(syncErrors.createdAt))
+      .limit(limit),
   ]);
 
   const entries: SyncTraceEntry[] = [

@@ -138,7 +138,7 @@ function asDatabase(db: FakeDb): Database {
 describe("applySale", () => {
   it("decrements quantity and bumps version on a normal sale", async () => {
     const row = new FakeInventoryRow(5);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 2, { channel: "base" });
+    const result = await applySale(asDatabase(fakeDb(row)), "tenant-a", "product-1", 2, { channel: "base" });
 
     expect(result).toEqual({ quantity: 3, soldOut: false, alreadyZero: false });
     expect(row.version).toBe(1);
@@ -146,14 +146,14 @@ describe("applySale", () => {
 
   it("floors at zero and marks soldOut when the sale exceeds remaining stock", async () => {
     const row = new FakeInventoryRow(2);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 5, { channel: "base" });
+    const result = await applySale(asDatabase(fakeDb(row)), "tenant-a", "product-1", 5, { channel: "base" });
 
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: false });
   });
 
   it("is a no-op once the product is already sold out — this is the double-sell guard", async () => {
     const row = new FakeInventoryRow(0);
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1, { channel: "base" });
+    const result = await applySale(asDatabase(fakeDb(row)), "tenant-a", "product-1", 1, { channel: "base" });
 
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: true });
     expect(row.version).toBe(0); // no write attempted
@@ -186,7 +186,7 @@ describe("applySale", () => {
     });
     expect(staleWrite).toBeUndefined();
 
-    const result = await applySale(asDatabase(fakeDb(row)), "product-1", 1, { channel: "base" });
+    const result = await applySale(asDatabase(fakeDb(row)), "tenant-a", "product-1", 1, { channel: "base" });
     expect(result).toEqual({ quantity: 0, soldOut: true, alreadyZero: true });
     expect(row.quantity).toBe(0); // never went negative despite two sales for one unit
   });
@@ -207,7 +207,7 @@ describe("applySale", () => {
       return originalUpdate();
     }) as typeof db.update;
 
-    const result = await applySale(asDatabase(db), "product-1", 1, { channel: "base" });
+    const result = await applySale(asDatabase(db), "tenant-a", "product-1", 1, { channel: "base" });
 
     expect(result).toEqual({ quantity: 2, soldOut: false, alreadyZero: false });
     expect(calls).toBeGreaterThan(1);
@@ -224,7 +224,7 @@ describe("applySale", () => {
       return originalUpdate();
     }) as typeof db.update;
 
-    await expect(applySale(asDatabase(db), "product-1", 1, { channel: "base", maxRetries: 3 })).rejects.toThrow(
+    await expect(applySale(asDatabase(db), "tenant-a", "product-1", 1, { channel: "base", maxRetries: 3 })).rejects.toThrow(
       ConcurrentInventoryUpdateError,
     );
   });
@@ -236,7 +236,7 @@ describe("applyBaseStockReport", () => {
     row.ebaySoldSinceBaseSync = 2; // 2 units sold on eBay since BASE was last synced
     const t1 = new Date("2026-09-01T00:00:00Z");
 
-    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 5, t1);
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "tenant-a", "product-1", 5, t1);
 
     expect(result).toEqual({ applied: true, quantity: 3 });
     expect(row.quantity).toBe(3);
@@ -250,7 +250,7 @@ describe("applyBaseStockReport", () => {
     const t0 = new Date("2026-09-01T00:00:00Z"); // older than t1
     row.lastBaseSeq = t1;
 
-    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 99, t0);
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "tenant-a", "product-1", 99, t0);
 
     expect(result).toEqual({ applied: false, quantity: 5, reason: "out_of_order" });
     expect(row.quantity).toBe(5); // untouched
@@ -264,7 +264,7 @@ describe("applyBaseStockReport", () => {
     const t1 = new Date("2026-09-02T00:00:00Z");
     row.lastBaseSeq = t1;
 
-    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 5, t1);
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "tenant-a", "product-1", 5, t1);
 
     expect(result).toEqual({ applied: false, quantity: 5, reason: "unchanged" });
   });
@@ -274,7 +274,7 @@ describe("applyBaseStockReport", () => {
     row.ebaySoldSinceBaseSync = 5; // more eBay sales recorded than BASE now reports in stock
     const t1 = new Date("2026-09-01T00:00:00Z");
 
-    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "product-1", 2, t1);
+    const result = await applyBaseStockReport(asDatabase(fakeDb(row)), "tenant-a", "product-1", 2, t1);
 
     expect(result).toEqual({ applied: true, quantity: 0 });
   });
@@ -290,7 +290,7 @@ describe("reconstructInventory", () => {
       { productId: "p1", channel: "base", eventType: "base_stock_report", sequenceAt: new Date("2026-09-01T12:00:00Z"), absoluteQuantity: 999, applied: false, skippedReason: "out_of_order" },
     );
 
-    const result = await reconstructInventory(asDatabase(db), "p1");
+    const result = await reconstructInventory(asDatabase(db), "tenant-a", "p1");
 
     expect(result.reconstructedQuantity).toBe(3); // 5 (last snapshot) - 2 (sale after it)
     expect(result.currentQuantity).toBe(3);
@@ -306,7 +306,7 @@ describe("reconstructInventory", () => {
       { productId: "p1", channel: "base", eventType: "sale", sequenceAt: new Date("2026-09-02T00:00:00Z"), quantityDelta: 2, applied: true },
     );
 
-    const result = await reconstructInventory(asDatabase(db), "p1");
+    const result = await reconstructInventory(asDatabase(db), "tenant-a", "p1");
 
     expect(result.reconstructedQuantity).toBe(3);
     expect(result.currentQuantity).toBe(10);
@@ -325,7 +325,7 @@ describe("reconstructInventory", () => {
       applied: true,
     });
 
-    const result = await reconstructInventory(asDatabase(db), "p1");
+    const result = await reconstructInventory(asDatabase(db), "tenant-a", "p1");
 
     expect(result.reconstructedQuantity).toBe(0); // floored, never negative
   });
@@ -344,7 +344,7 @@ describe("applyReconstructedInventory", () => {
       applied: true,
     });
 
-    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+    const result = await applyReconstructedInventory(asDatabase(db), "tenant-a", "p1");
 
     expect(result).toMatchObject({ applied: false, drifted: false, reconstructedQuantity: 3 });
     expect(row.version).toBe(0); // no write attempted
@@ -372,7 +372,7 @@ describe("applyReconstructedInventory", () => {
       },
     );
 
-    const result = await applyReconstructedInventory(asDatabase(db), "p1");
+    const result = await applyReconstructedInventory(asDatabase(db), "tenant-a", "p1");
 
     expect(result).toMatchObject({ applied: true, drifted: true, reconstructedQuantity: 3, currentQuantity: 10 });
     expect(row.quantity).toBe(3);

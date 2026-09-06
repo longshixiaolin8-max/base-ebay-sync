@@ -1,13 +1,29 @@
 import { boolean, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 /**
+ * One row per business using this platform. Every other table's tenant_id column FKs here.
+ * The current single real business is the fixed bootstrap row (see BOOTSTRAP_TENANT_ID in
+ * tenants.ts) inserted once by the multi-tenant migration, never re-created by app code.
+ */
+export const tenants = pgTable("tenants", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * Product Master — the single source of truth. BASE and eBay listings are both derived
  * from this table; they are never synced with each other directly (see packages/core).
  */
-export const productMaster = pgTable("product_master", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  sku: text("sku").notNull().unique(),
-  sourceChannel: text("source_channel").notNull(),
+export const productMaster = pgTable(
+  "product_master",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    sku: text("sku").notNull(),
+    sourceChannel: text("source_channel").notNull(),
   title: text("title").notNull(),
   descriptionJa: text("description_ja").notNull().default(""),
   brand: text("brand"),
@@ -39,11 +55,20 @@ export const productMaster = pgTable("product_master", {
   purchasedAt: timestamp("purchased_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+  },
+  (t) => ({
+    // A BASE item id (the source of most SKUs) is only unique within one shop, not globally --
+    // two independently-connected tenants' BASE shops can legitimately produce the same sku.
+    tenantSkuUnique: uniqueIndex("product_master_tenant_sku_unique").on(t.tenantId, t.sku),
+  }),
+);
 
 /** AI-generated eBay content, kept separate so re-generation never clobbers the master. */
 export const aiListingDraft = pgTable("ai_listing_draft", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   productId: uuid("product_id")
     .notNull()
     .references(() => productMaster.id, { onDelete: "cascade" }),
@@ -86,6 +111,9 @@ export const channelListings = pgTable(
   "channel_listings",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     productId: uuid("product_id")
       .notNull()
       .references(() => productMaster.id, { onDelete: "cascade" }),
@@ -116,6 +144,9 @@ export const inventoryMaster = pgTable("inventory_master", {
   productId: uuid("product_id")
     .primaryKey()
     .references(() => productMaster.id, { onDelete: "cascade" }),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   quantity: integer("quantity").notNull().default(0),
   version: integer("version").notNull().default(0),
   soldOut: boolean("sold_out").notNull().default(false),
@@ -153,6 +184,9 @@ export const inventoryMaster = pgTable("inventory_master", {
  */
 export const inventoryEvents = pgTable("inventory_events", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   productId: uuid("product_id")
     .notNull()
     .references(() => productMaster.id, { onDelete: "cascade" }),
@@ -173,20 +207,35 @@ export const inventoryEvents = pgTable("inventory_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const syncJobs = pgTable("sync_jobs", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  type: text("type").notNull(),
-  idempotencyKey: text("idempotency_key").notNull().unique(),
-  productId: uuid("product_id"),
-  payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
-  status: text("status").notNull().default("pending"),
-  attempts: integer("attempts").notNull().default(0),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const syncJobs = pgTable(
+  "sync_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    type: text("type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    productId: uuid("product_id"),
+    payload: jsonb("payload").notNull().$type<Record<string, unknown>>(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tenantIdempotencyKeyUnique: uniqueIndex("sync_jobs_tenant_idempotency_key_unique").on(
+      t.tenantId,
+      t.idempotencyKey,
+    ),
+  }),
+);
 
 export const syncErrors = pgTable("sync_errors", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   jobId: uuid("job_id"),
   channel: text("channel"),
   productId: uuid("product_id"),
@@ -197,8 +246,14 @@ export const syncErrors = pgTable("sync_errors", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * tenant_id is nullable here, uniquely among tenant-scoped tables: some rows are genuinely
+ * platform-level (e.g. dlq-redrive's queue-wide redrive events, which describe shared
+ * infrastructure, not any one tenant's action) rather than attributable to a single tenant.
+ */
 export const auditLog = pgTable("audit_log", {
   id: uuid("id").primaryKey().defaultRandom(),
+  tenantId: uuid("tenant_id").references(() => tenants.id),
   actor: text("actor").notNull(),
   action: text("action").notNull(),
   entityType: text("entity_type").notNull(),
@@ -217,6 +272,9 @@ export const oauthConnections = pgTable(
   "oauth_connections",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     channel: text("channel").notNull(),
     externalAccountId: text("external_account_id").notNull(),
     secretArn: text("secret_arn").notNull(),
@@ -225,16 +283,27 @@ export const oauthConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    channelAccountUnique: uniqueIndex("oauth_connections_channel_account_unique").on(
+    // Was (channel, externalAccountId) alone -- BASE's connector defaults externalAccountId
+    // to the literal "default" when unset, so two tenants both leaving it unset would
+    // otherwise silently overwrite each other's OAuth connection. tenantId makes that safe.
+    tenantChannelAccountUnique: uniqueIndex("oauth_connections_tenant_channel_account_unique").on(
+      t.tenantId,
       t.channel,
       t.externalAccountId,
     ),
   }),
 );
 
-/** Backing store for packages/core's withIdempotency() guard. */
+/**
+ * Backing store for packages/core's withIdempotency() guard. `key` stays the sole primary
+ * key -- every caller is required to fold tenantId into the key string itself (see
+ * buildIdempotencyKey), so this column is for filtering/observability, not uniqueness.
+ */
 export const idempotencyKeys = pgTable("idempotency_keys", {
   key: text("key").primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   status: text("status").notNull(),
   result: jsonb("result"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -260,6 +329,9 @@ export const orders = pgTable(
   "orders",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
     productId: uuid("product_id")
       .notNull()
       .references(() => productMaster.id, { onDelete: "cascade" }),
@@ -322,6 +394,9 @@ export const snsContent = pgTable("sns_content", {
   productId: uuid("product_id")
     .primaryKey()
     .references(() => productMaster.id, { onDelete: "cascade" }),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
   scriptText: text("script_text"),
   scriptPromptVersion: text("script_prompt_version"),
   videoCreated: boolean("video_created").notNull().default(false),

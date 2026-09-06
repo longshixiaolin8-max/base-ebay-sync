@@ -1,5 +1,5 @@
 import { classifyStaleness, daysBetween, type StaleLevel } from "@ai-ec/core";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { inventoryMaster, productMaster } from "./schema.js";
 
@@ -18,10 +18,10 @@ export interface StaleProduct {
  * separate queries merged in application code (this codebase's established style -- see
  * sync-trace.ts -- rather than a SQL join) so results are easy to reason about and test.
  */
-export async function findStaleProducts(db: Database, minDaysListed = 30): Promise<StaleProduct[]> {
+export async function findStaleProducts(db: Database, tenantId: string, minDaysListed = 30): Promise<StaleProduct[]> {
   const [products, inventories] = await Promise.all([
-    db.select().from(productMaster),
-    db.select().from(inventoryMaster).where(eq(inventoryMaster.soldOut, false)),
+    db.select().from(productMaster).where(eq(productMaster.tenantId, tenantId)),
+    db.select().from(inventoryMaster).where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.soldOut, false))),
   ]);
   const notSoldOut = new Set(inventories.map((i) => i.productId));
   const now = new Date();

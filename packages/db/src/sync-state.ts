@@ -28,8 +28,8 @@ export interface ChannelSyncStateResult {
  * -- never a new persisted state to keep in sync with reality. Precedence, most severe first:
  * ISOLATED > RECONCILING > RECOVERING > DEGRADED > HEALTHY.
  */
-export async function computeChannelSyncState(db: Database, channel: string): Promise<ChannelSyncStateResult> {
-  const isolation = await isChannelIsolated(db, channel);
+export async function computeChannelSyncState(db: Database, tenantId: string, channel: string): Promise<ChannelSyncStateResult> {
+  const isolation = await isChannelIsolated(db, tenantId, channel);
   if (isolation.isolated) {
     return { channel, state: "ISOLATED", reasons: isolation.reasons };
   }
@@ -38,7 +38,14 @@ export async function computeChannelSyncState(db: Database, channel: string): Pr
   const driftErrors = await db
     .select()
     .from(syncErrors)
-    .where(and(eq(syncErrors.channel, channel), eq(syncErrors.errorCode, "inventory_drift"), gte(syncErrors.createdAt, reconcilingSince)));
+    .where(
+      and(
+        eq(syncErrors.tenantId, tenantId),
+        eq(syncErrors.channel, channel),
+        eq(syncErrors.errorCode, "inventory_drift"),
+        gte(syncErrors.createdAt, reconcilingSince),
+      ),
+    );
   if (driftErrors.length > 0) {
     return {
       channel,
@@ -49,7 +56,7 @@ export async function computeChannelSyncState(db: Database, channel: string): Pr
 
   // Isolation is stateless (see isChannelIsolated) -- re-checking with a wider window is how
   // "was isolated a moment ago, isn't now" gets detected without a separate persisted flag.
-  const recentlyIsolated = await isChannelIsolated(db, channel, isolation.windowMinutes * 2);
+  const recentlyIsolated = await isChannelIsolated(db, tenantId, channel, isolation.windowMinutes * 2);
   if (recentlyIsolated.isolated) {
     return {
       channel,
@@ -58,7 +65,7 @@ export async function computeChannelSyncState(db: Database, channel: string): Pr
     };
   }
 
-  const confidence = await computeSyncConfidence(db, channel);
+  const confidence = await computeSyncConfidence(db, tenantId, channel);
   if (confidence.score < DEGRADED_CONFIDENCE_THRESHOLD) {
     return {
       channel,

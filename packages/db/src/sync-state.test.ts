@@ -21,7 +21,7 @@ describe("computeChannelSyncState", () => {
   it("reports ISOLATED when isChannelIsolated says so, without checking anything else", async () => {
     isChannelIsolatedMock.mockResolvedValue({ isolated: true, reasons: ["auth failure"], windowMinutes: 15 });
 
-    const result = await computeChannelSyncState(dbWithDriftErrors([]), "ebay");
+    const result = await computeChannelSyncState(dbWithDriftErrors([]), "tenant-a", "ebay");
 
     expect(result.state).toBe("ISOLATED");
     expect(computeSyncConfidenceMock).not.toHaveBeenCalled();
@@ -30,7 +30,7 @@ describe("computeChannelSyncState", () => {
   it("reports RECONCILING when inventory-diff-check found recent drift and the channel is not isolated", async () => {
     isChannelIsolatedMock.mockResolvedValue({ isolated: false, reasons: [], windowMinutes: 15 });
 
-    const result = await computeChannelSyncState(dbWithDriftErrors([{ id: "e1" }]), "ebay");
+    const result = await computeChannelSyncState(dbWithDriftErrors([{ id: "e1" }]), "tenant-a", "ebay");
 
     expect(result.state).toBe("RECONCILING");
   });
@@ -40,7 +40,7 @@ describe("computeChannelSyncState", () => {
       .mockResolvedValueOnce({ isolated: false, reasons: [], windowMinutes: 15 }) // current window check
       .mockResolvedValueOnce({ isolated: true, reasons: ["was isolated"], windowMinutes: 30 }); // wider window check
 
-    const result = await computeChannelSyncState(dbWithDriftErrors([]), "ebay");
+    const result = await computeChannelSyncState(dbWithDriftErrors([]), "tenant-a", "ebay");
 
     expect(result.state).toBe("RECOVERING");
   });
@@ -49,7 +49,7 @@ describe("computeChannelSyncState", () => {
     isChannelIsolatedMock.mockResolvedValue({ isolated: false, reasons: [], windowMinutes: 15 });
     computeSyncConfidenceMock.mockResolvedValue({ score: 50, windowHours: 24 });
 
-    const result = await computeChannelSyncState(dbWithDriftErrors([]), "ebay");
+    const result = await computeChannelSyncState(dbWithDriftErrors([]), "tenant-a", "ebay");
 
     expect(result.state).toBe("DEGRADED");
   });
@@ -58,7 +58,7 @@ describe("computeChannelSyncState", () => {
     isChannelIsolatedMock.mockResolvedValue({ isolated: false, reasons: [], windowMinutes: 15 });
     computeSyncConfidenceMock.mockResolvedValue({ score: 100, windowHours: 24 });
 
-    const result = await computeChannelSyncState(dbWithDriftErrors([]), "ebay");
+    const result = await computeChannelSyncState(dbWithDriftErrors([]), "tenant-a", "ebay");
 
     expect(result.state).toBe("HEALTHY");
     expect(result.reasons).toEqual([]);

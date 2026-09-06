@@ -44,6 +44,7 @@ const ERROR_COUNT_THROTTLE_THRESHOLD = 3;
  */
 export async function shouldThrottleChannel(
   db: Database,
+  tenantId: string,
   channel: string,
   windowMinutes = DEFAULT_WINDOW_MINUTES,
 ): Promise<ThrottleDecision> {
@@ -53,7 +54,7 @@ export async function shouldThrottleChannel(
   const recentErrors = await db
     .select()
     .from(syncErrors)
-    .where(and(eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
+    .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
 
   const apiStatuses = recentErrors
     .map((e) => e.errorMessage.match(API_ERROR_STATUS_PATTERN)?.[1])

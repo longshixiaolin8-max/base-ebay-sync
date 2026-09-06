@@ -43,6 +43,7 @@ import type { SQSEvent, SQSHandler } from "aws-lambda";
 
 interface EbaySyncMessage {
   type: "ebay_publish" | "ebay_update";
+  tenantId: string;
   productId: string;
 }
 
@@ -94,9 +95,9 @@ const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
  * Returns the freshly-computed total buffer so the caller doesn't need to re-read the row
  * it just wrote.
  */
-async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId: string): Promise<number> {
-  const { recommendedBuffer } = await computeDynamicSafetyStock(db, productId, "ebay");
-  const risk = await predictStockoutRisk(db, productId);
+async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, tenantId: string, productId: string): Promise<number> {
+  const { recommendedBuffer } = await computeDynamicSafetyStock(db, tenantId, productId, "ebay");
+  const risk = await predictStockoutRisk(db, tenantId, productId);
   const totalBuffer = recommendedBuffer + (risk.highRisk ? PREEMPTIVE_STOCKOUT_BUFFER : 0);
   await db
     .update(inventoryMaster)
@@ -113,8 +114,8 @@ async function resolveSafetyStockBuffer(db: ReturnType<typeof getDb>, productId:
  * hitting real 429/5xx responses. Failing here, before touching product/draft/inventory at
  * all, avoids wasting an attempt on an eBay call already known likely to fail the same way.
  */
-async function enforceChannelNotIsolated(db: ReturnType<typeof getDb>): Promise<void> {
-  const isolation = await isChannelIsolated(db, "ebay");
+async function enforceChannelNotIsolated(db: ReturnType<typeof getDb>, tenantId: string): Promise<void> {
+  const isolation = await isChannelIsolated(db, tenantId, "ebay");
   if (isolation.isolated) {
     throw new Error(`eBay is currently isolated (${isolation.reasons.join("; ")}). Sync is paused until it recovers.`);
   }
@@ -135,15 +136,21 @@ async function enforceChannelNotIsolated(db: ReturnType<typeof getDb>): Promise<
  */
 async function enforceContentConsistency(
   db: ReturnType<typeof getDb>,
+  tenantId: string,
   product: { id: string; contentHash: string },
   draft: { sourceContentHash: string } | undefined,
 ): Promise<void> {
   if (draft && draft.sourceContentHash === product.contentHash) return;
 
   const queues = getQueueUrls();
-  await enqueue(queues.aiGenerate, { type: "ai_generate", productId: product.id }, `ai-generate:${product.id}:${product.contentHash}`);
+  await enqueue(
+    queues.aiGenerate,
+    { type: "ai_generate", tenantId, productId: product.id },
+    `${tenantId}:ai-generate:${product.id}:${product.contentHash}`,
+  );
 
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:ebay-sync-worker",
     action: "ai_draft_stale_regeneration_triggered",
     entityType: "product",
@@ -170,16 +177,18 @@ async function enforceContentConsistency(
  */
 async function enforceAnomalyFree(
   db: ReturnType<typeof getDb>,
+  tenantId: string,
   productId: string,
   candidatePriceJpy: number,
   lastSyncedPriceJpy: number | null,
 ): Promise<void> {
-  const inventoryCheck = await detectInventoryAnomaly(db, productId);
+  const inventoryCheck = await detectInventoryAnomaly(db, tenantId, productId);
   const priceCheck = detectPriceAnomaly(lastSyncedPriceJpy, candidatePriceJpy);
   const reasons = [...inventoryCheck.reasons, ...(priceCheck.reason ? [priceCheck.reason] : [])];
   if (reasons.length === 0) return;
 
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:ebay-sync-worker",
     action: "anomaly_detected_sync_paused",
     entityType: "product",
@@ -195,21 +204,25 @@ async function enforceAnomalyFree(
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
-  const idempotencyStore = getIdempotencyStore();
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
   const adapter = createEbayAdapter(creds);
-  const [accountId] = await listConnectedAccountIds(db, "ebay");
 
   const failures: { itemIdentifier: string }[] = [];
 
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as EbaySyncMessage;
+    const idempotencyStore = getIdempotencyStore(message.tenantId);
 
     try {
+      const [accountId] = await listConnectedAccountIds(db, message.tenantId, "ebay");
       if (!accountId) throw new Error("No eBay account connected — complete eBay OAuth first");
-      const accessToken = await getValidAccessToken(db, adapter, accountId);
+      const accessToken = await getValidAccessToken(db, message.tenantId, adapter, accountId);
 
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, message.productId)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, message.tenantId), eq(productMaster.id, message.productId)))
+        .limit(1);
       if (!product) throw new Error(`product_master row not found for id ${message.productId}`);
 
       const [listing] = await db
@@ -220,18 +233,19 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
       if (!listing) throw new Error(`No eBay channel_listings row for product ${product.id}`);
 
       if (message.type === "ebay_publish") {
-        const key = buildIdempotencyKey(["ebay_publish", product.id, product.contentHash]);
-        await withIdempotency(idempotencyStore, key, () => publish(db, adapter, accessToken, product.id));
+        const key = buildIdempotencyKey(message.tenantId, ["ebay_publish", product.id, product.contentHash]);
+        await withIdempotency(idempotencyStore, key, () => publish(db, message.tenantId, adapter, accessToken, product.id));
       } else {
-        const key = buildIdempotencyKey(["ebay_update", product.id, product.contentHash]);
+        const key = buildIdempotencyKey(message.tenantId, ["ebay_update", product.id, product.contentHash]);
         await withIdempotency(idempotencyStore, key, () =>
-          update(db, adapter, accessToken, product.id, listing.externalId!),
+          update(db, message.tenantId, adapter, accessToken, product.id, listing.externalId!),
         );
       }
     } catch (err) {
       const error = err as Error;
       if (error.name !== "IdempotencyInProgressError") {
         await recordSyncError(db, {
+          tenantId: message.tenantId,
           channel: "ebay",
           productId: message.productId,
           errorCode: `${message.type}_failed`,
@@ -250,10 +264,16 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
   return { batchItemFailures: failures };
 };
 
-export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter, accessToken: string, productId: string) {
-  await enforceChannelNotIsolated(db);
+export async function publish(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  adapter: EbayAdapter,
+  accessToken: string,
+  productId: string,
+) {
+  await enforceChannelNotIsolated(db, tenantId);
 
-  const confidence = await computeSyncConfidence(db, "ebay");
+  const confidence = await computeSyncConfidence(db, tenantId, "ebay");
   if (confidence.score < SYNC_CONFIDENCE_PUBLISH_THRESHOLD) {
     throw new Error(
       `eBay sync confidence too low to publish new listings (score ${confidence.score}/100 over the last ` +
@@ -274,14 +294,14 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
     .limit(1);
   if (!draft) throw new Error(`no AI listing draft found for product ${productId}`);
 
-  await enforceContentConsistency(db, product, draft);
+  await enforceContentConsistency(db, tenantId, product, draft);
 
   const [listing] = await db
     .select()
     .from(channelListings)
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
     .limit(1);
-  await enforceAnomalyFree(db, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
+  await enforceAnomalyFree(db, tenantId, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
 
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
 
@@ -289,7 +309,7 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
   const primaryCategory = draft.categoryCandidates[0];
   if (!primaryCategory) throw new Error(`AI draft for product ${productId} has no category candidate`);
 
-  const safetyStockBuffer = inventory ? await resolveSafetyStockBuffer(db, productId) : 0;
+  const safetyStockBuffer = inventory ? await resolveSafetyStockBuffer(db, tenantId, productId) : 0;
   const availableQuantity = calculateChannelAvailableQuantity(
     inventory?.quantity ?? 0,
     safetyStockBuffer,
@@ -356,6 +376,7 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
   await db.update(productMaster).set({ status: "active", updatedAt: new Date() }).where(eq(productMaster.id, productId));
 
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:ebay-sync-worker",
     action: "ebay_listing_published",
     entityType: "product",
@@ -366,12 +387,13 @@ export async function publish(db: ReturnType<typeof getDb>, adapter: EbayAdapter
 
 export async function update(
   db: ReturnType<typeof getDb>,
+  tenantId: string,
   adapter: EbayAdapter,
   accessToken: string,
   productId: string,
   externalId: string,
 ) {
-  await enforceChannelNotIsolated(db);
+  await enforceChannelNotIsolated(db, tenantId);
 
   const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
   if (!product) throw new Error(`product not found: ${productId}`);
@@ -383,14 +405,14 @@ export async function update(
     .orderBy(desc(aiListingDraft.createdAt))
     .limit(1);
 
-  await enforceContentConsistency(db, product, draft);
+  await enforceContentConsistency(db, tenantId, product, draft);
 
   const [listing] = await db
     .select()
     .from(channelListings)
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
     .limit(1);
-  await enforceAnomalyFree(db, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
+  await enforceAnomalyFree(db, tenantId, productId, product.priceJpy, listing?.lastSyncedPriceJpy ?? null);
 
   // Also re-syncs quantity (with the safety-stock buffer applied) on every content update —
   // previously only the initial publish ever pushed a quantity, so a BASE restock after
@@ -399,7 +421,7 @@ export async function update(
   const availableQuantity = inventory
     ? calculateChannelAvailableQuantity(
         inventory.quantity,
-        await resolveSafetyStockBuffer(db, productId),
+        await resolveSafetyStockBuffer(db, tenantId, productId),
         "ebay",
         product.sourceChannel,
       )
@@ -453,6 +475,7 @@ export async function update(
       // happened; this update attempt still counts as failed and flows through the same
       // sync_errors/retry path as any other update failure below.
       await recordAuditLog(db, {
+        tenantId,
         actor: "system:ebay-sync-worker",
         action: "auto_rollback_applied",
         entityType: "product",
@@ -480,6 +503,7 @@ export async function update(
   // as one). Only recorded once the update above has actually succeeded.
   if (listing?.lastSyncedPriceJpy != null && listing.lastSyncedPriceJpy !== product.priceJpy) {
     await recordAuditLog(db, {
+      tenantId,
       actor: "system:ebay-sync-worker",
       action: "product_price_changed",
       entityType: "product",
@@ -490,6 +514,7 @@ export async function update(
   }
 
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:ebay-sync-worker",
     action: "ebay_listing_updated",
     entityType: "product",

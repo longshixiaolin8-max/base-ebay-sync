@@ -44,7 +44,7 @@ describe("findStaleProducts", () => {
       ["sold-out-stale"],
     );
 
-    const result = await findStaleProducts(db, 30);
+    const result = await findStaleProducts(db, "tenant-a", 30);
 
     expect(result).toHaveLength(1);
     expect(result[0]!.productId).toBe("stale");
@@ -60,7 +60,7 @@ describe("findStaleProducts", () => {
       [],
     );
 
-    const result = await findStaleProducts(db, 30);
+    const result = await findStaleProducts(db, "tenant-a", 30);
 
     expect(result[0]!.productId).toBe("p90");
     expect(result[0]!.level).toBe("stale_90");

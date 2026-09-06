@@ -32,7 +32,7 @@ describe("computeDynamicSafetyStock", () => {
       totalEventCount: 0,
     });
 
-    const result = await computeDynamicSafetyStock(fakeDb([]), "p1", "ebay");
+    const result = await computeDynamicSafetyStock(fakeDb([]), "tenant-a", "p1", "ebay");
 
     expect(result.recommendedBuffer).toBe(0);
     expect(result.salesPerDay).toBe(0);
@@ -52,7 +52,7 @@ describe("computeDynamicSafetyStock", () => {
     // expected sales per cycle = 20 * (60/1440) = 0.833 -> riskMultiplier 1 (score>=80) -> ceil(0.833) = 1
     const sales = Array.from({ length: 14 }, () => ({ quantityDelta: 10 }));
 
-    const result = await computeDynamicSafetyStock(fakeDb(sales), "p1", "ebay", { pollIntervalMinutes: 60 });
+    const result = await computeDynamicSafetyStock(fakeDb(sales), "tenant-a", "p1", "ebay", { pollIntervalMinutes: 60 });
 
     expect(result.salesPerDay).toBe(20);
     expect(result.riskMultiplier).toBe(1);
@@ -71,7 +71,7 @@ describe("computeDynamicSafetyStock", () => {
     });
     const sales = Array.from({ length: 14 }, () => ({ quantityDelta: 10 })); // same 20/day as above
 
-    const result = await computeDynamicSafetyStock(fakeDb(sales), "p1", "ebay", { pollIntervalMinutes: 60 });
+    const result = await computeDynamicSafetyStock(fakeDb(sales), "tenant-a", "p1", "ebay", { pollIntervalMinutes: 60 });
 
     expect(result.confidenceScore).toBe(30);
     expect(result.riskMultiplier).toBe(2);
@@ -90,7 +90,7 @@ describe("computeDynamicSafetyStock", () => {
       totalEventCount: 0,
     });
 
-    const result = await computeDynamicSafetyStock(fakeDb([]), "p1", "ebay");
+    const result = await computeDynamicSafetyStock(fakeDb([]), "tenant-a", "p1", "ebay");
 
     expect(result.recommendedBuffer).toBeGreaterThanOrEqual(0);
   });

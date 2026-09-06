@@ -69,7 +69,7 @@ function fakeDb(table: FakeIdempotencyTable): Database {
 describe("createDbIdempotencyStore", () => {
   it("claims a fresh key (tryClaim returns null) then reports it completed", async () => {
     const table = new FakeIdempotencyTable();
-    const store = createDbIdempotencyStore(fakeDb(table));
+    const store = createDbIdempotencyStore(fakeDb(table), "tenant-a");
 
     const claim = await store.tryClaim("key-1", 3600);
     expect(claim).toBeNull();
@@ -81,7 +81,7 @@ describe("createDbIdempotencyStore", () => {
 
   it("never lets two concurrent claims on the same fresh key both win", async () => {
     const table = new FakeIdempotencyTable();
-    const store = createDbIdempotencyStore(fakeDb(table));
+    const store = createDbIdempotencyStore(fakeDb(table), "tenant-a");
 
     const [claimA, claimB] = await Promise.all([store.tryClaim("sale-order-1", 3600), store.tryClaim("sale-order-1", 3600)]);
 
@@ -94,7 +94,7 @@ describe("createDbIdempotencyStore", () => {
 
   it("lets a later claim through once the earlier claim is marked failed", async () => {
     const table = new FakeIdempotencyTable();
-    const store = createDbIdempotencyStore(fakeDb(table));
+    const store = createDbIdempotencyStore(fakeDb(table), "tenant-a");
 
     await store.tryClaim("key-2", 3600);
     await store.fail("key-2");
@@ -105,7 +105,7 @@ describe("createDbIdempotencyStore", () => {
 
   it("does not let a retry claim a key that is still in_progress", async () => {
     const table = new FakeIdempotencyTable();
-    const store = createDbIdempotencyStore(fakeDb(table));
+    const store = createDbIdempotencyStore(fakeDb(table), "tenant-a");
 
     await store.tryClaim("key-3", 3600);
     const secondAttempt = await store.tryClaim("key-3", 3600);

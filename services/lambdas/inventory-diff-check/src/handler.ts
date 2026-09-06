@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { ChannelAdapter, ChannelType } from "@ai-ec/core";
-import { channelListings, inventoryMaster } from "@ai-ec/db";
+import { channelListings, inventoryMaster, listActiveTenants } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -10,7 +10,7 @@ import {
   recordSyncError,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 /**
  * Scheduled (EventBridge) reconciliation job: compares each published channel listing's
@@ -21,6 +21,7 @@ import { eq } from "drizzle-orm";
  */
 export async function handler(): Promise<void> {
   const db = getDb();
+  const tenants = await listActiveTenants(db);
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
   const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
@@ -29,7 +30,20 @@ export async function handler(): Promise<void> {
     ebay: createEbayAdapter(ebayCreds),
   };
 
-  const publishedListings = await db.select().from(channelListings).where(eq(channelListings.status, "published"));
+  for (const tenant of tenants) {
+    await checkTenant(db, tenant.id, adapters);
+  }
+}
+
+async function checkTenant(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  adapters: Partial<Record<ChannelType, ChannelAdapter>>,
+): Promise<void> {
+  const publishedListings = await db
+    .select()
+    .from(channelListings)
+    .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.status, "published")));
 
   const tokenCache = new Map<ChannelType, string>();
 
@@ -41,9 +55,9 @@ export async function handler(): Promise<void> {
     try {
       let accessToken = tokenCache.get(listing.channel as ChannelType);
       if (!accessToken) {
-        const [accountId] = await listConnectedAccountIds(db, listing.channel);
+        const [accountId] = await listConnectedAccountIds(db, tenantId, listing.channel);
         if (!accountId) continue;
-        accessToken = await getValidAccessToken(db, adapter, accountId);
+        accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
         tokenCache.set(listing.channel as ChannelType, accessToken);
       }
 
@@ -59,6 +73,7 @@ export async function handler(): Promise<void> {
 
       if (liveQuantity !== master.quantity) {
         await recordSyncError(db, {
+          tenantId,
           channel: listing.channel,
           productId: listing.productId,
           errorCode: "inventory_drift",
@@ -68,6 +83,7 @@ export async function handler(): Promise<void> {
       }
     } catch (err) {
       await recordSyncError(db, {
+        tenantId,
         channel: listing.channel,
         productId: listing.productId,
         errorCode: "inventory_diff_check_failed",

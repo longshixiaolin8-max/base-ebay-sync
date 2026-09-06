@@ -31,10 +31,15 @@ export const PREEMPTIVE_STOCKOUT_BUFFER = 1;
  */
 export async function predictStockoutRisk(
   db: Database,
+  tenantId: string,
   productId: string,
   windowDays = DEFAULT_WINDOW_DAYS,
 ): Promise<StockoutRiskResult> {
-  const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+  const [inventory] = await db
+    .select()
+    .from(inventoryMaster)
+    .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, productId)))
+    .limit(1);
   const currentQuantity = inventory?.quantity ?? 0;
 
   const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
@@ -43,6 +48,7 @@ export async function predictStockoutRisk(
     .from(inventoryEvents)
     .where(
       and(
+        eq(inventoryEvents.tenantId, tenantId),
         eq(inventoryEvents.productId, productId),
         eq(inventoryEvents.eventType, "sale"),
         eq(inventoryEvents.applied, true),

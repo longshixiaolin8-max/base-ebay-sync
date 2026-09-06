@@ -57,6 +57,13 @@
       "when": 1788624927188,
       "tag": "0007_little_monster_badoon",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788710392683,
+      "tag": "0008_pink_tiger_shark",
+      "breakpoints": true
     }
   ]
 }

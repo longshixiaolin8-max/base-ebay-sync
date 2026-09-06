@@ -200,6 +200,10 @@ export class ApiStack extends cdk.Stack {
     addRoute("Slo", apigwv2.HttpMethod.GET, "/admin/slo", adminIntegration, true);
     addRoute("CommerceDashboard", apigwv2.HttpMethod.GET, "/admin/commerce-dashboard", adminIntegration, true);
     addRoute("DashboardSummary", apigwv2.HttpMethod.GET, "/admin/dashboard/summary", adminIntegration, true);
+    // Mints the signed BASE/eBay authorize URL server-side from the caller's own JWT tenantId
+    // claim -- authenticated, unlike /oauth/{base,ebay}/authorize below, precisely so a tenant
+    // id is never trusted from client input (see oauth-state.ts's StatePayload comment).
+    addRoute("OauthAuthorizeUrl", apigwv2.HttpMethod.GET, "/admin/oauth/{channel}/authorize-url", adminIntegration, true);
 
     // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
     // no state-changing action happens here. It was originally gated behind Cognito on the

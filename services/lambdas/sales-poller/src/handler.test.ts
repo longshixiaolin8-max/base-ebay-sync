@@ -26,7 +26,7 @@ describe("pollChannelIfHealthy", () => {
     isChannelIsolatedMock.mockResolvedValue({ channel: "base", isolated: false, reasons: [], windowMinutes: 15 });
     const poll = vi.fn().mockResolvedValue(undefined);
 
-    await pollChannelIfHealthy({} as never, "base", poll);
+    await pollChannelIfHealthy({} as never, "tenant-a", "base", poll);
 
     expect(poll).toHaveBeenCalledTimes(1);
     expect(recordAuditLogMock).not.toHaveBeenCalled();
@@ -41,12 +41,12 @@ describe("pollChannelIfHealthy", () => {
     });
     const poll = vi.fn().mockResolvedValue(undefined);
 
-    await pollChannelIfHealthy({} as never, "ebay", poll);
+    await pollChannelIfHealthy({} as never, "tenant-a", "ebay", poll);
 
     expect(poll).not.toHaveBeenCalled();
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ action: "channel_isolated_skip", entityId: "ebay" }),
+      expect.objectContaining({ tenantId: "tenant-a", action: "channel_isolated_skip", entityId: "ebay" }),
     );
     expect(emitChannelIsolatedMetricMock).toHaveBeenCalledWith("ebay");
   });
@@ -58,8 +58,8 @@ describe("pollChannelIfHealthy", () => {
     const pollBase = vi.fn().mockResolvedValue(undefined);
     const pollEbay = vi.fn().mockResolvedValue(undefined);
 
-    await pollChannelIfHealthy({} as never, "base", pollBase);
-    await pollChannelIfHealthy({} as never, "ebay", pollEbay);
+    await pollChannelIfHealthy({} as never, "tenant-a", "base", pollBase);
+    await pollChannelIfHealthy({} as never, "tenant-a", "ebay", pollEbay);
 
     expect(pollBase).not.toHaveBeenCalled();
     expect(pollEbay).toHaveBeenCalledTimes(1);
@@ -72,11 +72,12 @@ describe("pollChannelIfHealthy", () => {
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
     const poll = vi.fn().mockRejectedValue(new Error("Access token for ebay/default expired and no refresh token is stored"));
 
-    await expect(pollChannelIfHealthy({} as never, "ebay", poll)).resolves.toBeUndefined();
+    await expect(pollChannelIfHealthy({} as never, "tenant-a", "ebay", poll)).resolves.toBeUndefined();
 
     expect(recordSyncErrorMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        tenantId: "tenant-a",
         channel: "ebay",
         errorCode: "sales_poll_failed",
         errorMessage: "Access token for ebay/default expired and no refresh token is stored",
@@ -89,8 +90,8 @@ describe("pollChannelIfHealthy", () => {
     const pollBase = vi.fn().mockRejectedValue(new Error("boom"));
     const pollEbay = vi.fn().mockResolvedValue(undefined);
 
-    await pollChannelIfHealthy({} as never, "base", pollBase);
-    await pollChannelIfHealthy({} as never, "ebay", pollEbay);
+    await pollChannelIfHealthy({} as never, "tenant-a", "base", pollBase);
+    await pollChannelIfHealthy({} as never, "tenant-a", "ebay", pollEbay);
 
     expect(pollEbay).toHaveBeenCalledTimes(1);
   });

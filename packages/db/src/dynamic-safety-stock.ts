@@ -33,6 +33,7 @@ export interface DynamicSafetyStockResult {
  */
 export async function computeDynamicSafetyStock(
   db: Database,
+  tenantId: string,
   productId: string,
   channel: string,
   options: { windowDays?: number; pollIntervalMinutes?: number } = {},
@@ -46,6 +47,7 @@ export async function computeDynamicSafetyStock(
     .from(inventoryEvents)
     .where(
       and(
+        eq(inventoryEvents.tenantId, tenantId),
         eq(inventoryEvents.productId, productId),
         eq(inventoryEvents.eventType, "sale"),
         eq(inventoryEvents.applied, true),
@@ -55,7 +57,7 @@ export async function computeDynamicSafetyStock(
   const totalSold = sales.reduce((sum, s) => sum + (s.quantityDelta ?? 0), 0);
   const salesPerDay = totalSold / windowDays;
 
-  const confidence = await computeSyncConfidence(db, channel);
+  const confidence = await computeSyncConfidence(db, tenantId, channel);
   // Sync has recently looked unreliable -> a cycle's real-world length is less predictable,
   // so widen the buffer as insurance against a slower-than-usual sync catching a sale late.
   const riskMultiplier = confidence.score >= 80 ? 1 : confidence.score >= 50 ? 1.5 : 2;

@@ -2,29 +2,34 @@ import { createAIModelClient, generateEbayListing } from "@ai-ec/ai";
 import { buildIdempotencyKey, withIdempotency } from "@ai-ec/core";
 import { aiListingDraft, channelListings, productMaster } from "@ai-ec/db";
 import { getDb, getIdempotencyStore, recordAuditLog, recordSyncError } from "@ai-ec/lambda-shared";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
 
 interface AiGenerateMessage {
   type: "ai_generate";
+  tenantId: string;
   productId: string;
 }
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
-  const idempotencyStore = getIdempotencyStore();
   const modelClient = createAIModelClient(process.env);
 
   const failures: { itemIdentifier: string }[] = [];
 
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as AiGenerateMessage;
+    const idempotencyStore = getIdempotencyStore(message.tenantId);
 
     try {
-      const [product] = await db.select().from(productMaster).where(eq(productMaster.id, message.productId)).limit(1);
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, message.tenantId), eq(productMaster.id, message.productId)))
+        .limit(1);
       if (!product) throw new Error(`product_master row not found for id ${message.productId}`);
 
-      const key = buildIdempotencyKey(["ai_generate", product.id, product.contentHash]);
+      const key = buildIdempotencyKey(message.tenantId, ["ai_generate", product.id, product.contentHash]);
 
       await withIdempotency(idempotencyStore, key, async () => {
         const listing = await generateEbayListing(modelClient, {
@@ -38,6 +43,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         });
 
         await db.insert(aiListingDraft).values({
+          tenantId: message.tenantId,
           productId: product.id,
           sourceContentHash: product.contentHash,
           titleEn: listing.titleEn,
@@ -54,12 +60,13 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
         await db
           .insert(channelListings)
-          .values({ productId: product.id, channel: "ebay", status: "pending_approval" })
+          .values({ tenantId: message.tenantId, productId: product.id, channel: "ebay", status: "pending_approval" })
           .onConflictDoNothing({ target: [channelListings.productId, channelListings.channel] });
 
         await db.update(productMaster).set({ status: "ai_generated", updatedAt: new Date() }).where(eq(productMaster.id, product.id));
 
         await recordAuditLog(db, {
+          tenantId: message.tenantId,
           actor: "system:ai-generate-worker",
           action: "ai_listing_generated",
           entityType: "product",
@@ -73,6 +80,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
       const error = err as Error;
       if (error.name !== "IdempotencyInProgressError") {
         await recordSyncError(db, {
+          tenantId: message.tenantId,
           channel: "ebay",
           productId: message.productId,
           errorCode: "ai_generate_failed",

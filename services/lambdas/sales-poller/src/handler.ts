@@ -1,5 +1,5 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { isChannelIsolated } from "@ai-ec/db";
+import { isChannelIsolated, listActiveTenants } from "@ai-ec/db";
 import {
   createEbayAdapter,
   emitChannelIsolatedMetric,
@@ -30,16 +30,19 @@ export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
   const since = new Date(Date.now() - 5 * 60 * 1000); // 5 min lookback vs. a 1 min schedule
+  const tenants = await listActiveTenants(db);
 
-  await pollChannelIfHealthy(db, "base", async () => {
-    const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-    await pollChannelSales(new BaseAdapter(baseCreds), since, db, queues.inventorySync);
-  });
+  for (const tenant of tenants) {
+    await pollChannelIfHealthy(db, tenant.id, "base", async () => {
+      const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
+      await pollChannelSales(tenant.id, new BaseAdapter(baseCreds), since, db, queues.inventorySync);
+    });
 
-  await pollChannelIfHealthy(db, "ebay", async () => {
-    const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-    await pollChannelSales(createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
-  });
+    await pollChannelIfHealthy(db, tenant.id, "ebay", async () => {
+      const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
+      await pollChannelSales(tenant.id, createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
+    });
+  }
 }
 
 /**
@@ -55,13 +58,15 @@ export async function handler(): Promise<void> {
  */
 export async function pollChannelIfHealthy(
   db: ReturnType<typeof getDb>,
+  tenantId: string,
   channel: "base" | "ebay",
   poll: () => Promise<void>,
 ): Promise<void> {
-  const isolation = await isChannelIsolated(db, channel);
+  const isolation = await isChannelIsolated(db, tenantId, channel);
   if (isolation.isolated) {
     emitChannelIsolatedMetric(channel);
     await recordAuditLog(db, {
+      tenantId,
       actor: "system:sales-poller",
       action: "channel_isolated_skip",
       entityType: "channel",
@@ -75,6 +80,7 @@ export async function pollChannelIfHealthy(
     await poll();
   } catch (err) {
     await recordSyncError(db, {
+      tenantId,
       channel,
       productId: null,
       errorCode: "sales_poll_failed",

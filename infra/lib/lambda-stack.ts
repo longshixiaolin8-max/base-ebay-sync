@@ -292,6 +292,11 @@ export class LambdaStack extends cdk.Stack {
         AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
         EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
         INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
+        // Multi-tenant retrofit's GET /admin/oauth/base/authorize-url mints the same BASE
+        // consent URL oauth-base's own authorize() builds -- same redirect URI, so BASE's
+        // callback (registered against this one fixed URL) works regardless of which route
+        // originally sent the operator there.
+        BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out

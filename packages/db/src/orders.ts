@@ -13,6 +13,7 @@ export class InvalidOrderTransitionError extends Error {
 }
 
 export interface UpsertOrderReceivedInput {
+  tenantId: string;
   productId: string;
   channel: string;
   externalOrderId: string;
@@ -38,6 +39,7 @@ export async function upsertOrderReceived(db: Database, input: UpsertOrderReceiv
   await db
     .insert(orders)
     .values({
+      tenantId: input.tenantId,
       productId: input.productId,
       channel: input.channel,
       externalOrderId: input.externalOrderId,
@@ -53,7 +55,14 @@ export async function upsertOrderReceived(db: Database, input: UpsertOrderReceiv
   const [row] = await db
     .select()
     .from(orders)
-    .where(and(eq(orders.channel, input.channel), eq(orders.externalOrderId, input.externalOrderId), eq(orders.productId, input.productId)))
+    .where(
+      and(
+        eq(orders.tenantId, input.tenantId),
+        eq(orders.channel, input.channel),
+        eq(orders.externalOrderId, input.externalOrderId),
+        eq(orders.productId, input.productId),
+      ),
+    )
     .limit(1);
   if (!row) {
     throw new Error(`orders row missing immediately after upsert for ${input.channel}/${input.externalOrderId}/${input.productId}`);
@@ -103,11 +112,16 @@ export interface TransitionOrderStatusOptions {
  */
 export async function transitionOrderStatus(
   db: Database,
+  tenantId: string,
   orderId: string,
   toStatus: OrderStatus,
   options: TransitionOrderStatusOptions = {},
 ): Promise<OrderRow> {
-  const [current] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+  const [current] = await db
+    .select()
+    .from(orders)
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
+    .limit(1);
   if (!current) throw new Error(`orders row missing for id ${orderId}`);
 
   const fromStatus = current.status as OrderStatus;
@@ -119,7 +133,7 @@ export async function transitionOrderStatus(
   const [updated] = await db
     .update(orders)
     .set({ status: toStatus, ...statusTimestampPatch(toStatus, now), ...options.extra, updatedAt: now })
-    .where(eq(orders.id, orderId))
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
     .returning();
   if (!updated) throw new Error(`failed to update orders row ${orderId}`);
   return updated;
@@ -151,39 +165,56 @@ export function getLiveOrderProfit(order: OrderRow, usdPerJpy: number): OrderPro
  * fresh computation from this order's own current fields; it never adds to a running total,
  * which is exactly what keeps a later return/reprocessing from double-counting profit.
  */
-export async function finalizeOrderProfit(db: Database, orderId: string, usdPerJpy: number): Promise<OrderRow> {
-  const [current] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+export async function finalizeOrderProfit(db: Database, tenantId: string, orderId: string, usdPerJpy: number): Promise<OrderRow> {
+  const [current] = await db
+    .select()
+    .from(orders)
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
+    .limit(1);
   if (!current) throw new Error(`orders row missing for id ${orderId}`);
 
   const profit = getLiveOrderProfit(current, usdPerJpy);
   const [updated] = await db
     .update(orders)
     .set({ finalizedNetProfitUsdCents: profit.netProfitUsdCents, profitFinalizedAt: new Date(), updatedAt: new Date() })
-    .where(eq(orders.id, orderId))
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
     .returning();
   if (!updated) throw new Error(`failed to finalize profit for orders row ${orderId}`);
   return updated;
 }
 
-export async function listOrdersForProduct(db: Database, productId: string): Promise<OrderRow[]> {
-  return db.select().from(orders).where(eq(orders.productId, productId)).orderBy(desc(orders.placedAt));
+export async function listOrdersForProduct(db: Database, tenantId: string, productId: string): Promise<OrderRow[]> {
+  return db
+    .select()
+    .from(orders)
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.productId, productId)))
+    .orderBy(desc(orders.placedAt));
 }
 
 /** Units tied up in orders placed but not yet shipped -- see getInventoryBreakdown's
  *  "reserved" figure, which calls this same list for its sum. */
 export const RESERVED_ORDER_STATUSES: OrderStatus[] = ["ORDER_RECEIVED", "PAID", "ALLOCATED"];
 
-export async function listOrders(db: Database, options: { status?: OrderStatus; limit?: number } = {}): Promise<OrderRow[]> {
+export async function listOrders(
+  db: Database,
+  tenantId: string,
+  options: { status?: OrderStatus; limit?: number } = {},
+): Promise<OrderRow[]> {
   const limit = options.limit ?? 100;
   if (options.status) {
-    return db.select().from(orders).where(eq(orders.status, options.status)).orderBy(desc(orders.placedAt)).limit(limit);
+    return db
+      .select()
+      .from(orders)
+      .where(and(eq(orders.tenantId, tenantId), eq(orders.status, options.status)))
+      .orderBy(desc(orders.placedAt))
+      .limit(limit);
   }
-  return db.select().from(orders).orderBy(desc(orders.placedAt)).limit(limit);
+  return db.select().from(orders).where(eq(orders.tenantId, tenantId)).orderBy(desc(orders.placedAt)).limit(limit);
 }
 
-export async function listReservedOrdersForProduct(db: Database, productId: string): Promise<OrderRow[]> {
+export async function listReservedOrdersForProduct(db: Database, tenantId: string, productId: string): Promise<OrderRow[]> {
   return db
     .select()
     .from(orders)
-    .where(and(eq(orders.productId, productId), inArray(orders.status, RESERVED_ORDER_STATUSES)));
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.productId, productId), inArray(orders.status, RESERVED_ORDER_STATUSES)));
 }

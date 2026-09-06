@@ -33,6 +33,8 @@ vi.mock("@ai-ec/lambda-shared", () => ({
 
 const { processSale } = await import("./handler.js");
 
+const TENANT_ID = "tenant-a";
+
 /** Each entry is the array `select().from().where().limit()` resolves to for one call,
  *  consumed in call order — mirrors the real query sequence in processSale(). */
 function createFakeDb(selectResults: unknown[][]) {
@@ -80,10 +82,10 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([[], []]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[], []]), TENANT_ID, adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
-    expect(applySaleMock).toHaveBeenCalledWith(expect.anything(), "product-1", 1, {
+    expect(applySaleMock).toHaveBeenCalledWith(expect.anything(), TENANT_ID, "product-1", 1, {
       channel: "base",
       sequenceAt: sale.occurredAt,
       externalEventId: "order-1",
@@ -94,7 +96,7 @@ describe("processSale", () => {
     applySaleMock.mockResolvedValue({ quantity: 4, soldOut: false, alreadyZero: false });
     const adapters = { base: {}, ebay: { setInventory: vi.fn() } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([[{ costJpy: 3000 }], []]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[{ costJpy: 3000 }], []]), TENANT_ID, adapters as never, "product-1", sale);
 
     expect(upsertOrderReceivedMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -113,7 +115,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory: vi.fn() } } as unknown as Record<string, ChannelAdapter>;
     const pricedSale: SaleEvent = { ...sale, salePriceJpy: 4000 };
 
-    await processSale(createFakeDb([[{ costJpy: null }], []]), adapters as never, "product-1", pricedSale);
+    await processSale(createFakeDb([[{ costJpy: null }], []]), TENANT_ID, adapters as never, "product-1", pricedSale);
 
     expect(upsertOrderReceivedMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -127,7 +129,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await expect(processSale(createFakeDb([[], []]), adapters as never, "product-1", sale)).resolves.toBeUndefined();
+    await expect(processSale(createFakeDb([[], []]), TENANT_ID, adapters as never, "product-1", sale)).resolves.toBeUndefined();
 
     expect(recordSyncErrorMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -140,7 +142,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([]), TENANT_ID, adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
   });
@@ -152,6 +154,7 @@ describe("processSale", () => {
 
     await processSale(
       createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]),
+      TENANT_ID,
       adapters as never,
       "product-1",
       sale,
@@ -170,7 +173,7 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([[], []]), adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[], []]), TENANT_ID, adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
   });
@@ -190,6 +193,7 @@ describe("processSale", () => {
         [{ sourceChannel: "base" }], // product_master
         [{ quantity: 4, safetyStockBuffer: 1 }], // inventory_master
       ]),
+      TENANT_ID,
       adapters as never,
       "product-1",
       sale,
@@ -210,7 +214,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), TENANT_ID, adapters as never, "product-1", sale),
     ).resolves.toBeUndefined();
 
     expect(setInventory).not.toHaveBeenCalled();
@@ -223,7 +227,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), TENANT_ID, adapters as never, "product-1", sale),
     ).rejects.toThrow(/no ebay account is connected/);
   });
 
@@ -243,7 +247,7 @@ describe("processSale", () => {
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
     await expect(
-      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), adapters as never, "product-1", sale),
+      processSale(createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]), TENANT_ID, adapters as never, "product-1", sale),
     ).resolves.toBeUndefined();
 
     expect(setInventory).not.toHaveBeenCalled();
@@ -267,6 +271,7 @@ describe("processSale", () => {
 
     await processSale(
       createFakeDb([[], [{ status: "published", externalId: "ebay-sku-1" }]]),
+      TENANT_ID,
       adapters as never,
       "product-1",
       sale,

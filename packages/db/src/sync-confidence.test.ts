@@ -27,7 +27,7 @@ function fakeDb(rows: { syncErrors?: unknown[]; channelListings?: unknown[]; inv
 describe("computeSyncConfidence", () => {
   it("scores 100 with no recent activity — absence of evidence isn't evidence of a problem", async () => {
     const db = fakeDb({});
-    const result = await computeSyncConfidence(db, "ebay");
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
 
     expect(result.score).toBe(100);
     expect(result.successCount).toBe(0);
@@ -40,7 +40,7 @@ describe("computeSyncConfidence", () => {
       channelListings: [{ id: "1" }, { id: "2" }],
       inventoryEvents: [{ applied: true }, { applied: true }],
     });
-    const result = await computeSyncConfidence(db, "ebay");
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
 
     expect(result.score).toBe(100);
   });
@@ -51,7 +51,7 @@ describe("computeSyncConfidence", () => {
       channelListings: [],
       inventoryEvents: [],
     });
-    const result = await computeSyncConfidence(db, "ebay");
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
 
     expect(result.score).toBe(0);
     expect(result.failureCount).toBe(3);
@@ -64,7 +64,7 @@ describe("computeSyncConfidence", () => {
       channelListings: [{ id: "1" }, { id: "2" }],
       inventoryEvents: [{ applied: true }, { applied: true }, { applied: true }, { applied: false }],
     });
-    const result = await computeSyncConfidence(db, "base");
+    const result = await computeSyncConfidence(db, "tenant-a", "base");
 
     expect(result.score).toBe(63); // round((50 + 75) / 2)
     expect(result.outOfOrderEventCount).toBe(1);
@@ -81,7 +81,7 @@ describe("computeSyncConfidence", () => {
         { applied: false, skippedReason: "unchanged" },
       ],
     });
-    const result = await computeSyncConfidence(db, "base");
+    const result = await computeSyncConfidence(db, "tenant-a", "base");
 
     expect(result.totalEventCount).toBe(1);
     expect(result.outOfOrderEventCount).toBe(0);

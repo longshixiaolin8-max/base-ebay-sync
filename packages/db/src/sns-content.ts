@@ -1,11 +1,15 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { snsContent } from "./schema.js";
 
 export type SnsContentRow = typeof snsContent.$inferSelect;
 
-export async function getSnsContent(db: Database, productId: string): Promise<SnsContentRow | null> {
-  const [row] = await db.select().from(snsContent).where(eq(snsContent.productId, productId)).limit(1);
+export async function getSnsContent(db: Database, tenantId: string, productId: string): Promise<SnsContentRow | null> {
+  const [row] = await db
+    .select()
+    .from(snsContent)
+    .where(and(eq(snsContent.tenantId, tenantId), eq(snsContent.productId, productId)))
+    .limit(1);
   return row ?? null;
 }
 
@@ -13,6 +17,7 @@ export async function getSnsContent(db: Database, productId: string): Promise<Sn
  *  generated script only; nothing here ever posts anything anywhere. */
 export async function upsertSnsScript(
   db: Database,
+  tenantId: string,
   productId: string,
   scriptText: string,
   promptVersion: string,
@@ -20,13 +25,17 @@ export async function upsertSnsScript(
   const now = new Date();
   await db
     .insert(snsContent)
-    .values({ productId, scriptText, scriptPromptVersion: promptVersion, updatedAt: now })
+    .values({ tenantId, productId, scriptText, scriptPromptVersion: promptVersion, updatedAt: now })
     .onConflictDoUpdate({
       target: snsContent.productId,
       set: { scriptText, scriptPromptVersion: promptVersion, updatedAt: now },
     });
 
-  const [row] = await db.select().from(snsContent).where(eq(snsContent.productId, productId)).limit(1);
+  const [row] = await db
+    .select()
+    .from(snsContent)
+    .where(and(eq(snsContent.tenantId, tenantId), eq(snsContent.productId, productId)))
+    .limit(1);
   if (!row) throw new Error(`sns_content row missing after upsert for product ${productId}`);
   return row;
 }
@@ -44,7 +53,12 @@ export interface MarkSnsStatusInput {
  * pattern of AI producing a draft and a human confirming reality (see ai_listing_draft's
  * needsHumanReview).
  */
-export async function markSnsStatus(db: Database, productId: string, input: MarkSnsStatusInput): Promise<SnsContentRow> {
+export async function markSnsStatus(
+  db: Database,
+  tenantId: string,
+  productId: string,
+  input: MarkSnsStatusInput,
+): Promise<SnsContentRow> {
   const now = new Date();
   const patch: Partial<typeof snsContent.$inferInsert> = { updatedAt: now };
   if (input.videoCreated !== undefined) {
@@ -62,10 +76,14 @@ export async function markSnsStatus(db: Database, productId: string, input: Mark
 
   await db
     .insert(snsContent)
-    .values({ productId, ...patch })
+    .values({ tenantId, productId, ...patch })
     .onConflictDoUpdate({ target: snsContent.productId, set: patch });
 
-  const [row] = await db.select().from(snsContent).where(eq(snsContent.productId, productId)).limit(1);
+  const [row] = await db
+    .select()
+    .from(snsContent)
+    .where(and(eq(snsContent.tenantId, tenantId), eq(snsContent.productId, productId)))
+    .limit(1);
   if (!row) throw new Error(`sns_content row missing after upsert for product ${productId}`);
   return row;
 }

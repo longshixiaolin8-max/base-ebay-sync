@@ -14,7 +14,7 @@ function fakeDb(recentErrors: { errorMessage: string }[]): Database {
 
 describe("shouldThrottleChannel", () => {
   it("does not throttle with no recent errors", async () => {
-    const result = await shouldThrottleChannel(fakeDb([]), "ebay");
+    const result = await shouldThrottleChannel(fakeDb([]), "tenant-a", "ebay");
 
     expect(result.throttle).toBe(false);
     expect(result.reasons).toEqual([]);
@@ -23,6 +23,7 @@ describe("shouldThrottleChannel", () => {
   it("throttles on a real 429 from the channel's own API", async () => {
     const result = await shouldThrottleChannel(
       fakeDb([{ errorMessage: "eBay API error 429: Too Many Requests" }]),
+      "tenant-a",
       "ebay",
     );
 
@@ -37,6 +38,7 @@ describe("shouldThrottleChannel", () => {
         { errorMessage: "eBay API error 502: Bad Gateway" },
         { errorMessage: "eBay API error 500: Internal Server Error" },
       ]),
+      "tenant-a",
       "ebay",
     );
 
@@ -45,7 +47,7 @@ describe("shouldThrottleChannel", () => {
   });
 
   it("does not throttle on a single 5xx — that's not yet a pattern", async () => {
-    const result = await shouldThrottleChannel(fakeDb([{ errorMessage: "eBay API error 500: Internal Server Error" }]), "ebay");
+    const result = await shouldThrottleChannel(fakeDb([{ errorMessage: "eBay API error 500: Internal Server Error" }]), "tenant-a", "ebay");
 
     expect(result.throttle).toBe(false);
   });
@@ -61,6 +63,7 @@ describe("shouldThrottleChannel", () => {
         { errorMessage: "eBay API error 400: Invalid request" },
         { errorMessage: "eBay API error 404: Not Found" },
       ]),
+      "tenant-a",
       "ebay",
     );
 
@@ -76,6 +79,7 @@ describe("shouldThrottleChannel", () => {
       fakeDb(
         Array.from({ length: 50 }, () => ({ errorMessage: "Too many tokens per day, please wait before trying again." })),
       ),
+      "tenant-a",
       "ebay",
     );
 

@@ -19,6 +19,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
 const { upsertProduct } = await import("./handler.js");
 
 const queues = { aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" };
+const TENANT_ID = "tenant-a";
 
 const item: ExternalProduct = {
   externalId: "item-1",
@@ -96,15 +97,15 @@ describe("upsertProduct", () => {
     });
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
-    expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, "existing-id", item.quantity, item.updatedAt);
+    expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, TENANT_ID, "existing-id", item.quantity, item.updatedAt);
   });
 
   it("does not attempt stock reconciliation for a brand-new product (nothing to reconcile against yet)", async () => {
     const db = createFakeDb({ existingProduct: null });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(applyBaseStockReportMock).not.toHaveBeenCalled();
   });
@@ -112,13 +113,13 @@ describe("upsertProduct", () => {
   it("inserts a brand-new product, its inventory/base listing rows, and enqueues ai_generate", async () => {
     const db = createFakeDb({ existingProduct: null });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(enqueueMock).toHaveBeenCalledWith(
       queues.aiGenerate,
-      { type: "ai_generate", productId: "new-product-id" },
-      "ai-generate:new-product-id",
+      { type: "ai_generate", tenantId: TENANT_ID, productId: "new-product-id" },
+      `${TENANT_ID}:ai-generate:new-product-id`,
     );
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -138,7 +139,7 @@ describe("upsertProduct", () => {
     });
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -149,7 +150,7 @@ describe("upsertProduct", () => {
       ebayListing: null,
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -160,7 +161,7 @@ describe("upsertProduct", () => {
       ebayListing: { status: "pending_approval" },
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -171,13 +172,13 @@ describe("upsertProduct", () => {
       ebayListing: { status: "published" },
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(enqueueMock).toHaveBeenCalledWith(
       queues.ebaySync,
-      { type: "ebay_update", productId: "existing-id" },
-      expect.stringContaining("ebay-update:existing-id:"),
+      { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
+      expect.stringContaining(`${TENANT_ID}:ebay-update:existing-id:`),
     );
   });
 });

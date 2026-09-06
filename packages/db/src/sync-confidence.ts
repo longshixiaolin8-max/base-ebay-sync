@@ -26,22 +26,27 @@ export interface SyncConfidence {
  * The two are averaged into one 0-100 score. Used to gate new eBay publishes when eBay's
  * own sync pipeline currently looks unreliable — see ebay-sync-worker's publish() preflight.
  */
-export async function computeSyncConfidence(db: Database, channel: string, windowHours = 24): Promise<SyncConfidence> {
+export async function computeSyncConfidence(
+  db: Database,
+  tenantId: string,
+  channel: string,
+  windowHours = 24,
+): Promise<SyncConfidence> {
   const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
   const failures = await db
     .select()
     .from(syncErrors)
-    .where(and(eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
+    .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
   const successes = await db
     .select()
     .from(channelListings)
-    .where(and(eq(channelListings.channel, channel), gte(channelListings.lastSyncedAt, since)));
+    .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.channel, channel), gte(channelListings.lastSyncedAt, since)));
 
   const rawEvents = await db
     .select()
     .from(inventoryEvents)
-    .where(and(eq(inventoryEvents.channel, channel), gte(inventoryEvents.createdAt, since)));
+    .where(and(eq(inventoryEvents.tenantId, tenantId), eq(inventoryEvents.channel, channel), gte(inventoryEvents.createdAt, since)));
   // A report equal to the current watermark just means "nothing changed since last poll" --
   // an ordinary, frequent outcome, not evidence of a sync problem. Only a genuine reversal
   // (skippedReason "out_of_order", strictly older than the watermark) counts against the score.

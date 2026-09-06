@@ -14,3 +14,4 @@ export * from "./inventory-breakdown.js";
 export * from "./stale-products.js";
 export * from "./sns-content.js";
 export * from "./sync-state.js";
+export * from "./tenants.js";
