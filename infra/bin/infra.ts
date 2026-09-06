@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "source-map-support/register.js";
 import * as cdk from "aws-cdk-lib";
+import { AdminHostingStack } from "../lib/admin-hosting-stack.js";
 import { ApiCoreStack } from "../lib/api-core-stack.js";
 import { ApiStack } from "../lib/api-stack.js";
 import { AuthStack } from "../lib/auth-stack.js";
@@ -91,6 +92,8 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
 api.addStackDependency(apiCore);
+
+new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,
