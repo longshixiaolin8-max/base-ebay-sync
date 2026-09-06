@@ -1,6 +1,8 @@
 import * as cdk from "aws-cdk-lib";
+import * as budgets from "aws-cdk-lib/aws-budgets";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
+import * as iam from "aws-cdk-lib/aws-iam";
 import type * as nodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
@@ -24,6 +26,51 @@ export class MonitoringStack extends cdk.Stack {
     if (props.config.alarmEmail) {
       alarmTopic.addSubscription(new subscriptions.EmailSubscription(props.config.alarmEmail));
     }
+
+    // AWS Budgets requires the target SNS topic to explicitly allow the service to publish
+    // to it -- without this statement, budget notifications fail silently (no delivery, no
+    // CloudFormation error, since the policy check happens at notification time, not create
+    // time).
+    alarmTopic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ["sns:Publish"],
+        principals: [new iam.ServicePrincipal("budgets.amazonaws.com")],
+        resources: [alarmTopic.topicArn],
+      }),
+    );
+
+    // Whole-AWS-account monthly cost budget (not scoped to this project's resource tags --
+    // that needs cost allocation tags activated in Billing preferences first, an
+    // account-level console action CDK can't do on the user's behalf). AWS Budgets' first
+    // two budgets per account are free, so this is a zero-cost safety net against a runaway
+    // bill going unnoticed.
+    new budgets.CfnBudget(this, "MonthlyCostBudget", {
+      budget: {
+        budgetType: "COST",
+        timeUnit: "MONTHLY",
+        budgetLimit: { amount: props.config.monthlyBudgetUsd, unit: "USD" },
+      },
+      notificationsWithSubscribers: [
+        {
+          notification: {
+            notificationType: "ACTUAL",
+            comparisonOperator: "GREATER_THAN",
+            threshold: 80,
+            thresholdType: "PERCENTAGE",
+          },
+          subscribers: [{ subscriptionType: "SNS", address: alarmTopic.topicArn }],
+        },
+        {
+          notification: {
+            notificationType: "FORECASTED",
+            comparisonOperator: "GREATER_THAN",
+            threshold: 100,
+            thresholdType: "PERCENTAGE",
+          },
+          subscribers: [{ subscriptionType: "SNS", address: alarmTopic.topicArn }],
+        },
+      ],
+    });
 
     const dashboard = new cloudwatch.Dashboard(this, "Dashboard", {
       dashboardName: `ai-ec-platform-${props.config.envName}`,

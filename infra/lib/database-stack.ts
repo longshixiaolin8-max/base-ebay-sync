@@ -39,6 +39,9 @@ export class DatabaseStack extends cdk.Stack {
       storageEncrypted: true,
       backup: { retention: cdk.Duration.days(config.envName === "prod" ? 14 : 3) },
       removalPolicy: config.envName === "prod" ? cdk.RemovalPolicy.SNAPSHOT : cdk.RemovalPolicy.DESTROY,
+      // Only for prod: a dev cluster still needs to be destroyable via `cdk destroy`
+      // (removalPolicy DESTROY above), which deletion protection would otherwise block.
+      deletionProtection: config.envName === "prod",
     });
   }
 }

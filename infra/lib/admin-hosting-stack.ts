@@ -23,6 +23,10 @@ export interface AdminHostingStackProps extends cdk.StackProps {
 export class AdminHostingStack extends cdk.Stack {
   readonly appId: string;
   readonly branchName = "deploy";
+  /** The real hosted origin, e.g. https://deploy.<appId>.amplifyapp.com -- a CDK token
+   *  (resolved at deploy time), consumed by ApiCoreStack to tighten CORS away from the
+   *  wildcard fallback once a real origin exists to restrict to. */
+  readonly url: string;
 
   constructor(scope: Construct, id: string, props: AdminHostingStackProps) {
     super(scope, id, props);
@@ -45,10 +49,9 @@ export class AdminHostingStack extends cdk.Stack {
     });
 
     this.appId = app.attrAppId;
+    this.url = `https://${this.branchName}.${app.attrAppId}.amplifyapp.com`;
 
     new cdk.CfnOutput(this, "AdminAppId", { value: app.attrAppId });
-    new cdk.CfnOutput(this, "AdminUrl", {
-      value: `https://${this.branchName}.${app.attrAppId}.amplifyapp.com`,
-    });
+    new cdk.CfnOutput(this, "AdminUrl", { value: this.url });
   }
 }

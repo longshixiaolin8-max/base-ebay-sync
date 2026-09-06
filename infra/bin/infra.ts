@@ -20,8 +20,9 @@ const envName = (app.node.tryGetContext("env") as string | undefined) ?? "dev";
 const alarmEmail = app.node.tryGetContext("alarmEmail") as string | undefined;
 const aiProvider = app.node.tryGetContext("aiProvider") as string | undefined;
 const githubRepo = (app.node.tryGetContext("githubRepo") as string | undefined) ?? "OWNER/base-ebay-sync";
+const monthlyBudgetUsd = app.node.tryGetContext("monthlyBudgetUsd") as string | undefined;
 
-const config = loadConfig(envName, alarmEmail, aiProvider);
+const config = loadConfig(envName, alarmEmail, aiProvider, monthlyBudgetUsd);
 
 // Region is read from CDK context (`--context region=...`), not from
 // CDK_DEFAULT_REGION/AWS_REGION — the CDK CLI recomputes those env vars from the
@@ -51,7 +52,11 @@ const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags });
 const storage = new StorageStack(app, `${stackPrefix}-Storage`, config, { env, tags });
 const auth = new AuthStack(app, `${stackPrefix}-Auth`, config, { env, tags });
 const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });
-const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags });
+// Created before ApiCoreStack so its real hosted origin (a stable *.amplifyapp.com URL,
+// independent of anything ApiCoreStack/LambdaStack/ApiStack produce) can tighten the API's
+// CORS config away from the wildcard bootstrap fallback -- see api-core-stack.ts.
+const adminHosting = new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
+const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags, adminOrigin: adminHosting.url });
 
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
@@ -92,8 +97,6 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
 api.addStackDependency(apiCore);
-
-new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,
