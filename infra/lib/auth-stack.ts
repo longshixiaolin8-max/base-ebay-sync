@@ -28,6 +28,13 @@ export class AuthStack extends cdk.Stack {
       mfaSecondFactor: { otp: true, sms: false },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy: config.envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      // Threat Protection (the current name for what was "Advanced Security Features"),
+      // prod only: per-MAU cost, so dev's handful of throwaway test accounts skip it.
+      // FULL_FUNCTION actively blocks/challenges risky sign-ins (impossible travel,
+      // compromised-credential lists) rather than only logging them.
+      featurePlan: config.envName === "prod" ? cognito.FeaturePlan.PLUS : undefined,
+      standardThreatProtectionMode:
+        config.envName === "prod" ? cognito.StandardThreatProtectionMode.FULL_FUNCTION : undefined,
     });
 
     this.userPoolClient = this.userPool.addClient("AdminUserPoolClient", {

@@ -32,6 +32,12 @@ export class DatabaseStack extends cdk.Stack {
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       writer: rds.ClusterInstance.serverlessV2("writer"),
+      // Multi-AZ, prod only: a reader in the VPC's second AZ (`${region}b`) gives Aurora a
+      // same-region failover target if the writer's AZ has an outage -- RDS promotes it
+      // automatically. `scaleWithWriter` keeps its capacity matched to the writer's so it's
+      // never a bottleneck if promoted. Roughly doubles the cluster's ACU-hours cost, which
+      // is exactly why dev (cost-sensitive, disposable) skips it.
+      readers: config.envName === "prod" ? [rds.ClusterInstance.serverlessV2("reader", { scaleWithWriter: true })] : undefined,
       serverlessV2MinCapacity: 0.5,
       serverlessV2MaxCapacity: config.envName === "prod" ? 8 : 2,
       enableDataApi: true,

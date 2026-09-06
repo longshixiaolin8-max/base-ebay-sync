@@ -48,7 +48,7 @@ if (app.node.tryGetContext("bootstrapOidc") === "true") {
 }
 
 const database = new DatabaseStack(app, `${stackPrefix}-Database`, config, { env, tags });
-const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags });
+const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags, envName });
 const storage = new StorageStack(app, `${stackPrefix}-Storage`, config, { env, tags });
 const auth = new AuthStack(app, `${stackPrefix}-Auth`, config, { env, tags });
 const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });

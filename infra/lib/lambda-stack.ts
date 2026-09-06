@@ -77,6 +77,10 @@ export class LambdaStack extends cdk.Stack {
       EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
       INVENTORY_SYNC_QUEUE_URL: props.queues.inventorySync.queueUrl,
       AI_PROVIDER: props.config.aiProvider,
+      // Read by @ai-ec/lambda-shared's secrets.ts to build env-scoped Secrets Manager
+      // names (see secrets-stack.ts) so dev and prod, run side by side in the same
+      // account, never read/write each other's app credentials or OAuth tokens.
+      PLATFORM_ENV: props.config.envName,
     };
 
     const oauthTokenSecretsPolicy = new iam.PolicyStatement({

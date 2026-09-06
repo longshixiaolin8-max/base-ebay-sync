@@ -11,6 +11,14 @@ import { eq, and } from "drizzle-orm";
 
 const secretsClient = new SecretsManagerClient({});
 
+// Matches infra/lib/secrets-stack.ts's per-env naming: every env except "dev" gets an
+// `${envName}/` segment (dev is kept unprefixed for backward compatibility with its
+// already-populated real credentials). dev and prod run side by side in the same AWS
+// account, so every secret name read/written at runtime must include this segment or the
+// two would collide on the same name.
+const PLATFORM_ENV = process.env.PLATFORM_ENV ?? "dev";
+const ENV_SEGMENT = PLATFORM_ENV === "dev" ? "" : `${PLATFORM_ENV}/`;
+
 interface StoredToken {
   accessToken: string;
   refreshToken: string | null;
@@ -19,7 +27,7 @@ interface StoredToken {
 }
 
 function secretName(channel: string, externalAccountId: string): string {
-  return `ai-ec-platform/oauth/${channel}/${externalAccountId}`;
+  return `ai-ec-platform/${ENV_SEGMENT}oauth/${channel}/${externalAccountId}`;
 }
 
 /**
@@ -112,7 +120,7 @@ let appCredentialsCache: Record<string, unknown> = {};
 export async function getAppCredentials<T>(channel: string): Promise<T> {
   if (appCredentialsCache[channel]) return appCredentialsCache[channel] as T;
   const secret = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: `ai-ec-platform/app-credentials/${channel}` }),
+    new GetSecretValueCommand({ SecretId: `ai-ec-platform/${ENV_SEGMENT}app-credentials/${channel}` }),
   );
   const value = JSON.parse(secret.SecretString ?? "{}") as T;
   appCredentialsCache = { ...appCredentialsCache, [channel]: value };
