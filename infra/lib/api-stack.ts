@@ -199,6 +199,7 @@ export class ApiStack extends cdk.Stack {
     addRoute("SyncState", apigwv2.HttpMethod.GET, "/admin/sync/state", adminIntegration, true);
     addRoute("Slo", apigwv2.HttpMethod.GET, "/admin/slo", adminIntegration, true);
     addRoute("CommerceDashboard", apigwv2.HttpMethod.GET, "/admin/commerce-dashboard", adminIntegration, true);
+    addRoute("DashboardSummary", apigwv2.HttpMethod.GET, "/admin/dashboard/summary", adminIntegration, true);
 
     // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
     // no state-changing action happens here. It was originally gated behind Cognito on the

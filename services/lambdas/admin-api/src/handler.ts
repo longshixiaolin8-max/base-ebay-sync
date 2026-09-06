@@ -922,6 +922,134 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { products: rows });
     }
 
+    // --- Dashboard summary (UI): month-to-date/previous-month KPIs, a daily revenue/profit
+    // trend, recent orders, and an inventory rollup, all in one call for the dashboard page. ---
+
+    if (method === "GET" && path === "/admin/dashboard/summary") {
+      const TREND_DAYS = 14;
+      // A dashboard-wide inventory rollup costs one breakdown call per product (same N+1
+      // pattern /admin/commerce-dashboard already accepts) -- bounded the same way, via an
+      // overridable default, rather than left unbounded for a large catalog.
+      const productLimit = event.queryStringParameters?.productLimit
+        ? Number(event.queryStringParameters.productLimit)
+        : 100;
+
+      const now = new Date();
+      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const prevMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      const trendStart = new Date(now.getTime() - (TREND_DAYS - 1) * 24 * 60 * 60 * 1000);
+      trendStart.setUTCHours(0, 0, 0, 0);
+      const since = trendStart < prevMonthStart ? trendStart : prevMonthStart;
+
+      const usdPerJpy = await currentFxRate();
+      const relevantOrders = await db.select().from(orders).where(gte(orders.placedAt, since));
+      const products = await db.select().from(productMaster).limit(productLimit);
+      const productById = new Map(products.map((p) => [p.id, p]));
+
+      // Computed once per order (rather than re-derived every time it's touched below) so a
+      // single order's profit is asked of getLiveOrderProfit exactly once.
+      const profitByOrderId = new Map(
+        relevantOrders.map((order) => {
+          const live = getLiveOrderProfit(order, usdPerJpy);
+          return [
+            order.id,
+            {
+              revenueUsdCents: live.revenueUsdCents,
+              netProfitUsdCents: order.profitFinalizedAt ? (order.finalizedNetProfitUsdCents ?? 0) : live.netProfitUsdCents,
+            },
+          ];
+        }),
+      );
+      const profitFor = (order: (typeof relevantOrders)[number]) => profitByOrderId.get(order.id)!;
+
+      const summarize = (rows: typeof relevantOrders) => {
+        let revenueUsdCents = 0;
+        let netProfitUsdCents = 0;
+        const ordersByChannel: Record<string, number> = {};
+        for (const order of rows) {
+          const p = profitFor(order);
+          revenueUsdCents += p.revenueUsdCents;
+          netProfitUsdCents += p.netProfitUsdCents;
+          ordersByChannel[order.channel] = (ordersByChannel[order.channel] ?? 0) + 1;
+        }
+        return {
+          revenueUsdCents,
+          netProfitUsdCents,
+          profitMarginBasisPoints: revenueUsdCents > 0 ? Math.round((netProfitUsdCents / revenueUsdCents) * 10000) : null,
+          orderCount: rows.length,
+          ordersByChannel,
+        };
+      };
+
+      const currentMonthOrders = relevantOrders.filter((o) => o.placedAt >= monthStart);
+      const previousMonthOrders = relevantOrders.filter((o) => o.placedAt >= prevMonthStart && o.placedAt < monthStart);
+
+      const trend: Array<{
+        date: string;
+        revenueUsdCents: number;
+        netProfitUsdCents: number;
+        channelRevenueUsdCents: Record<string, number>;
+        channelNetProfitUsdCents: Record<string, number>;
+      }> = [];
+      for (let i = 0; i < TREND_DAYS; i++) {
+        const dayStart = new Date(trendStart.getTime() + i * 24 * 60 * 60 * 1000);
+        const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+        const dayOrders = relevantOrders.filter((o) => o.placedAt >= dayStart && o.placedAt < dayEnd);
+        let revenueUsdCents = 0;
+        let netProfitUsdCents = 0;
+        const channelRevenueUsdCents: Record<string, number> = {};
+        const channelNetProfitUsdCents: Record<string, number> = {};
+        for (const order of dayOrders) {
+          const p = profitFor(order);
+          revenueUsdCents += p.revenueUsdCents;
+          netProfitUsdCents += p.netProfitUsdCents;
+          channelRevenueUsdCents[order.channel] = (channelRevenueUsdCents[order.channel] ?? 0) + p.revenueUsdCents;
+          channelNetProfitUsdCents[order.channel] = (channelNetProfitUsdCents[order.channel] ?? 0) + p.netProfitUsdCents;
+        }
+        trend.push({
+          date: dayStart.toISOString().slice(0, 10),
+          revenueUsdCents,
+          netProfitUsdCents,
+          channelRevenueUsdCents,
+          channelNetProfitUsdCents,
+        });
+      }
+
+      const recentOrders = [...relevantOrders]
+        .sort((a, b) => b.placedAt.getTime() - a.placedAt.getTime())
+        .slice(0, 5)
+        .map((o) => {
+          const product = productById.get(o.productId);
+          return {
+            id: o.id,
+            productId: o.productId,
+            productTitle: product?.title ?? null,
+            sku: product?.sku ?? null,
+            channel: o.channel,
+            revenueUsdCents: profitFor(o).revenueUsdCents,
+            status: o.status,
+            placedAt: o.placedAt.toISOString(),
+          };
+        });
+
+      const breakdowns = await Promise.all(products.map((p) => getInventoryBreakdown(db, p.id)));
+      let totalAvailable = 0;
+      let lowStockCount = 0;
+      for (const b of breakdowns) {
+        if (!b) continue;
+        totalAvailable += b.available;
+        if (b.available <= b.safetyBuffer) lowStockCount++;
+      }
+
+      return json(200, {
+        currentMonth: summarize(currentMonthOrders),
+        previousMonth: summarize(previousMonthOrders),
+        trend,
+        recentOrders,
+        inventory: { totalAvailable, lowStockCount },
+      });
+    }
+
     return json(404, { error: "route_not_found" });
   } catch (err) {
     return json(500, { error: "internal_error", message: (err as Error).message });

@@ -138,6 +138,26 @@ export function RefreshIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function TrendUpIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="m3 17 6-6 4 4 8-8" />
+      <path d="M17 7h4v4" />
+    </Icon>
+  );
+}
+
+export function CoinIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9a2.5 2 0 0 1 2.5-1.5c1.4 0 2.5.9 2.5 2s-1.1 1.7-2.5 2-2.5.9-2.5 2 1.1 2 2.5 2a2.5 2 0 0 0 2.5-1.5" />
+      <path d="M12 6v1.3" />
+      <path d="M12 16.7V18" />
+    </Icon>
+  );
+}
+
 export function CheckIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Icon {...props} width={15} height={15}>

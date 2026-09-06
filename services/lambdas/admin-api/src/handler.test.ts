@@ -896,5 +896,54 @@ describe("admin-api handler", () => {
         hasReturn: false,
       });
     });
+
+    it("GET /admin/dashboard/summary aggregates this-month/last-month KPIs, a daily trend, recent orders, and inventory", async () => {
+      const now = new Date();
+      const thisMonthPlacedAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 12));
+      fakeDb = createFakeDb([
+        [
+          {
+            id: "o1",
+            productId: "p1",
+            channel: "ebay",
+            status: "DELIVERED",
+            placedAt: thisMonthPlacedAt,
+            profitFinalizedAt: null,
+            finalizedNetProfitUsdCents: null,
+          },
+        ], // relevantOrders
+        [{ id: "p1", title: "T1", sku: "sku-1" }], // products
+      ]);
+      getLiveOrderProfitMock.mockReturnValueOnce({ revenueUsdCents: 10000, costUsdCents: 6000, netProfitUsdCents: 4000, profitMarginBasisPoints: 4000 });
+      getInventoryBreakdownMock.mockResolvedValueOnce({ productId: "p1", onHand: 5, reserved: 1, available: 2, safetyBuffer: 3, sellableByChannel: {} });
+
+      const res = await callHandler(makeEvent("GET", "/admin/dashboard/summary"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.currentMonth).toMatchObject({
+        revenueUsdCents: 10000,
+        netProfitUsdCents: 4000,
+        orderCount: 1,
+        ordersByChannel: { ebay: 1 },
+      });
+      expect(parsed.previousMonth).toMatchObject({ revenueUsdCents: 0, netProfitUsdCents: 0, orderCount: 0 });
+      expect(parsed.recentOrders).toEqual([
+        expect.objectContaining({ id: "o1", productTitle: "T1", sku: "sku-1", channel: "ebay", revenueUsdCents: 10000 }),
+      ]);
+      expect(parsed.inventory).toEqual({ totalAvailable: 2, lowStockCount: 1 });
+      expect(parsed.trend).toHaveLength(14);
+    });
+
+    it("GET /admin/dashboard/summary returns zeroed KPIs and an empty recent-orders list with no real orders yet", async () => {
+      fakeDb = createFakeDb([[], []]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/dashboard/summary"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.currentMonth).toMatchObject({ revenueUsdCents: 0, orderCount: 0, profitMarginBasisPoints: null });
+      expect(parsed.recentOrders).toEqual([]);
+      expect(parsed.inventory).toEqual({ totalAvailable: 0, lowStockCount: 0 });
+      expect(getLiveOrderProfitMock).not.toHaveBeenCalled();
+    });
   });
 });
