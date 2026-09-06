@@ -4,6 +4,7 @@ import type { AuditLogEntry } from "@ai-ec/core";
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 
 export default function AuditLogPage() {
   const { ready } = useRequireAuth();
@@ -17,33 +18,43 @@ export default function AuditLogPage() {
       .finally(() => setLoading(false));
   }, [ready]);
 
-  if (!ready || loading) return <p>読み込み中...</p>;
-
   return (
-    <div>
-      <h1>監査ログ</h1>
-      <table>
-        <thead>
-          <tr>
-            <th>日時</th>
-            <th>実行者</th>
-            <th>操作</th>
-            <th>対象</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((entry) => (
-            <tr key={entry.id}>
-              <td>{new Date(entry.createdAt).toLocaleString("ja-JP")}</td>
-              <td>{entry.actor}</td>
-              <td>{entry.action}</td>
-              <td>
-                {entry.entityType}:{entry.entityId}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="page">
+      <div className="page-header">
+        <h1>監査ログ</h1>
+      </div>
+      {!ready || loading ? (
+        <SkeletonRows />
+      ) : entries.length === 0 ? (
+        <div className="table-wrapper">
+          <EmptyState>ログはまだありません。</EmptyState>
+        </div>
+      ) : (
+        <div className="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>日時</th>
+                <th>実行者</th>
+                <th>操作</th>
+                <th>対象</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr key={entry.id}>
+                  <td style={{ whiteSpace: "nowrap" }}>{new Date(entry.createdAt).toLocaleString("ja-JP")}</td>
+                  <td>{entry.actor}</td>
+                  <td>{entry.action}</td>
+                  <td>
+                    {entry.entityType}:{entry.entityId}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

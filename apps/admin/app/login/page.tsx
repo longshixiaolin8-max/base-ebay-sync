@@ -2,13 +2,23 @@
 
 import { confirmSignIn, signIn } from "aws-amplify/auth";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import QRCode from "qrcode";
+import { type FormEvent, useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 
 type Stage =
   | { step: "credentials" }
   | { step: "totp-setup"; sharedSecret: string; setupUri: string }
   | { step: "totp-code" };
+
+function Brand() {
+  return (
+    <div className="auth-brand">
+      <span className="app-brand-mark">AI</span>
+      <strong>AI EC運営プラットフォーム</strong>
+    </div>
+  );
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,6 +28,25 @@ export default function LoginPage() {
   const [stage, setStage] = useState<Stage>({ step: "credentials" });
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (stage.step !== "totp-setup") {
+      setQrDataUrl(null);
+      return;
+    }
+    let cancelled = false;
+    QRCode.toDataURL(stage.setupUri, { width: 200, margin: 1 })
+      .then((url) => {
+        if (!cancelled) setQrDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stage]);
 
   function handleNextStep(nextStep: { signInStep: string; totpSetupDetails?: { sharedSecret: string; getSetupUri: (appName: string) => URL } }) {
     if (nextStep.signInStep === "CONTINUE_SIGN_IN_WITH_TOTP_SETUP" && nextStep.totpSetupDetails) {
@@ -74,71 +103,77 @@ export default function LoginPage() {
 
   if (stage.step === "totp-setup" || stage.step === "totp-code") {
     return (
-      <div style={{ maxWidth: 360, margin: "4rem auto" }}>
-        <h1>認証アプリの確認コード</h1>
-        {stage.step === "totp-setup" && (
-          <div style={{ marginBottom: "1rem", fontSize: "0.85rem" }}>
-            <p>初回ログインです。認証アプリ(Google Authenticator等)でこのシークレットキーを登録してください:</p>
-            <code style={{ display: "block", padding: "0.5rem", background: "#f0f0f0", wordBreak: "break-all" }}>
-              {stage.sharedSecret}
-            </code>
-          </div>
-        )}
-        <form onSubmit={onSubmitCode} style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-          <label>
-            6桁の確認コード
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{6}"
-              required
-              autoFocus
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              style={{ width: "100%", padding: "0.5rem" }}
-            />
-          </label>
-          {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
-          <button type="submit" disabled={submitting}>
-            {submitting ? "確認中..." : "確認してサインイン"}
-          </button>
-        </form>
+      <div className="auth-shell">
+        <div className="auth-card">
+          <Brand />
+          <h1>認証アプリの確認コード</h1>
+          {stage.step === "totp-setup" && (
+            <div style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
+              <p style={{ margin: 0 }}>
+                初回ログインです。認証アプリ(Google Authenticator、1Password等)でQRコードを読み取るか、下のキーを手動で登録してください。
+              </p>
+              {qrDataUrl && (
+                <div className="qr-wrap">
+                  <img src={qrDataUrl} alt="TOTP設定用QRコード" width={200} height={200} />
+                </div>
+              )}
+              <code style={{ display: "block", padding: "0.5rem", background: "var(--neutral-soft)", borderRadius: 6, wordBreak: "break-all" }}>
+                {stage.sharedSecret}
+              </code>
+            </div>
+          )}
+          <form onSubmit={onSubmitCode} style={{ marginTop: "1.25rem" }}>
+            <div className="auth-field">
+              <label>
+                6桁の確認コード
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  required
+                  autoFocus
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                />
+              </label>
+            </div>
+            {error && <p className="auth-error">{error}</p>}
+            <button type="submit" disabled={submitting} style={{ width: "100%" }}>
+              {submitting ? "確認中..." : "確認してサインイン"}
+            </button>
+          </form>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ maxWidth: 360, margin: "4rem auto" }}>
-      <h1>管理者ログイン</h1>
-      <form onSubmit={onSubmitCredentials} style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-        <label>
-          メールアドレス
-          <input
-            type="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            style={{ width: "100%", padding: "0.5rem" }}
-          />
-        </label>
-        <label>
-          パスワード
-          <input
-            type="password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={{ width: "100%", padding: "0.5rem" }}
-          />
-        </label>
-        {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
-        <button type="submit" disabled={submitting}>
-          {submitting ? "サインイン中..." : "サインイン"}
-        </button>
-      </form>
-      <p style={{ fontSize: "0.8rem", color: "#666", marginTop: "1rem" }}>
-        アカウントは管理者が事前に発行します(セルフサインアップ不可)。このユーザープールは認証アプリによる確認コードの入力が必須です。
-      </p>
+    <div className="auth-shell">
+      <div className="auth-card">
+        <Brand />
+        <h1>管理者ログイン</h1>
+        <form onSubmit={onSubmitCredentials} style={{ marginTop: "1.25rem" }}>
+          <div className="auth-field">
+            <label>
+              メールアドレス
+              <input type="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+            </label>
+          </div>
+          <div className="auth-field">
+            <label>
+              パスワード
+              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+            </label>
+          </div>
+          {error && <p className="auth-error">{error}</p>}
+          <button type="submit" disabled={submitting} style={{ width: "100%" }}>
+            {submitting ? "サインイン中..." : "サインイン"}
+          </button>
+        </form>
+        <p className="auth-footnote">
+          アカウントは管理者が事前に発行します(セルフサインアップ不可)。このユーザープールは認証アプリによる確認コードの入力が必須です。
+        </p>
+      </div>
     </div>
   );
 }

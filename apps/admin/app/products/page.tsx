@@ -4,6 +4,8 @@ import type { ProductMaster } from "@ai-ec/core";
 import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { SkeletonRows, EmptyState } from "@/components/Skeleton";
+import { useToast } from "@/components/Toast";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "badge",
@@ -23,6 +25,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 export default function ProductsPage() {
   const { ready } = useRequireAuth();
+  const { notify } = useToast();
   const [products, setProducts] = useState<ProductMaster[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -42,52 +45,65 @@ export default function ProductsPage() {
     setBusyId(id);
     try {
       await apiPost(`/admin/products/${id}/approve-ebay-listing`);
+      notify("eBayへの出品を承認しました。", "success");
       await load();
     } catch (err) {
-      alert(`承認に失敗しました: ${(err as Error).message}`);
+      notify(`承認に失敗しました: ${(err as Error).message}`);
     } finally {
       setBusyId(null);
     }
   }
 
-  if (!ready || loading) return <p>読み込み中...</p>;
-
   return (
-    <div>
-      <h1>商品マスター</h1>
-      <p style={{ color: "#666", fontSize: "0.9rem" }}>
-        eBayへの出品は必ず人間の承認が必要です。「AI生成済み・承認待ち」の商品はAIが生成した英語タイトル/説明を確認のうえ承認してください。
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>SKU</th>
-            <th>商品名(BASE)</th>
-            <th>価格(円)</th>
-            <th>ステータス</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {products.map((p) => (
-            <tr key={p.id}>
-              <td>{p.sku}</td>
-              <td>{p.title}</td>
-              <td>{p.priceJpy.toLocaleString()}</td>
-              <td>
-                <span className={STATUS_BADGE[p.status] ?? "badge"}>{STATUS_LABEL[p.status] ?? p.status}</span>
-              </td>
-              <td>
-                {p.status === "ai_generated" && (
-                  <button onClick={() => approve(p.id)} disabled={busyId === p.id}>
-                    {busyId === p.id ? "処理中..." : "承認してeBayへ出品"}
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="page">
+      <div className="page-header">
+        <div>
+          <h1>商品マスター</h1>
+          <p className="page-lead">
+            eBayへの出品は必ず人間の承認が必要です。「AI生成済み・承認待ち」の商品はAIが生成した英語タイトル/説明を確認のうえ承認してください。
+          </p>
+        </div>
+      </div>
+      {!ready || loading ? (
+        <SkeletonRows />
+      ) : products.length === 0 ? (
+        <div className="table-wrapper">
+          <EmptyState>商品がまだ登録されていません。</EmptyState>
+        </div>
+      ) : (
+        <div className="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>商品名(BASE)</th>
+                <th>価格(円)</th>
+                <th>ステータス</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.sku}</td>
+                  <td>{p.title}</td>
+                  <td>{p.priceJpy.toLocaleString()}</td>
+                  <td>
+                    <span className={STATUS_BADGE[p.status] ?? "badge"}>{STATUS_LABEL[p.status] ?? p.status}</span>
+                  </td>
+                  <td>
+                    {p.status === "ai_generated" && (
+                      <button onClick={() => approve(p.id)} disabled={busyId === p.id}>
+                        {busyId === p.id ? "処理中..." : "承認してeBayへ出品"}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

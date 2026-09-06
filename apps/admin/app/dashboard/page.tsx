@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
+import { SkeletonRows } from "@/components/Skeleton";
 
 export default function DashboardPage() {
   const { ready } = useRequireAuth();
@@ -25,39 +26,47 @@ export default function DashboardPage() {
       .finally(() => setLoading(false));
   }, [ready]);
 
-  if (!ready || loading) return <p>読み込み中...</p>;
-
   const pendingApproval = products.filter((p) => p.status === "ai_generated").length;
   const active = products.filter((p) => p.status === "active").length;
   const soldOut = products.filter((p) => p.status === "sold_out").length;
 
   return (
-    <div>
-      <h1>ダッシュボード</h1>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1rem", marginTop: "1rem" }}>
-        <StatCard label="商品数" value={products.length} />
-        <StatCard label="eBay出品承認待ち" value={pendingApproval} href="/products" />
-        <StatCard label="出品中" value={active} />
-        <StatCard label="売り切れ" value={soldOut} />
-        <StatCard label="未解決の同期エラー" value={syncErrors.length} href="/sync-errors" danger={syncErrors.length > 0} />
+    <div className="page">
+      <div className="page-header">
+        <h1>ダッシュボード</h1>
       </div>
+      {!ready || loading ? (
+        <SkeletonRows count={2} />
+      ) : (
+        <div className="stat-grid">
+          <StatCard label="商品数" value={products.length} href="/products" />
+          <StatCard label="eBay出品承認待ち" value={pendingApproval} href="/products" />
+          <StatCard label="出品中" value={active} href="/commerce" />
+          <StatCard label="売り切れ" value={soldOut} href="/products" />
+          <StatCard
+            label="未解決の同期エラー"
+            value={syncErrors.length}
+            href="/sync-errors"
+            danger={syncErrors.length > 0}
+          />
+        </div>
+      )}
     </div>
   );
 }
 
 function StatCard({ label, value, href, danger }: { label: string; value: number; href?: string; danger?: boolean }) {
   const content = (
-    <div
-      style={{
-        border: "1px solid var(--border)",
-        borderRadius: 8,
-        padding: "1rem",
-        color: danger ? "var(--danger)" : undefined,
-      }}
-    >
-      <div style={{ fontSize: "1.75rem", fontWeight: 700 }}>{value}</div>
-      <div style={{ fontSize: "0.85rem", color: "#666" }}>{label}</div>
-    </div>
+    <>
+      <div className={`stat-value${danger ? " danger" : ""}`}>{value}</div>
+      <div className="stat-label">{label}</div>
+    </>
   );
-  return href ? <Link href={href}>{content}</Link> : content;
+  return href ? (
+    <Link href={href} className="stat-card">
+      {content}
+    </Link>
+  ) : (
+    <div className="stat-card">{content}</div>
+  );
 }
