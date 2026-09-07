@@ -5,6 +5,7 @@ import { AdminHostingStack } from "../lib/admin-hosting-stack.js";
 import { ApiCoreStack } from "../lib/api-core-stack.js";
 import { ApiStack } from "../lib/api-stack.js";
 import { AuthStack } from "../lib/auth-stack.js";
+import { CloudFrontStack } from "../lib/cloudfront-stack.js";
 import { DatabaseStack } from "../lib/database-stack.js";
 import { loadConfig } from "../lib/config.js";
 import { GithubOidcStack } from "../lib/github-oidc-stack.js";
@@ -13,6 +14,7 @@ import { MonitoringStack } from "../lib/monitoring-stack.js";
 import { QueueStack } from "../lib/queue-stack.js";
 import { SecretsStack } from "../lib/secrets-stack.js";
 import { StorageStack } from "../lib/storage-stack.js";
+import { WafStack } from "../lib/waf-stack.js";
 
 const app = new cdk.App();
 
@@ -105,6 +107,28 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
 api.addStackDependency(apiCore);
+
+// WAF for the API (task from the commercial-readiness hardening round): HttpApi can't
+// take a WAF Web ACL directly, so this stands up a parallel, WAF-protected CloudFront
+// entry point in front of it -- purely additive, no existing stack depends on either of
+// these two, and nothing (the admin app, BASE's OAuth redirect_uri, eBay's registered
+// webhook destination) is switched over to it yet. See cloudfront-stack.ts's own doc
+// comment for why: both of those are already registered live against the direct
+// execute-api URL, and BASE's side of that can only be changed in BASE's own console.
+const waf = new WafStack(app, `${stackPrefix}-Waf`, {
+  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
+  tags,
+  crossRegionReferences: true,
+});
+const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
+  env,
+  tags,
+  crossRegionReferences: true,
+  api: apiCore.api,
+  webAclArn: waf.webAcl.attrArn,
+});
+cloudfrontApi.addStackDependency(apiCore);
+cloudfrontApi.addStackDependency(waf);
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,
