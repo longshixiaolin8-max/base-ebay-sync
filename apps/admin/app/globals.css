@@ -166,7 +166,13 @@ h2 {
 .page {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 1.75rem 1.5rem 3rem;
+  padding: 1.75rem calc(1.5rem + env(safe-area-inset-right)) 3rem calc(1.5rem + env(safe-area-inset-left));
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: 1rem calc(1rem + env(safe-area-inset-right)) 2rem calc(1rem + env(safe-area-inset-left));
+  }
 }
 
 .page-header {
@@ -228,7 +234,33 @@ h2 {
   flex-direction: column;
   background: var(--surface);
   border-right: 1px solid var(--border);
-  padding: 1.1rem 0.85rem;
+  padding: 1.1rem 0.85rem calc(1.1rem + env(safe-area-inset-bottom));
+}
+
+/* ---------- Mobile nav: off-canvas sidebar drawer ---------- */
+
+@media (max-width: 900px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 60;
+    width: min(var(--sidebar-w), 85vw);
+    height: 100dvh;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-md);
+  }
+
+  .sidebar[data-open="true"] {
+    transform: translateX(0);
+  }
+}
+
+.sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(0, 0, 0, 0.45);
 }
 
 .sidebar-brand {
@@ -246,7 +278,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  height: 38px;
+  height: 44px;
   padding: 0 0.6rem;
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
@@ -429,15 +461,45 @@ h2 {
   align-items: center;
   gap: 1rem;
   height: var(--header-h);
-  padding: 0 1.5rem;
+  padding: 0 calc(1.5rem + env(safe-area-inset-right)) 0 calc(1.5rem + env(safe-area-inset-left));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  /* A subtle native-app-like elevation for content scrolling underneath the sticky bar;
+     backdrop-filter is unsupported-but-harmless (falls back to the opaque background
+     above) on browsers that don't have it. */
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.icon-button.menu-button {
+  display: none;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .icon-button.menu-button {
+    display: inline-flex;
+  }
+
+  .app-topbar {
+    gap: 0.6rem;
+    padding: 0 calc(1rem + env(safe-area-inset-right)) 0 calc(1rem + env(safe-area-inset-left));
+  }
 }
 
 .topbar-breadcrumb {
   font-size: 0.85rem;
   color: var(--fg-subtle);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 480px) {
+  .topbar-breadcrumb-prefix {
+    display: none;
+  }
 }
 
 .topbar-breadcrumb strong {
@@ -449,6 +511,13 @@ h2 {
   flex: 1;
   max-width: 420px;
   position: relative;
+  min-width: 0;
+}
+
+@media (max-width: 480px) {
+  .topbar-search {
+    display: none;
+  }
 }
 
 .topbar-search input {
@@ -483,8 +552,8 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   border-radius: var(--radius-sm);
   border: none;
   background: transparent;
@@ -624,7 +693,7 @@ input:focus {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 0.85rem;
 }
 
@@ -1255,6 +1324,12 @@ tbody tr:hover {
   padding: 2rem 1.75rem;
 }
 
+@media (max-width: 480px) {
+  .auth-card {
+    padding: 1.5rem 1.25rem;
+  }
+}
+
 .auth-brand {
   display: flex;
   align-items: center;
@@ -1297,7 +1372,13 @@ tbody tr:hover {
 .landing {
   max-width: 960px;
   margin: 0 auto;
-  padding: 1.5rem 1.5rem 3rem;
+  padding: 1.5rem calc(1.5rem + env(safe-area-inset-right)) 3rem calc(1.5rem + env(safe-area-inset-left));
+}
+
+@media (max-width: 480px) {
+  .landing {
+    padding: 1rem calc(1rem + env(safe-area-inset-right)) 2rem calc(1rem + env(safe-area-inset-left));
+  }
 }
 
 .landing-topbar {
@@ -1339,6 +1420,16 @@ tbody tr:hover {
   line-height: 1.75;
   max-width: 56ch;
   margin: 0 auto;
+}
+
+@media (max-width: 480px) {
+  .landing-hero h1 {
+    font-size: 1.5rem;
+  }
+
+  .landing-hero-lead {
+    font-size: 0.9rem;
+  }
 }
 
 .landing-hero-cta {

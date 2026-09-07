@@ -7,7 +7,8 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
-import { BellIcon, SearchIcon } from "@/components/icons";
+import { useMobileNav } from "@/components/MobileNav";
+import { BellIcon, MenuIcon, SearchIcon } from "@/components/icons";
 
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "ダッシュボード",
@@ -26,6 +27,7 @@ interface TopbarProps {
 
 export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
   const pathname = usePathname();
+  const { toggle } = useMobileNav();
   const isLoginPage = pathname?.replace(/\/$/, "") === "/login";
   const [email, setEmail] = useState<string | null>(null);
   const [errorCount, setErrorCount] = useState(0);
@@ -49,8 +51,12 @@ export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
 
   return (
     <header className="app-topbar">
+      <button type="button" className="icon-button menu-button" onClick={toggle} aria-label="メニューを開く">
+        <MenuIcon />
+      </button>
       <div className="topbar-breadcrumb">
-        ワークスペース / <strong>{title}</strong>
+        <span className="topbar-breadcrumb-prefix">ワークスペース / </span>
+        <strong>{title}</strong>
       </div>
       <div className="topbar-search">
         <SearchIcon />

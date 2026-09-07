@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
+import { MobileNavProvider } from "@/components/MobileNav";
 import { Sidebar } from "@/components/Sidebar";
+import { SidebarBackdrop } from "@/components/SidebarBackdrop";
 import { ToastProvider } from "@/components/Toast";
 
 export const metadata: Metadata = {
@@ -28,10 +30,13 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       </head>
       <body>
         <ToastProvider>
-          <div className="app-shell">
-            <Sidebar />
-            <div className="app-main">{children}</div>
-          </div>
+          <MobileNavProvider>
+            <div className="app-shell">
+              <Sidebar />
+              <SidebarBackdrop />
+              <div className="app-main">{children}</div>
+            </div>
+          </MobileNavProvider>
         </ToastProvider>
       </body>
     </html>

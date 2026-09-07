@@ -7,6 +7,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured, getApiBaseUrl } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
+import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AlertIcon, BoxIcon, CoinIcon, DashboardIcon, FileIcon, SyncIcon } from "@/components/icons";
 
@@ -32,6 +33,7 @@ function statusDotClass(state?: ChannelState["state"]): string {
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { open, close } = useMobileNav();
   const [email, setEmail] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [errorCount, setErrorCount] = useState(0);
@@ -44,6 +46,13 @@ export function Sidebar() {
   // "/" itself, now the public landing page (Phase 4) rather than a redirect to /dashboard.
   const normalizedPath = pathname?.replace(/\/$/, "");
   const isPublicPage = normalizedPath === "" || normalizedPath === "/login" || normalizedPath === "/signup";
+
+  // Tapping a nav link should close the drawer on mobile, same as tapping the backdrop
+  // -- staying open after navigating reads as broken, not intentional. A no-op on
+  // desktop, where the sidebar is never in the closed state to begin with.
+  useEffect(() => {
+    close();
+  }, [pathname, close]);
 
   useEffect(() => {
     if (isPublicPage) return;
@@ -76,7 +85,7 @@ export function Sidebar() {
   const initial = email ? email[0]!.toUpperCase() : "?";
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" data-open={open}>
       <Link href="/dashboard" className="app-brand sidebar-brand">
         <span className="app-brand-mark">AI</span>
         AI EC運営プラットフォーム

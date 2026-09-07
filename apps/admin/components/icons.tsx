@@ -166,3 +166,14 @@ export function CheckIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Hamburger button that opens the sidebar drawer on mobile -- see MobileNav.tsx. */
+export function MenuIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M3 6h18" />
+      <path d="M3 12h18" />
+      <path d="M3 18h18" />
+    </Icon>
+  );
+}
