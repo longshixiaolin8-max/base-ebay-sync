@@ -500,6 +500,56 @@ importers:
       drizzle-orm:
         specifier: ^0.36.1
         version: 0.36.4(@aws-sdk/client-rds-data@3.1120.0)(@types/react@18.3.31)(react@18.3.1)
+      stripe:
+        specifier: ^22.6.1
+        version: 22.6.1(@types/node@20.19.43)
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
+  services/lambdas/signup:
+    dependencies:
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: ^3.687.0
+        version: 3.1127.0
+      stripe:
+        specifier: ^22.6.1
+        version: 22.6.1(@types/node@20.19.43)
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
+  services/lambdas/stripe-webhook:
+    dependencies:
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+      stripe:
+        specifier: ^22.6.1
+        version: 22.6.1(@types/node@20.19.43)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -588,6 +638,10 @@ packages:
     resolution: {integrity: sha512-Ln7lPnXhssqTwCDW2uxyivW9BEnpt12Bx0T3F2JzwsfKF+X+LJxdC1S7F9UVrS6ShJ7sIaaezT5+nNGjpQ8iEA==}
     engines: {node: '>=20.0.0'}
 
+  '@aws-sdk/client-cognito-identity-provider@3.1127.0':
+    resolution: {integrity: sha512-h0mINSImCeIbXxvr3b4e1ae5ZU5bedsyXUH13peYmhtjOW/fH/vZWwf01hnv371WAa/P4HlqaYJ3aF7yJ2BD3g==}
+    engines: {node: '>=20.0.0'}
+
   '@aws-sdk/client-firehose@3.1120.0':
     resolution: {integrity: sha512-vrxCABREuvdKgjNIyYsGlJ7gN5n8URF+ndiDQj8kxgNyzQpWob7LjVbWBB5OaWfpmY7Vjmn7P5zQl4ffGXAh2w==}
     engines: {node: '>=20.0.0'}
@@ -634,6 +688,10 @@ packages:
 
   '@aws-sdk/credential-provider-node@3.972.81':
     resolution: {integrity: sha512-Rml+WitoFvXmv6JZ18U/xGdGDGGvB/mOin0ya0lTnTrdC0Z1lrVxTYh7iNklZBcvcRMrs4DoEf6xy1KWyrLQQw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/credential-provider-node@3.972.82':
+    resolution: {integrity: sha512-znDkEOGXB8W3kG1LJUKP3foBZY/9qLM0eil/DxWXSp37XsdsRLQHE/d/OaCGGVgKpA6znR38h/+INk8do1FjiA==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/credential-provider-process@3.972.70':
@@ -2631,6 +2689,15 @@ packages:
     resolution: {integrity: sha512-6fPc+R4ihwqP6N/aIv2f1gMH8lOVtWQHoqC4yK6oSDVVocumAsfCqjkXnqiYMhmMwS/mEHLp7Vehlt3ql6lEig==}
     engines: {node: '>=8'}
 
+  stripe@22.6.1:
+    resolution: {integrity: sha512-hAKSkGeVt2u46TRYhmnvwmVHxBNtOCJnPjc+SH5sP2B2ypElYzAAY3Ljx0Ar8C2w8nfpFQiZ95qoDCDsFkXMTA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@types/node': '>=18'
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
+
   strnum@2.4.2:
     resolution: {integrity: sha512-rDG3Ah4TV0k1hWvLSzkZtMmLN9+eS+h3knq4MP6A42Y3Yh5qGNnOUs1jJkoSr8FG5dsL28c7KgkIBzSEykqtuw==}
 
@@ -2951,6 +3018,17 @@ snapshots:
       '@smithy/types': 4.17.2
       tslib: 2.8.1
 
+  '@aws-sdk/client-cognito-identity-provider@3.1127.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/credential-provider-node': 3.972.82
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/fetch-http-handler': 5.7.2
+      '@smithy/node-http-handler': 4.11.3
+      '@smithy/types': 4.17.2
+      tslib: 2.8.1
+
   '@aws-sdk/client-firehose@3.1120.0':
     dependencies:
       '@aws-sdk/core': 3.977.9
@@ -3073,6 +3151,20 @@ snapshots:
       tslib: 2.8.1
 
   '@aws-sdk/credential-provider-node@3.972.81':
+    dependencies:
+      '@aws-sdk/credential-provider-env': 3.972.70
+      '@aws-sdk/credential-provider-http': 3.972.72
+      '@aws-sdk/credential-provider-ini': 3.973.15
+      '@aws-sdk/credential-provider-process': 3.972.70
+      '@aws-sdk/credential-provider-sso': 3.973.14
+      '@aws-sdk/credential-provider-web-identity': 3.972.76
+      '@aws-sdk/types': 3.974.5
+      '@smithy/core': 3.33.3
+      '@smithy/credential-provider-imds': 4.5.2
+      '@smithy/types': 4.17.2
+      tslib: 2.8.1
+
+  '@aws-sdk/credential-provider-node@3.972.82':
     dependencies:
       '@aws-sdk/credential-provider-env': 3.972.70
       '@aws-sdk/credential-provider-http': 3.972.72
@@ -4756,6 +4848,10 @@ snapshots:
       ansi-regex: 5.0.1
 
   strip-json-comments@3.1.1: {}
+
+  stripe@22.6.1(@types/node@20.19.43):
+    optionalDependencies:
+      '@types/node': 20.19.43
 
   strnum@2.4.2:
     dependencies:

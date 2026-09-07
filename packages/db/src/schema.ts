@@ -8,6 +8,16 @@ import { boolean, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } 
 export const tenants = pgTable("tenants", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
+  /** Single flat plan for now (Phase 2 of the SaaS conversion) -- multi-tier pricing and
+   *  actual feature/quota enforcement are a later phase, not this column's job. */
+  plan: text("plan").notNull().default("standard"),
+  /** 'pending_payment' (created via self-service signup, checkout not completed yet) |
+   *  'active' | 'past_due' | 'canceled'. Defaults to 'active' so the column add itself
+   *  never touches the existing bootstrap tenant's access -- self-service signup
+   *  explicitly overrides this to 'pending_payment' at insert time. */
+  status: text("status").notNull().default("active"),
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

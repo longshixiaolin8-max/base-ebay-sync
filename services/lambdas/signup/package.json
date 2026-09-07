@@ -1,23 +1,17 @@
 {
-  "name": "@ai-ec/lambda-shared",
+  "name": "@ai-ec/lambda-signup",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@ai-ec/adapter-base": "workspace:*",
-    "@ai-ec/adapter-ebay": "workspace:*",
-    "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
-    "@aws-sdk/client-secrets-manager": "^3.687.0",
-    "@aws-sdk/client-sqs": "^3.687.0",
-    "drizzle-orm": "^0.36.1",
+    "@ai-ec/lambda-shared": "workspace:*",
+    "@aws-sdk/client-cognito-identity-provider": "^3.687.0",
     "stripe": "^22.6.1"
   },
   "devDependencies": {

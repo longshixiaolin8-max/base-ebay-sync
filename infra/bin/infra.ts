@@ -68,9 +68,14 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     base: secrets.baseAppCredentials,
     ebay: secrets.ebayAppCredentials,
     openai: secrets.openAiApiKey,
+    stripe: secrets.stripeAppCredentials,
+    signup: secrets.signupCredentials,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
   apiUrl: apiCore.api.apiEndpoint,
+  adminAppUrl: adminHosting.url,
+  userPoolArn: auth.userPool.userPoolArn,
+  userPoolId: auth.userPool.userPoolId,
   queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
   dlqs: { aiGenerate: queues.aiGenerate.dlq, ebaySync: queues.ebaySync.dlq, inventorySync: queues.inventorySync.dlq },
   productImagesBucket: storage.productImagesBucket,
@@ -80,6 +85,7 @@ lambdas.addStackDependency(secrets);
 lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
 lambdas.addStackDependency(apiCore);
+lambdas.addStackDependency(auth);
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
@@ -93,6 +99,8 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   oauthEbayAuthorizeFn: lambdas.oauthEbayAuthorizeFn,
   oauthEbayCallbackFn: lambdas.oauthEbayCallbackFn,
   ebayWebhookFn: lambdas.ebayWebhookFn,
+  signupHandlerFn: lambdas.signupHandlerFn,
+  stripeWebhookFn: lambdas.stripeWebhookFn,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);

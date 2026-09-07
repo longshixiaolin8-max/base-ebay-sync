@@ -24,6 +24,7 @@ import {
   getInventoryBreakdown,
   getLiveOrderProfit,
   getSnsContent,
+  getTenantBillingStatus,
   InvalidOrderTransitionError,
   inventoryMaster,
   listOrders,
@@ -41,6 +42,7 @@ import {
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  createStripeClient,
   enqueue,
   fetchFxRate,
   getAppCredentials,
@@ -54,6 +56,7 @@ import {
   requireEnv,
   signState,
   type EbayAppCredentials,
+  type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, desc, eq, gte, isNull, or } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
@@ -112,6 +115,38 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
   try {
     const tenantId = tenantIdFromEvent(event);
+
+    // Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing").
+    // A tenant created via /signup starts 'pending_payment' and only becomes usable once
+    // the Stripe webhook confirms a completed checkout -- every other route is gated on
+    // that, except the two billing routes themselves (an inactive tenant must still be
+    // able to see *why* it's blocked and fix it via the Stripe portal). The existing real
+    // tenant is unaffected: its status is 'active' from the migration's column default.
+    const billingExemptRoutes = new Set(["GET /admin/billing/status", "POST /admin/billing/portal-session"]);
+    if (!billingExemptRoutes.has(`${method} ${path}`)) {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing || billing.status !== "active") {
+        return json(402, { error: "billing_inactive", status: billing?.status ?? "unknown" });
+      }
+    }
+
+    if (method === "GET" && path === "/admin/billing/status") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing) return json(404, { error: "not_found" });
+      return json(200, { plan: billing.plan, status: billing.status });
+    }
+
+    if (method === "POST" && path === "/admin/billing/portal-session") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing?.stripeCustomerId) return json(400, { error: "no_stripe_customer" });
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      const stripe = createStripeClient(creds);
+      const session = await stripe.billingPortal.sessions.create({
+        customer: billing.stripeCustomerId,
+        return_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
+      });
+      return json(200, { url: session.url });
+    }
 
     if (method === "GET" && path === "/admin/products") {
       const products = await db

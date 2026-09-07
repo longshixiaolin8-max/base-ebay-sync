@@ -26,6 +26,8 @@ export class SecretsStack extends cdk.Stack {
   readonly baseAppCredentials: secretsmanager.Secret;
   readonly ebayAppCredentials: secretsmanager.Secret;
   readonly openAiApiKey: secretsmanager.Secret;
+  readonly stripeAppCredentials: secretsmanager.Secret;
+  readonly signupCredentials: secretsmanager.Secret;
   readonly oauthTokenPrefix: string;
 
   constructor(scope: Construct, id: string, props: SecretsStackProps) {
@@ -48,6 +50,21 @@ export class SecretsStack extends cdk.Stack {
     this.openAiApiKey = new secretsmanager.Secret(this, "OpenAiApiKey", {
       secretName: `ai-ec-platform/${envSegment}app-credentials/openai`,
       description: "OpenAI API key, only used when AI_PROVIDER=openai. Fill in manually after deploy.",
+    });
+
+    // Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing").
+    // { secretKey, publishableKey, priceId, webhookSigningSecret } -- test-mode only for
+    // now, same manual-fill-in-after-deploy pattern as every other credential above.
+    this.stripeAppCredentials = new secretsmanager.Secret(this, "StripeAppCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/stripe`,
+      description: "Stripe test-mode secretKey/publishableKey/priceId/webhookSigningSecret. Fill in manually after deploy.",
+    });
+
+    // { inviteCode } -- the one shared beta invite code /signup checks against. A single
+    // shared string, not per-invitee tracking; revisit if that's ever needed.
+    this.signupCredentials = new secretsmanager.Secret(this, "SignupCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/signup`,
+      description: "Shared invite code required by the public /signup flow. Fill in manually after deploy.",
     });
   }
 }

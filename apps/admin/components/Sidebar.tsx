@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured, getApiBaseUrl } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { AlertIcon, BoxIcon, DashboardIcon, FileIcon, SyncIcon } from "@/components/icons";
+import { AlertIcon, BoxIcon, CoinIcon, DashboardIcon, FileIcon, SyncIcon } from "@/components/icons";
 
 const LINKS = [
   { href: "/dashboard", label: "ダッシュボード", icon: DashboardIcon },
@@ -16,6 +16,7 @@ const LINKS = [
   { href: "/commerce", label: "コマース統合", icon: SyncIcon },
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },
   { href: "/audit-log", label: "監査ログ", icon: FileIcon },
+  { href: "/billing", label: "請求", icon: CoinIcon },
 ];
 
 interface ChannelState {
@@ -38,11 +39,13 @@ export function Sidebar() {
   const [ebayState, setEbayState] = useState<ChannelState | null>(null);
   // next.config.mjs's trailingSlash:true means the real route is "/login/", not "/login" --
   // an exact-match check without normalizing this let the sidebar (and its logout button)
-  // render on top of the unauthenticated login screen in every real deploy.
-  const isLoginPage = pathname?.replace(/\/$/, "") === "/login";
+  // render on top of the unauthenticated login screen in every real deploy. /signup is the
+  // other public, unauthenticated page (Phase 2's self-service signup flow).
+  const normalizedPath = pathname?.replace(/\/$/, "");
+  const isPublicPage = normalizedPath === "/login" || normalizedPath === "/signup";
 
   useEffect(() => {
-    if (isLoginPage) return;
+    if (isPublicPage) return;
     ensureAmplifyConfigured();
     fetchUserAttributes()
       .then((attrs) => setEmail(attrs.email ?? null))
@@ -56,9 +59,9 @@ export function Sidebar() {
     apiGet<ChannelState>("/admin/sync/state?channel=ebay")
       .then(setEbayState)
       .catch(() => {});
-  }, [isLoginPage]);
+  }, [isPublicPage]);
 
-  if (isLoginPage) return null;
+  if (isPublicPage) return null;
 
   async function handleSignOut() {
     setSigningOut(true);

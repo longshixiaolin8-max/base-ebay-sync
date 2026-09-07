@@ -59,6 +59,7 @@ const markSnsStatusMock = vi.fn();
 const transitionOrderStatusMock = vi.fn();
 const upsertSnsScriptMock = vi.fn();
 const computeChannelSyncStateMock = vi.fn();
+const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
 
 class InvalidOrderTransitionErrorFake extends Error {}
 
@@ -89,6 +90,7 @@ vi.mock("@ai-ec/db", () => ({
   transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
   upsertSnsScript: (...args: unknown[]) => upsertSnsScriptMock(...args),
   computeChannelSyncState: (...args: unknown[]) => computeChannelSyncStateMock(...args),
+  getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
 }));
 
 const createAIModelClientMock = vi.fn().mockReturnValue({ generateJson: vi.fn() });
@@ -110,6 +112,8 @@ const getQueueUrlsMock = vi.fn(() => ({
 let fakeDb: unknown;
 const getDbMock = vi.fn(() => fakeDb);
 const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid" });
+const billingPortalSessionsCreateMock = vi.fn().mockResolvedValue({ url: "https://billing.stripe.example/session" });
+const createStripeClientMock = vi.fn(() => ({ billingPortal: { sessions: { create: billingPortalSessionsCreateMock } } }));
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
@@ -162,6 +166,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
   signState: (...args: unknown[]) => signStateMock(...args),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
+  createStripeClient: () => createStripeClientMock(),
 }));
 
 const { handler } = await import("./handler.js");
@@ -983,6 +988,63 @@ describe("admin-api handler", () => {
       expect(signStateMock).toHaveBeenCalledWith("csecret", TENANT_A);
       expect(getAuthorizationUrlMock).toHaveBeenCalledWith("signed-state", "ru-1");
       expect(JSON.parse(res.body!)).toEqual({ url: "https://ebay.example/oauth?state=signed-state" });
+    });
+  });
+
+  describe("billing", () => {
+    beforeEach(() => {
+      getTenantBillingStatusMock.mockClear();
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+      billingPortalSessionsCreateMock.mockClear();
+    });
+
+    it("blocks every other route with 402 when the tenant isn't active", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: null });
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/products"));
+
+      expect(res.statusCode).toBe(402);
+      expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "pending_payment" });
+    });
+
+    it("GET /admin/billing/status is reachable even when the tenant is inactive", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "past_due", stripeCustomerId: "cus_1" });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "past_due" });
+    });
+
+    it("POST /admin/billing/portal-session is reachable even when the tenant is inactive, and returns the Stripe portal URL", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "past_due", stripeCustomerId: "cus_1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/portal-session"));
+
+      expect(res.statusCode).toBe(200);
+      expect(billingPortalSessionsCreateMock).toHaveBeenCalledWith({
+        customer: "cus_1",
+        return_url: "https://api.example/oauth/base/callback/billing",
+      });
+      expect(JSON.parse(res.body!)).toEqual({ url: "https://billing.stripe.example/session" });
+    });
+
+    it("POST /admin/billing/portal-session returns 400 when the tenant has no Stripe customer yet", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/portal-session"));
+
+      expect(res.statusCode).toBe(400);
+      expect(billingPortalSessionsCreateMock).not.toHaveBeenCalled();
+    });
+
+    it("allows normal routes through once the tenant is active again", async () => {
+      fakeDb = createFakeDb([[]]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/products"));
+
+      expect(res.statusCode).toBe(200);
     });
   });
 });

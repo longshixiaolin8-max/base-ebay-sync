@@ -27,9 +27,16 @@ export interface LambdaStackProps extends cdk.StackProps {
     base: secretsmanager.Secret;
     ebay: secretsmanager.Secret;
     openai: secretsmanager.Secret;
+    stripe: secretsmanager.Secret;
+    signup: secretsmanager.Secret;
   };
   oauthTokenSecretArnPattern: string;
   apiUrl: string;
+  adminAppUrl: string;
+  /** Scoped IAM resource for the signup Lambda's AdminCreateUser/AdminSetUserPassword grant --
+   *  narrower than a wildcard, matching this stack's existing scoped-secret-ARN pattern. */
+  userPoolArn: string;
+  userPoolId: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
@@ -65,6 +72,8 @@ export class LambdaStack extends cdk.Stack {
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
   readonly dlqRedriveFn: nodejs.NodejsFunction;
+  readonly signupHandlerFn: nodejs.NodejsFunction;
+  readonly stripeWebhookFn: nodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
@@ -280,6 +289,32 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
+    // --- Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing") ---
+    this.signupHandlerFn = makeFn(
+      "SignupHandler",
+      "services/lambdas/signup/src/handler.ts",
+      "handler",
+      { COGNITO_USER_POOL_ID: props.userPoolId, ADMIN_APP_URL: props.adminAppUrl },
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
+    props.appCredentialSecrets.signup.grantRead(this.signupHandlerFn);
+    this.signupHandlerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword"],
+        resources: [props.userPoolArn],
+      }),
+    );
+
+    this.stripeWebhookFn = makeFn(
+      "StripeWebhook",
+      "services/lambdas/stripe-webhook/src/handler.ts",
+      "handler",
+      {},
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.stripeWebhookFn);
+
     // --- Admin API ---
     this.adminApiFn = makeFn(
       "AdminApi",
@@ -297,6 +332,9 @@ export class LambdaStack extends cdk.Stack {
         // callback (registered against this one fixed URL) works regardless of which route
         // originally sent the operator there.
         BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
+        // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
+        // billing portal session it creates.
+        ADMIN_APP_URL: props.adminAppUrl,
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
@@ -317,6 +355,8 @@ export class LambdaStack extends cdk.Stack {
     // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
     // to fetch a single item's raw detail response (e.g. to compare against product_master).
     props.appCredentialSecrets.base.grantRead(this.adminApiFn);
+    // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
+    props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
     // Needed for the commercial-features round's AI endpoints (SNS script generation,
     // stale-product suggestions), which call Bedrock directly the same way
     // ai-generate-worker does.

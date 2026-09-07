@@ -16,6 +16,8 @@ export interface ApiStackProps extends cdk.StackProps {
   oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   oauthEbayCallbackFn: nodejs.NodejsFunction;
   ebayWebhookFn: nodejs.NodejsFunction;
+  signupHandlerFn: nodejs.NodejsFunction;
+  stripeWebhookFn: nodejs.NodejsFunction;
 }
 
 /**
@@ -205,6 +207,10 @@ export class ApiStack extends cdk.Stack {
     // id is never trusted from client input (see oauth-state.ts's StatePayload comment).
     addRoute("OauthAuthorizeUrl", apigwv2.HttpMethod.GET, "/admin/oauth/{channel}/authorize-url", adminIntegration, true);
 
+    // Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing").
+    addRoute("BillingStatus", apigwv2.HttpMethod.GET, "/admin/billing/status", adminIntegration, true);
+    addRoute("BillingPortalSession", apigwv2.HttpMethod.POST, "/admin/billing/portal-session", adminIntegration, true);
+
     // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
     // no state-changing action happens here. It was originally gated behind Cognito on the
     // assumption the admin app would call it with a session token, but no such UI was ever
@@ -247,5 +253,26 @@ export class ApiStack extends cdk.Stack {
     const ebayWebhookIntegration = new HttpLambdaIntegration("EbayWebhookIntegration", props.ebayWebhookFn);
     addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
+
+    // Public: this is what creates a Cognito session in the first place, so no session can
+    // exist yet. Gated instead by a shared invite code checked inside the handler.
+    addRoute(
+      "Signup",
+      apigwv2.HttpMethod.POST,
+      "/signup",
+      new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn),
+      false,
+    );
+
+    // Public: hit directly by Stripe, which carries no Cognito session either -- authenticity
+    // relies on the Stripe-Signature verification inside the handler, same pattern as the
+    // eBay webhook above.
+    addRoute(
+      "StripeWebhook",
+      apigwv2.HttpMethod.POST,
+      "/webhooks/stripe",
+      new HttpLambdaIntegration("StripeWebhookIntegration", props.stripeWebhookFn),
+      false,
+    );
   }
 }
