@@ -40,9 +40,10 @@ export function Sidebar() {
   // next.config.mjs's trailingSlash:true means the real route is "/login/", not "/login" --
   // an exact-match check without normalizing this let the sidebar (and its logout button)
   // render on top of the unauthenticated login screen in every real deploy. /signup is the
-  // other public, unauthenticated page (Phase 2's self-service signup flow).
+  // other public, unauthenticated page (Phase 2's self-service signup flow); "" is the root
+  // "/" itself, now the public landing page (Phase 4) rather than a redirect to /dashboard.
   const normalizedPath = pathname?.replace(/\/$/, "");
-  const isPublicPage = normalizedPath === "/login" || normalizedPath === "/signup";
+  const isPublicPage = normalizedPath === "" || normalizedPath === "/login" || normalizedPath === "/signup";
 
   useEffect(() => {
     if (isPublicPage) return;
