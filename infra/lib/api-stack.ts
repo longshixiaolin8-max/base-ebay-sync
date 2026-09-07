@@ -55,161 +55,18 @@ export class ApiStack extends cdk.Stack {
       });
     };
 
-    addRoute("GetProducts", apigwv2.HttpMethod.GET, "/admin/products", adminIntegration, true);
-    addRoute("GetProduct", apigwv2.HttpMethod.GET, "/admin/products/{id}", adminIntegration, true);
-    addRoute(
-      "ApproveEbayListing",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/approve-ebay-listing",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "DraftCondition",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/draft-condition",
-      adminIntegration,
-      true,
-    );
-    addRoute("GetSyncErrors", apigwv2.HttpMethod.GET, "/admin/sync-errors", adminIntegration, true);
-    addRoute("RetrySyncError", apigwv2.HttpMethod.POST, "/admin/sync-errors/{id}/retry", adminIntegration, true);
-    addRoute("EbayLocation", apigwv2.HttpMethod.POST, "/admin/ebay/location", adminIntegration, true);
-    addRoute("EbayPolicies", apigwv2.HttpMethod.POST, "/admin/ebay/policies", adminIntegration, true);
-    addRoute("EbayInventoryItem", apigwv2.HttpMethod.GET, "/admin/ebay/inventory-item", adminIntegration, true);
-    addRoute("EbayOffer", apigwv2.HttpMethod.GET, "/admin/ebay/offer", adminIntegration, true);
-    addRoute("EbayWebhookSetup", apigwv2.HttpMethod.POST, "/admin/ebay/webhook-setup", adminIntegration, true);
-    addRoute(
-      "EbayNotificationTopics",
-      apigwv2.HttpMethod.GET,
-      "/admin/ebay/notification-topics",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "EbayUnmanagedListings",
-      apigwv2.HttpMethod.GET,
-      "/admin/ebay/unmanaged-listings",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "LinkEbayListing",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/link-ebay-listing",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "EbayCategorySuggestions",
-      apigwv2.HttpMethod.GET,
-      "/admin/ebay/category-suggestions",
-      adminIntegration,
-      true,
-    );
-    addRoute("EbayRequiredAspects", apigwv2.HttpMethod.GET, "/admin/ebay/required-aspects", adminIntegration, true);
-    addRoute(
-      "EbayConditionPolicies",
-      apigwv2.HttpMethod.GET,
-      "/admin/ebay/condition-policies",
-      adminIntegration,
-      true,
-    );
-    addRoute("BaseProduct", apigwv2.HttpMethod.GET, "/admin/base/product", adminIntegration, true);
-    addRoute("SyncConfidence", apigwv2.HttpMethod.GET, "/admin/sync/confidence", adminIntegration, true);
-    addRoute(
-      "DynamicSafetyStock",
-      apigwv2.HttpMethod.GET,
-      "/admin/products/{id}/dynamic-safety-stock",
-      adminIntegration,
-      true,
-    );
-    addRoute("SyncTrace", apigwv2.HttpMethod.GET, "/admin/products/{id}/sync-trace", adminIntegration, true);
-    addRoute("StockoutRisk", apigwv2.HttpMethod.GET, "/admin/products/{id}/stockout-risk", adminIntegration, true);
-    addRoute("DynamicPrice", apigwv2.HttpMethod.GET, "/admin/products/{id}/dynamic-price", adminIntegration, true);
-    addRoute(
-      "PricingConfig",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/pricing-config",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "GetReconstructInventory",
-      apigwv2.HttpMethod.GET,
-      "/admin/products/{id}/reconstruct-inventory",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "ApplyReconstructInventory",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/reconstruct-inventory",
-      adminIntegration,
-      true,
-    );
-    addRoute("GetAuditLog", apigwv2.HttpMethod.GET, "/admin/audit-log", adminIntegration, true);
-
-    // --- Commercial-features round ---
-    addRoute("GetOrders", apigwv2.HttpMethod.GET, "/admin/orders", adminIntegration, true);
-    addRoute("GetProductOrders", apigwv2.HttpMethod.GET, "/admin/products/{id}/orders", adminIntegration, true);
-    addRoute("GetOrderProfit", apigwv2.HttpMethod.GET, "/admin/orders/{id}/profit", adminIntegration, true);
-    addRoute("SetOrderStatus", apigwv2.HttpMethod.POST, "/admin/orders/{id}/status", adminIntegration, true);
-    addRoute(
-      "FinalizeOrderProfit",
-      apigwv2.HttpMethod.POST,
-      "/admin/orders/{id}/finalize-profit",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "PurchaseInfo",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/purchase-info",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "InventoryBreakdown",
-      apigwv2.HttpMethod.GET,
-      "/admin/products/{id}/inventory-breakdown",
-      adminIntegration,
-      true,
-    );
-    addRoute("StaleProducts", apigwv2.HttpMethod.GET, "/admin/stale-products", adminIntegration, true);
-    addRoute(
-      "StaleSuggestion",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/stale-suggestion",
-      adminIntegration,
-      true,
-    );
-    addRoute("GetSnsContent", apigwv2.HttpMethod.GET, "/admin/products/{id}/sns", adminIntegration, true);
-    addRoute(
-      "GenerateSnsScript",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/sns/script",
-      adminIntegration,
-      true,
-    );
-    addRoute(
-      "UpdateSnsStatus",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/sns/status",
-      adminIntegration,
-      true,
-    );
-    addRoute("SyncState", apigwv2.HttpMethod.GET, "/admin/sync/state", adminIntegration, true);
-    addRoute("Slo", apigwv2.HttpMethod.GET, "/admin/slo", adminIntegration, true);
-    addRoute("CommerceDashboard", apigwv2.HttpMethod.GET, "/admin/commerce-dashboard", adminIntegration, true);
-    addRoute("DashboardSummary", apigwv2.HttpMethod.GET, "/admin/dashboard/summary", adminIntegration, true);
-    // Mints the signed BASE/eBay authorize URL server-side from the caller's own JWT tenantId
-    // claim -- authenticated, unlike /oauth/{base,ebay}/authorize below, precisely so a tenant
-    // id is never trusted from client input (see oauth-state.ts's StatePayload comment).
-    addRoute("OauthAuthorizeUrl", apigwv2.HttpMethod.GET, "/admin/oauth/{channel}/authorize-url", adminIntegration, true);
-
-    // Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing").
-    addRoute("BillingStatus", apigwv2.HttpMethod.GET, "/admin/billing/status", adminIntegration, true);
-    addRoute("BillingPortalSession", apigwv2.HttpMethod.POST, "/admin/billing/portal-session", adminIntegration, true);
+    // Every /admin/* route (GET and POST) is collapsed into these two catch-all routes
+    // rather than one explicit HttpRoute per endpoint. admin-api's handler already does its
+    // own internal routing by reading event.rawPath/requestContext.http.method directly (not
+    // API Gateway path parameters), so this changes nothing about route behavior -- it's a
+    // CDK-layer fix only. It's required, not a style choice: API Gateway's Lambda proxy
+    // integration grants one resource-policy statement per distinct HttpRoute, and the 47+
+    // explicit /admin/* routes this API had accumulated pushed adminApiFn's resource policy
+    // past Lambda's hard 20KB size limit the moment Phase 2 added two more routes. Two
+    // catch-all routes need only two statements, independent of how many logical endpoints
+    // admin-api's own handler serves.
+    addRoute("AdminApiGet", apigwv2.HttpMethod.GET, "/admin/{proxy+}", adminIntegration, true);
+    addRoute("AdminApiPost", apigwv2.HttpMethod.POST, "/admin/{proxy+}", adminIntegration, true);
 
     // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
     // no state-changing action happens here. It was originally gated behind Cognito on the
