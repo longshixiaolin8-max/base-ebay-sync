@@ -584,4 +584,31 @@ describe("EbayAdapter", () => {
 
     expect(sales[0]?.salePriceUsdCents).toBeUndefined();
   });
+
+  describe("refreshToken", () => {
+    it("preserves the original refresh token when eBay's refresh response omits one (eBay's real, documented behavior)", async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce(
+        jsonResponse({ access_token: "new-access-token", expires_in: 7200 }), // no refresh_token field
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const adapter = new EbayAdapter(config);
+      const result = await adapter.refreshToken("original-refresh-token");
+
+      expect(result.accessToken).toBe("new-access-token");
+      expect(result.refreshToken).toBe("original-refresh-token");
+    });
+
+    it("uses eBay's returned refresh token if one is ever actually included", async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce(
+        jsonResponse({ access_token: "new-access-token", refresh_token: "rotated-refresh-token", expires_in: 7200 }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const adapter = new EbayAdapter(config);
+      const result = await adapter.refreshToken("original-refresh-token");
+
+      expect(result.refreshToken).toBe("rotated-refresh-token");
+    });
+  });
 });

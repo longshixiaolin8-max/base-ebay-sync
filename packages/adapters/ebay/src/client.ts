@@ -135,11 +135,21 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async refreshToken(refreshToken: string): Promise<OAuthTokenSet> {
-    return this.requestToken({
+    const refreshed = await this.requestToken({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
       scope: EBAY_OAUTH_SCOPES.join(" "),
     });
+    // eBay's refresh_token grant response never includes a new refresh_token -- unlike
+    // the authorization_code grant, it only ever returns a fresh access_token/expires_in.
+    // eBay's refresh tokens are long-lived (~18 months) and intentionally not rotated on
+    // every access-token renewal. requestToken() maps a response with no refresh_token
+    // field to `null` (correct for the initial authorization_code exchange, where a
+    // missing refresh_token really would mean none was issued) -- but here it would
+    // silently overwrite the real, still-valid refresh token with null on every renewal,
+    // permanently breaking auto-refresh after exactly one cycle and forcing a full manual
+    // re-authorization every time the access token next expired.
+    return { ...refreshed, refreshToken: refreshed.refreshToken ?? refreshToken };
   }
 
   /**
