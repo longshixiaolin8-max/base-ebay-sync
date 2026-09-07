@@ -4,7 +4,10 @@ export interface DynamicPriceInput {
   fxRateUsdPerJpy: number;
   /** The seller's own real cost to ship the item, in USD -- borne out of net proceeds. */
   shippingUsd: number;
-  /** e.g. 0.3 for a 30% target margin over cost. */
+  /** e.g. 0.3 for a 30% cost-plus markup target: net proceeds = cost * (1 + this). Despite
+   *  the field's name (kept as-is to avoid a breaking API/DB-column rename), this is a
+   *  MARKUP-over-cost target, not a profit margin -- see DynamicPriceResult.netMarginRatio
+   *  vs costMarkupRatio below for the distinction that matters when reporting to merchants. */
   targetMarginRatio: number;
   /** eBay's Final Value Fee as a fraction of the transaction total. Defaults to eBay's
    *  published Jewelry & Watches rate (15%, for transactions up to $5,000) -- confirmed
@@ -20,7 +23,15 @@ export interface DynamicPriceResult {
   recommendedPriceUsd: number;
   ebayFeeUsd: number;
   netProceedsUsd: number;
-  /** The margin this price actually achieves, for a sanity check against targetMarginRatio. */
+  /** Cost markup this price actually achieves: (netProceeds - cost) / cost -- the same
+   *  units as the targetMarginRatio input, for a direct sanity check against it. This is
+   *  NOT a profit margin; do not display it to merchants labeled as "margin" or "利益率". */
+  costMarkupRatio: number;
+  /** True profit margin: (netProceeds - cost) / recommendedPriceUsd -- profit as a fraction
+   *  of what the buyer actually pays, matching packages/core/src/profit.ts's
+   *  profitMarginBasisPoints definition. Always numerically lower than costMarkupRatio for
+   *  the same deal (e.g. a 30% cost markup is only a ~23% margin) -- this is the number to
+   *  show a merchant asking "what's my real margin on this," never costMarkupRatio. */
   netMarginRatio: number;
   fxRateUsdPerJpy: number;
   shippingUsd: number;
@@ -62,13 +73,15 @@ export function computeDynamicPrice(input: DynamicPriceInput): DynamicPriceResul
     (costUsd * (1 + input.targetMarginRatio) + input.shippingUsd + ebayPerOrderFeeUsd) / (1 - ebayFeeRatio);
   const ebayFeeUsd = recommendedPriceUsd * ebayFeeRatio + ebayPerOrderFeeUsd;
   const netProceedsUsd = recommendedPriceUsd - ebayFeeUsd - input.shippingUsd;
-  const netMarginRatio = costUsd > 0 ? (netProceedsUsd - costUsd) / costUsd : 0;
+  const costMarkupRatio = costUsd > 0 ? (netProceedsUsd - costUsd) / costUsd : 0;
+  const netMarginRatio = recommendedPriceUsd > 0 ? (netProceedsUsd - costUsd) / recommendedPriceUsd : 0;
 
   return {
     costUsd,
     recommendedPriceUsd: Math.round(recommendedPriceUsd * 100) / 100,
     ebayFeeUsd: Math.round(ebayFeeUsd * 100) / 100,
     netProceedsUsd: Math.round(netProceedsUsd * 100) / 100,
+    costMarkupRatio,
     netMarginRatio,
     fxRateUsdPerJpy: input.fxRateUsdPerJpy,
     shippingUsd: input.shippingUsd,

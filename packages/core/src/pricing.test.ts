@@ -13,10 +13,10 @@ describe("computeDynamicPrice", () => {
     // costUsd = 67; P = (67*1.3 + 15 + 0.40) / 0.85 ≈ 102.5 / 0.85 ≈ 120.59
     expect(result.costUsd).toBeCloseTo(67, 2);
     expect(result.recommendedPriceUsd).toBeCloseTo(120.59, 1);
-    expect(result.netMarginRatio).toBeCloseTo(0.3, 2);
+    expect(result.costMarkupRatio).toBeCloseTo(0.3, 2);
   });
 
-  it("recovers exactly the target margin: net proceeds minus cost, over cost", () => {
+  it("recovers exactly the target cost markup: net proceeds minus cost, over cost", () => {
     const result = computeDynamicPrice({
       costJpy: 20000,
       fxRateUsdPerJpy: 0.0068,
@@ -26,6 +26,23 @@ describe("computeDynamicPrice", () => {
 
     const expectedNet = result.costUsd * 1.5;
     expect(result.netProceedsUsd).toBeCloseTo(expectedNet, 1);
+  });
+
+  it("computes a true profit margin (over price) that is always lower than the cost markup (over cost)", () => {
+    // Margin and markup are the same only at 0%; for any positive markup, margin = markup /
+    // (1 + markup) < markup. This guards against the exact margin/markup conflation bug that
+    // used to live here: netMarginRatio was previously computed as (net-cost)/cost, which is
+    // mathematically a markup, not a margin.
+    const result = computeDynamicPrice({
+      costJpy: 10000,
+      fxRateUsdPerJpy: 0.0067,
+      shippingUsd: 15,
+      targetMarginRatio: 0.3,
+    });
+
+    expect(result.costMarkupRatio).toBeCloseTo(0.3, 2);
+    expect(result.netMarginRatio).toBeLessThan(result.costMarkupRatio);
+    expect(result.netMarginRatio).toBeCloseTo((result.netProceedsUsd - result.costUsd) / result.recommendedPriceUsd, 4);
   });
 
   it("charges the eBay fee against the full recommended price, not just the cost", () => {

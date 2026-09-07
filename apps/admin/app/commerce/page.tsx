@@ -63,7 +63,11 @@ interface ChannelSyncState {
 
 interface DynamicPrice {
   recommendedPriceUsd: number;
+  /** True profit margin (profit / price paid), NOT the cost-plus markup the merchant set as
+   *  a target -- see packages/core/src/pricing.ts's DynamicPriceResult doc comment. Not yet
+   *  rendered in this UI; kept typed here for the next round that surfaces it. */
   netMarginRatio: number;
+  costMarkupRatio: number;
 }
 
 const STALE_BADGE: Record<CommerceRow["staleLevel"], string> = {

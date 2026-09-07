@@ -22,7 +22,7 @@ import {
   recordAuditLog,
   recordSyncError,
 } from "@ai-ec/lambda-shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 interface BaseAppCredentials {
   clientId: string;
@@ -154,55 +154,76 @@ export async function upsertProduct(
     // Phase 3 of the SaaS conversion ("plan quota enforcement"). Only gates *new*
     // product creation -- a tenant already over quota keeps full visibility into (and
     // sync of) every product it already has via the `existing` branch above.
+    //
+    // The quota check and the insert used to be two separate round-trips
+    // (countProducts() then a plain insert), which is a real TOCTOU race: two
+    // overlapping invocations for the same tenant (e.g. a slow poll still running when
+    // the next scheduled tick fires) could both read the same pre-insert count, both
+    // pass the "under limit" check, and both insert -- breaching the quota. Wrapping the
+    // count-check and the insert in one transaction, serialized per-tenant by a
+    // transaction-scoped advisory lock, makes the second invocation always see the
+    // first's committed insert before it re-reads the count.
     const billing = await getTenantBillingStatus(db, tenantId);
-    const currentCount = await countProducts(db, tenantId);
     const limit = getPlanLimits(billing?.plan ?? "standard").maxProducts;
-    if (currentCount >= limit) {
+
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${tenantId} || ':product_quota')::bigint)`);
+
+      const currentCount = await countProducts(tx, tenantId);
+      if (currentCount >= limit) {
+        return { ok: false as const, currentCount };
+      }
+
+      const [inserted] = await tx
+        .insert(productMaster)
+        .values({
+          tenantId,
+          sku,
+          sourceChannel: "base",
+          title: item.title,
+          descriptionJa: item.descriptionHtml,
+          priceJpy: item.priceJpy,
+          images: item.images,
+          status: "draft",
+          contentHash: hash,
+        })
+        .returning();
+      const newProductId = inserted!.id;
+
+      await tx.insert(inventoryMaster).values({
+        tenantId,
+        productId: newProductId,
+        quantity: item.quantity,
+        version: 0,
+        soldOut: item.quantity === 0,
+        // Baseline the logical clock watermark to this first-seen BASE state, so the next
+        // poll's applyBaseStockReport has something to compare against.
+        lastBaseSeq: item.updatedAt,
+      });
+      await tx.insert(channelListings).values({
+        tenantId,
+        productId: newProductId,
+        channel: "base",
+        externalId: item.externalId,
+        status: "published",
+        lastSyncedAt: new Date(),
+      });
+
+      return { ok: true as const, productId: newProductId };
+    });
+
+    if (!result.ok) {
       await recordSyncError(db, {
         tenantId,
         channel: "base",
         productId: null,
         errorCode: "product_quota_exceeded",
         errorMessage: `Tenant has reached its plan's product limit (${limit})`,
-        payload: { sku, currentCount, limit },
+        payload: { sku, currentCount: result.currentCount, limit },
       });
       return;
     }
-
-    const [inserted] = await db
-      .insert(productMaster)
-      .values({
-        tenantId,
-        sku,
-        sourceChannel: "base",
-        title: item.title,
-        descriptionJa: item.descriptionHtml,
-        priceJpy: item.priceJpy,
-        images: item.images,
-        status: "draft",
-        contentHash: hash,
-      })
-      .returning();
-    productId = inserted!.id;
-
-    await db.insert(inventoryMaster).values({
-      tenantId,
-      productId,
-      quantity: item.quantity,
-      version: 0,
-      soldOut: item.quantity === 0,
-      // Baseline the logical clock watermark to this first-seen BASE state, so the next
-      // poll's applyBaseStockReport has something to compare against.
-      lastBaseSeq: item.updatedAt,
-    });
-    await db.insert(channelListings).values({
-      tenantId,
-      productId,
-      channel: "base",
-      externalId: item.externalId,
-      status: "published",
-      lastSyncedAt: new Date(),
-    });
+    productId = result.productId;
 
     // BASE登録 lifecycle stage (commercial-features round, item #4). This is the first
     // moment this platform ever knows about the product -- 仕入 (cost/purchase date) is a

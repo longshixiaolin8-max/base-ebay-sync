@@ -62,7 +62,8 @@ const computeChannelSyncStateMock = vi.fn();
 const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
 const countProductsMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
-const incrementMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(undefined);
+const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
+const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
 class InvalidOrderTransitionErrorFake extends Error {}
 
@@ -96,7 +97,8 @@ vi.mock("@ai-ec/db", () => ({
   getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
   countProducts: (...args: unknown[]) => countProductsMock(...args),
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
-  incrementMonthlyAiGenerationCount: (...args: unknown[]) => incrementMonthlyAiGenerationCountMock(...args),
+  tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
+  releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
 }));
 
 const createAIModelClientMock = vi.fn().mockReturnValue({ generateJson: vi.fn() });
@@ -244,7 +246,8 @@ describe("admin-api handler", () => {
     suggestStaleProductImprovementMock.mockClear();
     countProductsMock.mockClear().mockResolvedValue(0);
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
-    incrementMonthlyAiGenerationCountMock.mockClear();
+    tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
+    releaseMonthlyAiGenerationReservationMock.mockClear();
   });
 
   it("GET /admin/products returns the product list", async () => {
@@ -824,19 +827,29 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/stale-suggestion"));
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!)).toMatchObject({ productId: "p1", suggestion: "Cut the price." });
-      expect(incrementMonthlyAiGenerationCountMock).toHaveBeenCalledWith(fakeDb, TENANT_A);
+      expect(tryReserveMonthlyAiGenerationMock).toHaveBeenCalledWith(fakeDb, TENANT_A, 100);
+      expect(releaseMonthlyAiGenerationReservationMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/products/{id}/stale-suggestion returns 429 once the tenant is at its plan's monthly AI limit", async () => {
       fakeDb = createFakeDb([
         [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [], createdAt: new Date() }],
       ]);
-      getMonthlyAiGenerationCountMock.mockResolvedValueOnce(100);
+      tryReserveMonthlyAiGenerationMock.mockResolvedValueOnce(false);
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/stale-suggestion"));
       expect(res.statusCode).toBe(429);
-      expect(JSON.parse(res.body!)).toEqual({ error: "ai_quota_exceeded", limit: 100, used: 100 });
+      expect(JSON.parse(res.body!)).toEqual({ error: "ai_quota_exceeded", limit: 100 });
       expect(suggestStaleProductImprovementMock).not.toHaveBeenCalled();
-      expect(incrementMonthlyAiGenerationCountMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/products/{id}/stale-suggestion releases the reservation when the AI call fails", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [], createdAt: new Date() }],
+      ]);
+      suggestStaleProductImprovementMock.mockRejectedValueOnce(new Error("model provider timed out"));
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/stale-suggestion"));
+      expect(res.statusCode).toBe(500);
+      expect(releaseMonthlyAiGenerationReservationMock).toHaveBeenCalledWith(fakeDb, TENANT_A);
     });
 
     it("GET /admin/products/{id}/sns returns the sns content row (or null)", async () => {
@@ -858,19 +871,29 @@ describe("admin-api handler", () => {
         expect.anything(),
         expect.objectContaining({ action: "sns_script_generated", entityId: "p1" }),
       );
-      expect(incrementMonthlyAiGenerationCountMock).toHaveBeenCalledWith(fakeDb, TENANT_A);
+      expect(tryReserveMonthlyAiGenerationMock).toHaveBeenCalledWith(fakeDb, TENANT_A, 100);
+      expect(releaseMonthlyAiGenerationReservationMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/products/{id}/sns/script returns 429 once the tenant is at its plan's monthly AI limit", async () => {
       fakeDb = createFakeDb([
         [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [] }],
       ]);
-      getMonthlyAiGenerationCountMock.mockResolvedValueOnce(100);
+      tryReserveMonthlyAiGenerationMock.mockResolvedValueOnce(false);
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/script"));
       expect(res.statusCode).toBe(429);
-      expect(JSON.parse(res.body!)).toEqual({ error: "ai_quota_exceeded", limit: 100, used: 100 });
+      expect(JSON.parse(res.body!)).toEqual({ error: "ai_quota_exceeded", limit: 100 });
       expect(generateSnsScriptMock).not.toHaveBeenCalled();
-      expect(incrementMonthlyAiGenerationCountMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/products/{id}/sns/script releases the reservation when generation or persistence fails", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", title: "T", descriptionJa: "d", brand: null, material: null, sizeLabel: null, priceJpy: 3000, images: [] }],
+      ]);
+      generateSnsScriptMock.mockRejectedValueOnce(new Error("model provider timed out"));
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/script"));
+      expect(res.statusCode).toBe(500);
+      expect(releaseMonthlyAiGenerationReservationMock).toHaveBeenCalledWith(fakeDb, TENANT_A);
     });
 
     it("POST /admin/products/{id}/sns/status marks posting flags", async () => {

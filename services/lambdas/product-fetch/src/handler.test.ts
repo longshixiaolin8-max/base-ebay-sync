@@ -53,36 +53,47 @@ function createFakeDb(opts: FakeDbOptions) {
   const insertedProductId = opts.insertedProductId ?? "new-product-id";
   let selectCallCount = 0;
 
-  return {
-    select: () => ({
-      from: (table: { productId?: string }) => ({
-        where: () => ({
-          limit: async () => {
-            selectCallCount += 1;
-            // First select() call is always the productMaster-by-sku lookup.
-            if (selectCallCount === 1) {
-              return opts.existingProduct ? [opts.existingProduct] : [];
-            }
-            // Any subsequent select() is the ebay channel_listings lookup.
-            void table;
-            return opts.ebayListing ? [opts.ebayListing] : [];
-          },
+  // Shared by both the top-level db and the tx handle passed into db.transaction()'s
+  // callback -- the real Drizzle transaction session supports the same query-builder
+  // surface as the plain database handle, so the fake mirrors that here too.
+  function makeQueryable() {
+    return {
+      select: () => ({
+        from: (table: { productId?: string }) => ({
+          where: () => ({
+            limit: async () => {
+              selectCallCount += 1;
+              // First select() call is always the productMaster-by-sku lookup.
+              if (selectCallCount === 1) {
+                return opts.existingProduct ? [opts.existingProduct] : [];
+              }
+              // Any subsequent select() is the ebay channel_listings lookup.
+              void table;
+              return opts.ebayListing ? [opts.ebayListing] : [];
+            },
+          }),
         }),
       }),
-    }),
-    update: () => ({
-      set: vi.fn(() => ({ where: async () => undefined })),
-    }),
-    insert: (table: { sku?: string }) => ({
-      values: (v: unknown) => {
-        if (table.sku !== undefined) {
-          // productMaster insert -> caller awaits .returning()
-          return insertResult([{ id: insertedProductId }]);
-        }
-        void v;
-        return insertResult(undefined);
-      },
-    }),
+      update: () => ({
+        set: vi.fn(() => ({ where: async () => undefined })),
+      }),
+      insert: (table: { sku?: string }) => ({
+        values: (v: unknown) => {
+          if (table.sku !== undefined) {
+            // productMaster insert -> caller awaits .returning()
+            return insertResult([{ id: insertedProductId }]);
+          }
+          void v;
+          return insertResult(undefined);
+        },
+      }),
+      execute: async () => undefined,
+    };
+  }
+
+  return {
+    ...makeQueryable(),
+    transaction: async (fn: (tx: ReturnType<typeof makeQueryable>) => Promise<unknown>) => fn(makeQueryable()),
   } as never;
 }
 
@@ -212,5 +223,25 @@ describe("upsertProduct", () => {
 
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(recordSyncErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("runs the quota check and the insert inside one transaction, not two separate round-trips", async () => {
+    // Regression test for a real TOCTOU race: countProducts() and the insert used to be
+    // two independent db calls with nothing preventing two overlapping invocations for the
+    // same tenant from both reading the same pre-insert count and both inserting, breaching
+    // the plan limit. The fix must run both inside db.transaction() so a second invocation
+    // is serialized behind the first's commit.
+    countProductsMock.mockResolvedValue(299);
+    const db = createFakeDb({ existingProduct: null });
+    const transactionSpy = vi.spyOn(db as unknown as { transaction: (...a: unknown[]) => unknown }, "transaction");
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+    // countProducts must have been called with the tx handle the transaction callback
+    // received, not the outer db -- otherwise the count-check reads outside the lock's
+    // protection and the race isn't actually closed.
+    const [txArg] = countProductsMock.mock.calls.at(-1)!;
+    expect(txArg).not.toBe(db);
   });
 });

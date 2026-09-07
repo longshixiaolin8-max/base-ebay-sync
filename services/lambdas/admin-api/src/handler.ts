@@ -28,7 +28,6 @@ import {
   getMonthlyAiGenerationCount,
   getSnsContent,
   getTenantBillingStatus,
-  incrementMonthlyAiGenerationCount,
   InvalidOrderTransitionError,
   inventoryMaster,
   listOrders,
@@ -38,10 +37,12 @@ import {
   predictStockoutRisk,
   productMaster,
   reconstructInventory,
+  releaseMonthlyAiGenerationReservation,
   syncErrors,
   syncJobs,
   traceSyncHistory,
   transitionOrderStatus,
+  tryReserveMonthlyAiGeneration,
   upsertSnsScript,
 } from "@ai-ec/db";
 import {
@@ -881,31 +882,39 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
-      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Checked before the
-      // OpenAI call, not after, so a tenant already at quota never incurs the AI spend.
+      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Reserved atomically
+      // before the OpenAI call (a separate check-then-increment pair left a real race
+      // where two concurrent requests could both read the same pre-increment count and
+      // both proceed, breaching the monthly limit); released again if the generation
+      // attempt then fails, so a failed attempt never permanently consumes quota.
       const staleBilling = await getTenantBillingStatus(db, tenantId);
-      const staleUsed = await getMonthlyAiGenerationCount(db, tenantId);
       const staleLimit = getPlanLimits(staleBilling?.plan ?? "standard").maxAiGenerationsPerMonth;
-      if (staleUsed >= staleLimit) {
-        return json(429, { error: "ai_quota_exceeded", limit: staleLimit, used: staleUsed });
+      const staleReserved = await tryReserveMonthlyAiGeneration(db, tenantId, staleLimit);
+      if (!staleReserved) {
+        return json(429, { error: "ai_quota_exceeded", limit: staleLimit });
       }
 
       const daysListed = Math.max(0, Math.floor((Date.now() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)));
       const modelClient = createAIModelClient(process.env);
-      const suggestion = await suggestStaleProductImprovement(
-        modelClient,
-        {
-          titleJa: product.title,
-          descriptionJa: product.descriptionJa,
-          brand: product.brand,
-          material: product.material,
-          sizeLabel: product.sizeLabel,
-          priceJpy: product.priceJpy,
-          imageCount: product.images.length,
-        },
-        daysListed,
-      );
-      await incrementMonthlyAiGenerationCount(db, tenantId);
+      let suggestion;
+      try {
+        suggestion = await suggestStaleProductImprovement(
+          modelClient,
+          {
+            titleJa: product.title,
+            descriptionJa: product.descriptionJa,
+            brand: product.brand,
+            material: product.material,
+            sizeLabel: product.sizeLabel,
+            priceJpy: product.priceJpy,
+            imageCount: product.images.length,
+          },
+          daysListed,
+        );
+      } catch (err) {
+        await releaseMonthlyAiGenerationReservation(db, tenantId);
+        throw err;
+      }
       return json(200, { productId: id, daysListed, ...suggestion });
     }
 
@@ -926,28 +935,37 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
-      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Checked before the
-      // OpenAI call, not after, so a tenant already at quota never incurs the AI spend.
+      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Reserved atomically
+      // before the OpenAI call (a separate check-then-increment pair left a real race
+      // where two concurrent requests could both read the same pre-increment count and
+      // both proceed, breaching the monthly limit); released again if the generation
+      // attempt then fails, so a failed attempt never permanently consumes quota.
       const snsBilling = await getTenantBillingStatus(db, tenantId);
-      const snsUsed = await getMonthlyAiGenerationCount(db, tenantId);
       const snsLimit = getPlanLimits(snsBilling?.plan ?? "standard").maxAiGenerationsPerMonth;
-      if (snsUsed >= snsLimit) {
-        return json(429, { error: "ai_quota_exceeded", limit: snsLimit, used: snsUsed });
+      const snsReserved = await tryReserveMonthlyAiGeneration(db, tenantId, snsLimit);
+      if (!snsReserved) {
+        return json(429, { error: "ai_quota_exceeded", limit: snsLimit });
       }
 
       const modelClient = createAIModelClient(process.env);
-      const script = await generateSnsScript(modelClient, {
-        titleJa: product.title,
-        descriptionJa: product.descriptionJa,
-        brand: product.brand,
-        material: product.material,
-        sizeLabel: product.sizeLabel,
-        priceJpy: product.priceJpy,
-        imageCount: product.images.length,
-      });
-      const promptVersion = "sns-script-v1";
-      const saved = await upsertSnsScript(db, tenantId, id, script.scriptText, promptVersion);
-      await incrementMonthlyAiGenerationCount(db, tenantId);
+      let saved;
+      let script;
+      try {
+        script = await generateSnsScript(modelClient, {
+          titleJa: product.title,
+          descriptionJa: product.descriptionJa,
+          brand: product.brand,
+          material: product.material,
+          sizeLabel: product.sizeLabel,
+          priceJpy: product.priceJpy,
+          imageCount: product.images.length,
+        });
+        const promptVersion = "sns-script-v1";
+        saved = await upsertSnsScript(db, tenantId, id, script.scriptText, promptVersion);
+      } catch (err) {
+        await releaseMonthlyAiGenerationReservation(db, tenantId);
+        throw err;
+      }
 
       await recordAuditLog(db, {
         tenantId,
