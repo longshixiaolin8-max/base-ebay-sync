@@ -1,6 +1,6 @@
 "use client";
 
-import { confirmSignIn, signIn } from "aws-amplify/auth";
+import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { type FormEvent, useEffect, useState } from "react";
@@ -77,7 +77,22 @@ export default function LoginPage() {
     setError(null);
     try {
       ensureAmplifyConfigured();
-      const result = await signIn({ username: email, password });
+      let result;
+      try {
+        result = await signIn({ username: email, password });
+      } catch (err) {
+        // Amplify caches a session in the browser across visits; if a previous sign-in
+        // was never explicitly logged out (session left open in another tab, a stale
+        // cached session from before), signIn() refuses to start a new one and throws
+        // this instead of just replacing it. Signing out that stale session first and
+        // retrying is exactly what the operator entering fresh credentials here wants.
+        if ((err as Error).name === "UserAlreadyAuthenticatedException") {
+          await signOut();
+          result = await signIn({ username: email, password });
+        } else {
+          throw err;
+        }
+      }
       if (result.isSignedIn) {
         router.replace("/dashboard");
       } else {
