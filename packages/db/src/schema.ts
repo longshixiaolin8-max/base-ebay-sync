@@ -400,6 +400,34 @@ export const orders = pgTable(
  * real-world action (see ai_listing_draft.needsHumanReview) -- there is no video-generation
  * or social-posting API integration in this stack, so this table never claims one.
  */
+/**
+ * Phase 3 of the SaaS conversion ("plan quota enforcement"). One row per
+ * (tenant, metric, calendar month), incremented atomically each time a metered action
+ * happens. Only "ai_generation" exists as a metric today (covers the AI listing-draft
+ * worker plus admin-api's two synchronous AI actions) -- product-count enforcement
+ * doesn't need a counter row of its own since product_master can be counted live.
+ */
+export const usageCounters = pgTable(
+  "usage_counters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    metric: text("metric").notNull(),
+    /** UTC first-of-month timestamp identifying the counting period. */
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => ({
+    tenantMetricPeriodUnique: uniqueIndex("usage_counters_tenant_metric_period_unique").on(
+      t.tenantId,
+      t.metric,
+      t.periodStart,
+    ),
+  }),
+);
+
 export const snsContent = pgTable("sns_content", {
   productId: uuid("product_id")
     .primaryKey()

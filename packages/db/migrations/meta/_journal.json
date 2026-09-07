@@ -71,6 +71,13 @@
       "when": 1788760918454,
       "tag": "0009_orange_xorn",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788766789849,
+      "tag": "0010_far_human_torch",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,13 @@
 import { createAIModelClient, generateEbayListing } from "@ai-ec/ai";
-import { buildIdempotencyKey, withIdempotency } from "@ai-ec/core";
-import { aiListingDraft, channelListings, productMaster } from "@ai-ec/db";
+import { buildIdempotencyKey, getPlanLimits, withIdempotency } from "@ai-ec/core";
+import {
+  aiListingDraft,
+  channelListings,
+  getMonthlyAiGenerationCount,
+  getTenantBillingStatus,
+  incrementMonthlyAiGenerationCount,
+  productMaster,
+} from "@ai-ec/db";
 import { getDb, getIdempotencyStore, recordAuditLog, recordSyncError } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
@@ -28,6 +35,25 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         .where(and(eq(productMaster.tenantId, message.tenantId), eq(productMaster.id, message.productId)))
         .limit(1);
       if (!product) throw new Error(`product_master row not found for id ${message.productId}`);
+
+      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Checked before the
+      // idempotency-guarded OpenAI call, not after, so a tenant already at quota never
+      // incurs the AI spend just to have its result discarded. Not pushed to `failures`
+      // below -- this isn't a retryable error, retrying won't help until next month.
+      const billing = await getTenantBillingStatus(db, message.tenantId);
+      const used = await getMonthlyAiGenerationCount(db, message.tenantId);
+      const limit = getPlanLimits(billing?.plan ?? "standard").maxAiGenerationsPerMonth;
+      if (used >= limit) {
+        await recordSyncError(db, {
+          tenantId: message.tenantId,
+          channel: "ebay",
+          productId: message.productId,
+          errorCode: "ai_quota_exceeded",
+          errorMessage: `Tenant has reached its plan's monthly AI generation limit (${limit})`,
+          payload: { messageId: record.messageId, used, limit },
+        });
+        continue;
+      }
 
       const key = buildIdempotencyKey(message.tenantId, ["ai_generate", product.id, product.contentHash]);
 
@@ -73,6 +99,8 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
           entityId: product.id,
           after: { needsHumanReview: listing.needsHumanReview, titleEn: listing.titleEn },
         });
+
+        await incrementMonthlyAiGenerationCount(db, message.tenantId);
 
         return listing;
       });

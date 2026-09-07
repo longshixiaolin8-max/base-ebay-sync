@@ -6,6 +6,7 @@ import {
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
+  getPlanLimits,
   ItemCondition,
   matchProductIdentity,
   OrderStatus,
@@ -19,12 +20,15 @@ import {
   computeChannelSyncState,
   computeDynamicSafetyStock,
   computeSyncConfidence,
+  countProducts,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
   getLiveOrderProfit,
+  getMonthlyAiGenerationCount,
   getSnsContent,
   getTenantBillingStatus,
+  incrementMonthlyAiGenerationCount,
   InvalidOrderTransitionError,
   inventoryMaster,
   listOrders,
@@ -146,6 +150,24 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         return_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
       });
       return json(200, { url: session.url });
+    }
+
+    // Phase 3 of the SaaS conversion ("plan quota enforcement"). Informational only --
+    // unlike the two billing routes above, this stays inside the normal billing-active
+    // gate (an inactive tenant has nothing productive to do with its usage numbers).
+    if (method === "GET" && path === "/admin/usage") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      const limits = getPlanLimits(billing?.plan ?? "standard");
+      const [productsUsed, aiGenerationsUsed] = await Promise.all([
+        countProducts(db, tenantId),
+        getMonthlyAiGenerationCount(db, tenantId),
+      ]);
+      const now = new Date();
+      const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      return json(200, {
+        products: { used: productsUsed, limit: limits.maxProducts },
+        aiGenerations: { used: aiGenerationsUsed, limit: limits.maxAiGenerationsPerMonth, periodStart: periodStart.toISOString() },
+      });
     }
 
     if (method === "GET" && path === "/admin/products") {
@@ -859,6 +881,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
+      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Checked before the
+      // OpenAI call, not after, so a tenant already at quota never incurs the AI spend.
+      const staleBilling = await getTenantBillingStatus(db, tenantId);
+      const staleUsed = await getMonthlyAiGenerationCount(db, tenantId);
+      const staleLimit = getPlanLimits(staleBilling?.plan ?? "standard").maxAiGenerationsPerMonth;
+      if (staleUsed >= staleLimit) {
+        return json(429, { error: "ai_quota_exceeded", limit: staleLimit, used: staleUsed });
+      }
+
       const daysListed = Math.max(0, Math.floor((Date.now() - product.createdAt.getTime()) / (24 * 60 * 60 * 1000)));
       const modelClient = createAIModelClient(process.env);
       const suggestion = await suggestStaleProductImprovement(
@@ -874,6 +905,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         },
         daysListed,
       );
+      await incrementMonthlyAiGenerationCount(db, tenantId);
       return json(200, { productId: id, daysListed, ...suggestion });
     }
 
@@ -894,6 +926,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
 
+      // Phase 3 of the SaaS conversion ("plan quota enforcement"). Checked before the
+      // OpenAI call, not after, so a tenant already at quota never incurs the AI spend.
+      const snsBilling = await getTenantBillingStatus(db, tenantId);
+      const snsUsed = await getMonthlyAiGenerationCount(db, tenantId);
+      const snsLimit = getPlanLimits(snsBilling?.plan ?? "standard").maxAiGenerationsPerMonth;
+      if (snsUsed >= snsLimit) {
+        return json(429, { error: "ai_quota_exceeded", limit: snsLimit, used: snsUsed });
+      }
+
       const modelClient = createAIModelClient(process.env);
       const script = await generateSnsScript(modelClient, {
         titleJa: product.title,
@@ -906,6 +947,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
       const promptVersion = "sns-script-v1";
       const saved = await upsertSnsScript(db, tenantId, id, script.scriptText, promptVersion);
+      await incrementMonthlyAiGenerationCount(db, tenantId);
 
       await recordAuditLog(db, {
         tenantId,

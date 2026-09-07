@@ -11,6 +11,11 @@ interface BillingStatus {
   status: "pending_payment" | "active" | "past_due" | "canceled";
 }
 
+interface UsageStatus {
+  products: { used: number; limit: number };
+  aiGenerations: { used: number; limit: number; periodStart: string };
+}
+
 const STATUS_LABEL: Record<BillingStatus["status"], string> = {
   pending_payment: "決済待ち",
   active: "有効",
@@ -29,6 +34,7 @@ export default function BillingPage() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
   const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [usage, setUsage] = useState<UsageStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [openingPortal, setOpeningPortal] = useState(false);
 
@@ -38,6 +44,13 @@ export default function BillingPage() {
       .then(setBilling)
       .catch((err) => notify(`請求情報の取得に失敗しました: ${(err as Error).message}`))
       .finally(() => setLoading(false));
+    // /admin/usage sits behind the normal billing-active gate (see admin-api's Phase 3
+    // quota routes) -- an inactive tenant simply won't get usage numbers, which is fine
+    // since this section is purely informational and the status card above already
+    // explains why access is blocked.
+    apiGet<UsageStatus>("/admin/usage")
+      .then(setUsage)
+      .catch(() => undefined);
   }, [ready]);
 
   async function openPortal() {
@@ -82,7 +95,39 @@ export default function BillingPage() {
             </button>
           </div>
         ) : null}
+
+        {usage && (
+          <div className="card card-pad" style={{ maxWidth: 480, marginTop: "1.25rem" }}>
+            <h2 style={{ fontSize: "0.95rem", margin: 0 }}>利用状況</h2>
+            <UsageRow label="商品登録数" used={usage.products.used} limit={usage.products.limit} />
+            <UsageRow label="AI生成(今月)" used={usage.aiGenerations.used} limit={usage.aiGenerations.limit} />
+          </div>
+        )}
       </div>
     </>
+  );
+}
+
+function UsageRow({ label, used, limit }: { label: string; used: number; limit: number }) {
+  const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
+  const nearLimit = ratio >= 0.9;
+  return (
+    <div style={{ marginTop: "1rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
+        <span style={{ color: "var(--fg-muted)" }}>{label}</span>
+        <span className={nearLimit ? "badge warn" : undefined}>
+          {used} / {limit}
+        </span>
+      </div>
+      <div style={{ marginTop: "0.35rem", height: 6, borderRadius: 3, background: "var(--neutral-soft)", overflow: "hidden" }}>
+        <div
+          style={{
+            width: `${ratio * 100}%`,
+            height: "100%",
+            background: nearLimit ? "var(--danger)" : "var(--accent)",
+          }}
+        />
+      </div>
+    </div>
   );
 }

@@ -2,18 +2,24 @@ import type { ExternalProduct } from "@ai-ec/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const applyBaseStockReportMock = vi.fn().mockResolvedValue({ applied: true, quantity: 5 });
+const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+const countProductsMock = vi.fn().mockResolvedValue(0);
 vi.mock("@ai-ec/db", () => ({
   productMaster: { sku: "sku" },
   inventoryMaster: {},
   channelListings: { productId: "productId", channel: "channel" },
   applyBaseStockReport: (...args: unknown[]) => applyBaseStockReportMock(...args),
+  getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
+  countProducts: (...args: unknown[]) => countProductsMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
 const { upsertProduct } = await import("./handler.js");
@@ -85,6 +91,9 @@ describe("upsertProduct", () => {
     enqueueMock.mockClear();
     applyBaseStockReportMock.mockClear();
     recordAuditLogMock.mockClear();
+    recordSyncErrorMock.mockClear();
+    getTenantBillingStatusMock.mockClear().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+    countProductsMock.mockClear().mockResolvedValue(0);
   });
 
   it("reconciles BASE's reported stock into inventory_master on every poll of an existing product, even when nothing else changed", async () => {
@@ -180,5 +189,28 @@ describe("upsertProduct", () => {
       { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
       expect.stringContaining(`${TENANT_ID}:ebay-update:existing-id:`),
     );
+  });
+
+  it("skips creating a new product and records a sync error once the tenant is at its plan's product limit", async () => {
+    countProductsMock.mockResolvedValue(300);
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ tenantId: TENANT_ID, errorCode: "product_quota_exceeded" }),
+    );
+  });
+
+  it("still allows creating a new product just under the plan's product limit", async () => {
+    countProductsMock.mockResolvedValue(299);
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(recordSyncErrorMock).not.toHaveBeenCalled();
   });
 });

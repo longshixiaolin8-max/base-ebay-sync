@@ -1,8 +1,10 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { contentHash, type ExternalProduct } from "@ai-ec/core";
+import { contentHash, type ExternalProduct, getPlanLimits } from "@ai-ec/core";
 import {
   applyBaseStockReport,
   channelListings,
+  countProducts,
+  getTenantBillingStatus,
   inventoryMaster,
   isChannelIsolated,
   listActiveTenants,
@@ -149,6 +151,24 @@ export async function upsertProduct(
       .where(eq(productMaster.id, existing.id));
     productId = existing.id;
   } else {
+    // Phase 3 of the SaaS conversion ("plan quota enforcement"). Only gates *new*
+    // product creation -- a tenant already over quota keeps full visibility into (and
+    // sync of) every product it already has via the `existing` branch above.
+    const billing = await getTenantBillingStatus(db, tenantId);
+    const currentCount = await countProducts(db, tenantId);
+    const limit = getPlanLimits(billing?.plan ?? "standard").maxProducts;
+    if (currentCount >= limit) {
+      await recordSyncError(db, {
+        tenantId,
+        channel: "base",
+        productId: null,
+        errorCode: "product_quota_exceeded",
+        errorMessage: `Tenant has reached its plan's product limit (${limit})`,
+        payload: { sku, currentCount, limit },
+      });
+      return;
+    }
+
     const [inserted] = await db
       .insert(productMaster)
       .values({
