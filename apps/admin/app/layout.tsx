@@ -7,7 +7,7 @@ import { SidebarBackdrop } from "@/components/SidebarBackdrop";
 import { ToastProvider } from "@/components/Toast";
 
 export const metadata: Metadata = {
-  title: "AI EC運営プラットフォーム 管理画面",
+  title: "BASE eBay Sync 管理画面",
   description: "BASE / eBay 商品・在庫同期管理画面",
 };
 

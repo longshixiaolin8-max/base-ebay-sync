@@ -14,6 +14,7 @@ interface SignupCredentials {
 
 interface SignupRequestBody {
   companyName?: string;
+  name?: string;
   email?: string;
   password?: string;
   inviteCode?: string;
@@ -41,7 +42,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     return json(400, { error: "invalid_json" });
   }
 
-  const { companyName, email, password, inviteCode } = body;
+  const { companyName, name, email, password, inviteCode } = body;
   if (!companyName || !email || !password || !inviteCode) {
     return json(400, { error: "missing_fields" });
   }
@@ -64,6 +65,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           { Name: "email", Value: email },
           { Name: "email_verified", Value: "true" },
           { Name: "custom:tenant_id", Value: tenant.id },
+          // Optional: the signer's own name, distinct from companyName (the shop/tenant
+          // name). "name" is a standard Cognito attribute available on every user pool
+          // with no schema change needed.
+          ...(name ? [{ Name: "name", Value: name }] : []),
         ],
         TemporaryPassword: password,
         MessageAction: "SUPPRESS",

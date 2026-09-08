@@ -46,7 +46,11 @@ export function Sidebar() {
   // other public, unauthenticated page (Phase 2's self-service signup flow); "" is the root
   // "/" itself, now the public landing page (Phase 4) rather than a redirect to /dashboard.
   const normalizedPath = pathname?.replace(/\/$/, "");
-  const isPublicPage = normalizedPath === "" || normalizedPath === "/login" || normalizedPath === "/signup";
+  const isPublicPage =
+    normalizedPath === "" ||
+    normalizedPath === "/login" ||
+    normalizedPath === "/signup" ||
+    normalizedPath === "/forgot-password";
 
   // Tapping a nav link should close the drawer on mobile, same as tapping the backdrop
   // -- staying open after navigating reads as broken, not intentional. A no-op on
@@ -89,7 +93,7 @@ export function Sidebar() {
     <aside className="sidebar" data-open={open}>
       <Link href="/dashboard" className="app-brand sidebar-brand">
         <span className="app-brand-mark">AI</span>
-        AI EC運営プラットフォーム
+        BASE <span className="app-brand-ebay">eBay</span> Sync
       </Link>
       <nav className="sidebar-nav">
         {LINKS.map((link) => {

@@ -511,6 +511,31 @@ describe("admin-api handler", () => {
     expect(unmanagedListings[0]!.matchScore).toBeGreaterThanOrEqual(50);
   });
 
+  it("GET /admin/ebay/unmanaged-listings forwards the real description/images from eBay, with no fabricated price", async () => {
+    listProductsMock.mockResolvedValueOnce({
+      items: [
+        {
+          externalId: "hand-listed-sku",
+          title: "Pre-existing listing",
+          descriptionHtml: "<p>real eBay description</p>",
+          images: ["https://ebay.example/img1.jpg"],
+        },
+      ],
+      nextCursor: undefined,
+    });
+    fakeDb = createFakeDb([[], []]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/unmanaged-listings"));
+    expect(res.statusCode).toBe(200);
+    const { unmanagedListings } = JSON.parse(res.body!) as { unmanagedListings: Array<Record<string, unknown>> };
+    expect(unmanagedListings[0]).toMatchObject({
+      descriptionHtml: "<p>real eBay description</p>",
+      images: ["https://ebay.example/img1.jpg"],
+    });
+    expect(unmanagedListings[0]).not.toHaveProperty("priceJpy");
+    expect(unmanagedListings[0]).not.toHaveProperty("price");
+  });
+
   it("POST /admin/products/{id}/link-ebay-listing links an unmanaged eBay SKU to a product", async () => {
     fakeDb = createFakeDb([[{ id: "product-1" }], [], []]); // product exists, no existing link, no conflict
     const res = await callHandler(

@@ -189,3 +189,45 @@ export function PlugIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Password-visibility toggle (shown state). */
+export function EyeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={16} height={16}>
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </Icon>
+  );
+}
+
+/** Password-visibility toggle (hidden state). */
+export function EyeOffIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={16} height={16}>
+      <path d="M9.9 4.2A10.6 10.6 0 0 1 12 4c7 0 11 7 11 7a13.2 13.2 0 0 1-3.1 3.7" />
+      <path d="M6.6 6.6C3.8 8.4 2 11 2 11s4 7 11 7a10.4 10.4 0 0 0 4.4-1" />
+      <path d="M9.5 9.5a3 3 0 0 0 4.2 4.2" />
+      <path d="M2 2l20 20" />
+    </Icon>
+  );
+}
+
+/** Chain-link icon for the product-matching comparison screen. */
+export function LinkIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={18} height={18}>
+      <path d="M9 12a4 4 0 0 0 5.7.3l2.6-2.6a4 4 0 0 0-5.6-5.7L10 5.6" />
+      <path d="M15 12a4 4 0 0 0-5.7-.3L6.7 14.3a4 4 0 0 0 5.6 5.7L14 18.4" />
+    </Icon>
+  );
+}
+
+/** Shield icon for security notices (2FA callouts, code-sharing warnings). */
+export function ShieldIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={18} height={18}>
+      <path d="M12 2 4 5v6c0 5 3.4 8.4 8 11 4.6-2.6 8-6 8-11V5Z" />
+      <path d="m9 12 2 2 4-4" />
+    </Icon>
+  );
+}

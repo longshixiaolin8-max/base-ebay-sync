@@ -210,6 +210,10 @@ h2 {
   white-space: nowrap;
 }
 
+.app-brand-ebay {
+  color: var(--accent);
+}
+
 .app-brand-mark {
   display: inline-flex;
   align-items: center;
@@ -1581,6 +1585,288 @@ tbody tr:hover {
   margin: 0.75rem 0;
 }
 
+.auth-tagline {
+  font-size: 0.8rem;
+  color: var(--fg-subtle);
+  margin: -1rem 0 1.25rem;
+}
+
+.auth-password-field {
+  position: relative;
+}
+
+.auth-password-toggle {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+}
+
+.auth-password-toggle:hover {
+  color: var(--fg);
+}
+
+.auth-links-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: -0.5rem 0 1rem;
+}
+
+.auth-links-row a {
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.auth-links-row a:hover {
+  text-decoration: underline;
+}
+
+.auth-secondary-action {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--fg);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.auth-secondary-action:hover {
+  background: var(--neutral-soft);
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1.25rem 0;
+  color: var(--fg-subtle);
+  font-size: 0.78rem;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.auth-callout {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  background: var(--accent-soft);
+  color: var(--fg-muted);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.8rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  margin-top: 1.25rem;
+}
+
+.auth-callout svg {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+  color: var(--accent);
+}
+
+.auth-callout.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.auth-callout.warn svg {
+  color: var(--warn);
+}
+
+/* One-time-code entry as separate digit boxes rather than a single text input, matching
+   the reference mockup -- auto-advance/auto-submit handled in the component. */
+.otp-digit-row {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+}
+
+input.otp-digit {
+  width: 44px !important;
+  height: 52px;
+  text-align: center;
+  font-size: 1.3rem;
+  font-weight: 700;
+  padding: 0 !important;
+  margin-top: 0 !important;
+}
+
+@media (max-width: 380px) {
+  input.otp-digit {
+    width: 38px !important;
+    height: 46px;
+  }
+}
+
+/* ---------- Horizontal step progress (signup, product-linking review) ---------- */
+
+.stepper {
+  display: flex;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.stepper-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.stepper-dot {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: var(--neutral-soft);
+  color: var(--fg-subtle);
+}
+
+.stepper-item[data-state="done"] .stepper-dot {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.stepper-item[data-state="active"] .stepper-dot {
+  background: var(--accent);
+  color: var(--accent-fg);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.stepper-label {
+  font-size: 0.72rem;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
+.stepper-item[data-state="active"] .stepper-label {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.stepper-connector {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin: 0 0.4rem;
+  margin-bottom: 1.3rem;
+}
+
+.stepper-connector[data-done="true"] {
+  background: var(--accent);
+}
+
+/* ---------- Product-matching comparison (existing eBay listing linking) ---------- */
+
+.match-progress {
+  font-size: 0.85rem;
+  color: var(--fg-subtle);
+  font-weight: 600;
+}
+
+.match-card {
+  display: flex;
+  gap: 0.9rem;
+  padding: 1rem;
+}
+
+.match-card-thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--neutral-soft);
+  flex-shrink: 0;
+}
+
+.match-card-title {
+  font-weight: 700;
+  margin: 0.3rem 0 0.15rem;
+}
+
+.match-card-desc {
+  font-size: 0.8rem;
+  color: var(--fg-subtle);
+  margin: 0 0 0.4rem;
+}
+
+.match-card-meta {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+}
+
+.match-card-price {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.match-connector {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+}
+
+.match-connector-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg-subtle);
+}
+
+.match-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.match-decision-option {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.match-decision-option select {
+  margin-left: 0.4rem;
+}
+
 /* ---------- Public landing page (Phase 4 of the SaaS conversion) ---------- */
 
 .landing {
@@ -1615,6 +1901,52 @@ tbody tr:hover {
 
 .landing-login-link:hover {
   color: var(--accent-hover);
+}
+
+.landing-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.landing-menu-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .landing-menu-button {
+    display: inline-flex;
+  }
+}
+
+.landing-mobile-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0 1.5rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+
+.landing-mobile-menu a {
+  padding: 0.6rem 0.4rem;
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.landing-mobile-menu a:hover {
+  background: var(--neutral-soft);
 }
 
 .landing-hero {

@@ -541,6 +541,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const unmanaged: Array<{
         externalId: string;
         title: string;
+        descriptionHtml: string;
+        images: string[];
         suggestedProductId: string | null;
         matchScore?: number;
         matchReasons?: string[];
@@ -578,7 +580,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             }
           }
 
-          unmanaged.push({ externalId: item.externalId, title: item.title, suggestedProductId, matchScore, matchReasons });
+          unmanaged.push({
+            externalId: item.externalId,
+            title: item.title,
+            descriptionHtml: item.descriptionHtml,
+            images: item.images,
+            suggestedProductId,
+            matchScore,
+            matchReasons,
+          });
         }
         cursor = nextCursor;
       } while (cursor);

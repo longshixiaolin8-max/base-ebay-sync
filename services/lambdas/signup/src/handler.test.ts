@@ -115,6 +115,29 @@ describe("POST /signup", () => {
     expect(JSON.parse(res.body!)).toEqual({ checkoutUrl: "https://checkout.stripe.example/session" });
   });
 
+  it("sets the Cognito name attribute when a name is provided, and omits it when not", async () => {
+    await callHandler({
+      companyName: "Acme",
+      name: "Yamada Taro",
+      email: "a@example.com",
+      password: "hunter2hunter2",
+      inviteCode: "beta-2026",
+    });
+    const [createUserCall] = cognitoSendMock.mock.calls;
+    expect(createUserCall![0].input.UserAttributes).toContainEqual({ Name: "name", Value: "Yamada Taro" });
+
+    cognitoSendMock.mockClear();
+    await callHandler({
+      companyName: "Acme",
+      email: "b@example.com",
+      password: "hunter2hunter2",
+      inviteCode: "beta-2026",
+    });
+    const [createUserCallNoName] = cognitoSendMock.mock.calls;
+    const attrNames = (createUserCallNoName![0].input.UserAttributes as Array<{ Name: string }>).map((a) => a.Name);
+    expect(attrNames).not.toContain("name");
+  });
+
   it("returns 409 without touching Stripe when the email is already registered", async () => {
     cognitoSendMock.mockRejectedValueOnce(new UsernameExistsExceptionFake("exists"));
 

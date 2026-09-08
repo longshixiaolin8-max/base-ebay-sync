@@ -1,10 +1,13 @@
 "use client";
 
 import { confirmSignIn, signIn, signOut } from "aws-amplify/auth";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { type FormEvent, useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
+import { OtpInput } from "@/components/OtpInput";
+import { EyeIcon, EyeOffIcon, ShieldIcon } from "@/components/icons";
 
 type Stage =
   | { step: "credentials" }
@@ -16,7 +19,50 @@ function Brand() {
   return (
     <div className="auth-brand">
       <span className="app-brand-mark">AI</span>
-      <strong>AI EC運営プラットフォーム</strong>
+      <strong>
+        BASE <span className="app-brand-ebay">eBay</span> Sync
+      </strong>
+    </div>
+  );
+}
+
+function PasswordField({
+  label,
+  value,
+  onChange,
+  autoFocus,
+  minLength,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  autoFocus?: boolean;
+  minLength?: number;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="auth-field">
+      <label>
+        {label}
+        <div className="auth-password-field">
+          <input
+            type={visible ? "text" : "password"}
+            required
+            minLength={minLength}
+            autoFocus={autoFocus}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+          />
+          <button
+            type="button"
+            className="auth-password-toggle"
+            onClick={() => setVisible((v) => !v)}
+            aria-label={visible ? "パスワードを隠す" : "パスワードを表示"}
+          >
+            {visible ? <EyeOffIcon /> : <EyeIcon />}
+          </button>
+        </div>
+      </label>
     </div>
   );
 }
@@ -31,6 +77,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [showMfaHelp, setShowMfaHelp] = useState(false);
 
   useEffect(() => {
     if (stage.step !== "totp-setup") {
@@ -52,12 +99,14 @@ export default function LoginPage() {
 
   function handleNextStep(nextStep: { signInStep: string; totpSetupDetails?: { sharedSecret: string; getSetupUri: (appName: string) => URL } }) {
     if (nextStep.signInStep === "CONTINUE_SIGN_IN_WITH_TOTP_SETUP" && nextStep.totpSetupDetails) {
+      setCode("");
       setStage({
         step: "totp-setup",
         sharedSecret: nextStep.totpSetupDetails.sharedSecret,
-        setupUri: nextStep.totpSetupDetails.getSetupUri("AI EC Platform Admin").toString(),
+        setupUri: nextStep.totpSetupDetails.getSetupUri("BASE eBay Sync").toString(),
       });
     } else if (nextStep.signInStep === "CONFIRM_SIGN_IN_WITH_TOTP_CODE") {
+      setCode("");
       setStage({ step: "totp-code" });
     } else if (nextStep.signInStep === "CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED") {
       // Every admin account is provisioned via admin-create-user (self-signup is
@@ -123,12 +172,12 @@ export default function LoginPage() {
     }
   }
 
-  async function onSubmitCode(e: FormEvent) {
-    e.preventDefault();
+  async function submitCode(value: string) {
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      const result = await confirmSignIn({ challengeResponse: code });
+      const result = await confirmSignIn({ challengeResponse: value });
       if (result.isSignedIn) {
         router.replace("/dashboard");
       } else {
@@ -136,6 +185,7 @@ export default function LoginPage() {
       }
     } catch (err) {
       setError((err as Error).message);
+      setCode("");
     } finally {
       setSubmitting(false);
     }
@@ -151,19 +201,7 @@ export default function LoginPage() {
             初回ログインのため、新しいパスワードを設定してください(12文字以上、大文字・小文字・数字・記号を含む)。
           </p>
           <form onSubmit={onSubmitNewPassword} style={{ marginTop: "1.25rem" }}>
-            <div className="auth-field">
-              <label>
-                新しいパスワード
-                <input
-                  type="password"
-                  required
-                  minLength={12}
-                  autoFocus
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
-              </label>
-            </div>
+            <PasswordField label="新しいパスワード" value={newPassword} onChange={setNewPassword} autoFocus minLength={12} />
             {error && <p className="auth-error">{error}</p>}
             <button type="submit" disabled={submitting} style={{ width: "100%" }}>
               {submitting ? "設定中..." : "パスワードを設定してサインイン"}
@@ -179,8 +217,8 @@ export default function LoginPage() {
       <div className="auth-shell">
         <div className="auth-card">
           <Brand />
-          <h1>認証アプリの確認コード</h1>
-          {stage.step === "totp-setup" && (
+          <h1>2段階認証</h1>
+          {stage.step === "totp-setup" ? (
             <div style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
               <p style={{ margin: 0 }}>
                 初回ログインです。認証アプリ(Google Authenticator、1Password等)でQRコードを読み取るか、下のキーを手動で登録してください。
@@ -194,27 +232,46 @@ export default function LoginPage() {
                 {stage.sharedSecret}
               </code>
             </div>
+          ) : (
+            <p style={{ marginTop: "0.75rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>認証アプリの6桁のコードを入力してください。</p>
           )}
-          <form onSubmit={onSubmitCode} style={{ marginTop: "1.25rem" }}>
-            <div className="auth-field">
-              <label>
-                6桁の確認コード
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]{6}"
-                  required
-                  autoFocus
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                />
-              </label>
-            </div>
-            {error && <p className="auth-error">{error}</p>}
-            <button type="submit" disabled={submitting} style={{ width: "100%" }}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitCode(code);
+            }}
+            style={{ marginTop: "1.25rem" }}
+          >
+            <OtpInput value={code} onChange={setCode} onComplete={submitCode} disabled={submitting} />
+            {error && (
+              <p className="auth-error" style={{ marginTop: "1rem" }}>
+                {error}
+              </p>
+            )}
+            <button type="submit" disabled={submitting || code.length !== 6} style={{ width: "100%", marginTop: "1.1rem" }}>
               {submitting ? "確認中..." : "確認してサインイン"}
             </button>
           </form>
+
+          <div className="auth-callout warn">
+            <ShieldIcon />
+            <span>コードを他人に共有しないでください。第三者に教えると、アカウントが不正に利用されるおそれがあります。</span>
+          </div>
+
+          <div style={{ marginTop: "1rem", textAlign: "center" }}>
+            <button
+              type="button"
+              onClick={() => setShowMfaHelp((v) => !v)}
+              style={{ background: "none", border: "none", color: "var(--accent)", fontSize: "0.8rem", cursor: "pointer", padding: 0 }}
+            >
+              認証アプリを使えない場合
+            </button>
+            {showMfaHelp && (
+              <p style={{ marginTop: "0.6rem", fontSize: "0.78rem", color: "var(--fg-subtle)", lineHeight: 1.6, textAlign: "left" }}>
+                認証アプリ・デバイスを紛失した場合、ご自身での再設定はできません。管理者による本人確認のうえでの復旧対応が必要です。導入時のご連絡先までお問い合わせください。
+              </p>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -224,7 +281,8 @@ export default function LoginPage() {
     <div className="auth-shell">
       <div className="auth-card">
         <Brand />
-        <h1>管理者ログイン</h1>
+        <p className="auth-tagline">国内と海外の販売を、ひとつに。</p>
+        <h1>ログイン</h1>
         <form onSubmit={onSubmitCredentials} style={{ marginTop: "1.25rem" }}>
           <div className="auth-field">
             <label>
@@ -232,21 +290,25 @@ export default function LoginPage() {
               <input type="email" required autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
             </label>
           </div>
-          <div className="auth-field">
-            <label>
-              パスワード
-              <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
-            </label>
+          <PasswordField label="パスワード" value={password} onChange={setPassword} />
+          <div className="auth-links-row">
+            <Link href="/forgot-password">パスワードを忘れた方</Link>
           </div>
           {error && <p className="auth-error">{error}</p>}
           <button type="submit" disabled={submitting} style={{ width: "100%" }}>
-            {submitting ? "サインイン中..." : "サインイン"}
+            {submitting ? "サインイン中..." : "ログイン"}
           </button>
         </form>
-        <p className="auth-footnote">
-          アカウントは管理者が事前に発行します。このユーザープールは認証アプリによる確認コードの入力が必須です。
-          招待コードをお持ちの方は<a href="/signup">こちらから新規登録</a>できます。
-        </p>
+
+        <div className="auth-divider">または</div>
+        <Link href="/signup" className="auth-secondary-action">
+          招待コードをお持ちの方 新規登録
+        </Link>
+
+        <div className="auth-callout">
+          <ShieldIcon />
+          <span>ログイン後に2段階認証を行います。大切なアカウントを守るため、セキュリティを強化しています。</span>
+        </div>
       </div>
     </div>
   );

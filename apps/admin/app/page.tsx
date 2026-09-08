@@ -1,5 +1,8 @@
+"use client";
+
 import Link from "next/link";
-import { BoxIcon, CheckIcon, CoinIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
+import { useState } from "react";
+import { BoxIcon, CheckIcon, CoinIcon, MenuIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
 
 const PAIN_POINTS = [
   "英語での商品説明・出品作業に時間と語学力が必要",
@@ -34,17 +37,49 @@ const FEATURES = [
 const STEPS = ["BASEアカウントを連携", "AIが自動でeBay出品ドラフトを作成", "内容を確認して承認するだけで出品、在庫は自動同期"];
 
 export default function LandingPage() {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="landing">
       <header className="landing-topbar">
         <span className="app-brand landing-brand">
           <span className="app-brand-mark">AI</span>
-          AI EC運営プラットフォーム
+          BASE <span className="app-brand-ebay">eBay</span> Sync
         </span>
-        <Link href="/login" className="landing-login-link">
-          ログイン
-        </Link>
+        <div className="landing-topbar-actions">
+          <Link href="/login" className="landing-login-link">
+            ログイン
+          </Link>
+          <button
+            type="button"
+            className="landing-menu-button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label="メニュー"
+            aria-expanded={menuOpen}
+          >
+            <MenuIcon />
+          </button>
+        </div>
       </header>
+
+      {menuOpen && (
+        <nav className="landing-mobile-menu">
+          <a href="#features" onClick={() => setMenuOpen(false)}>
+            できること
+          </a>
+          <a href="#how-it-works" onClick={() => setMenuOpen(false)}>
+            使い方
+          </a>
+          <a href="#plan" onClick={() => setMenuOpen(false)}>
+            ご利用プラン
+          </a>
+          <Link href="/login" onClick={() => setMenuOpen(false)}>
+            ログイン
+          </Link>
+          <Link href="/signup" onClick={() => setMenuOpen(false)}>
+            新規登録
+          </Link>
+        </nav>
+      )}
 
       <section className="landing-hero">
         <h1>BASEの商品を、そのままeBayへ。海外販売を自動化。</h1>
@@ -71,7 +106,7 @@ export default function LandingPage() {
         </ul>
       </section>
 
-      <section className="landing-section">
+      <section id="features" className="landing-section">
         <h2 className="landing-section-title">できること</h2>
         <div className="landing-feature-grid">
           {FEATURES.map((feature) => {
@@ -89,7 +124,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      <section className="landing-section">
+      <section id="how-it-works" className="landing-section">
         <h2 className="landing-section-title">使い方</h2>
         <ol className="landing-steps">
           {STEPS.map((step, i) => (
@@ -101,7 +136,7 @@ export default function LandingPage() {
         </ol>
       </section>
 
-      <section className="landing-section">
+      <section id="plan" className="landing-section">
         <h2 className="landing-section-title">ご利用プラン</h2>
         <div className="card card-pad landing-plan-card">
           <div className="landing-plan-header">
@@ -130,7 +165,7 @@ export default function LandingPage() {
       </section>
 
       <footer className="landing-footer">
-        <span>© AI EC運営プラットフォーム</span>
+        <span>© BASE eBay Sync</span>
         <Link href="/login">ログイン</Link>
         <Link href="/signup">新規登録</Link>
       </footer>
