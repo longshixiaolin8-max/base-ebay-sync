@@ -2,6 +2,7 @@
 
 import type { ProductMaster } from "@ai-ec/core";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
@@ -51,6 +52,17 @@ export default function ProductsPage() {
   async function approve(id: string) {
     setBusyId(id);
     try {
+      // Checked before approval, not just at eBay's own publish-time validation -- a
+      // missing required item specific (e.g. Metal, Type) used to only surface as an
+      // async publish failure well after the human had already clicked approve.
+      const preflight = await apiGet<{ missingAspects: string[] }>(`/admin/products/${id}/preflight-check`);
+      if (preflight.missingAspects.length > 0) {
+        notify(
+          `承認前に確認してください: eBayのこのカテゴリで必須の項目が未入力です(${preflight.missingAspects.join("、")})。商品情報を補ってから再度お試しください。`,
+        );
+        return;
+      }
+
       await apiPost(`/admin/products/${id}/approve-ebay-listing`);
       notify("eBayへの出品を承認しました。", "success");
       await load();
@@ -78,6 +90,9 @@ export default function ProductsPage() {
             eBayへの出品は必ず人間の承認が必要です。「AI生成済み・承認待ち」の商品はAIが生成した英語タイトル/説明を確認のうえ承認してください。
           </p>
         </div>
+        <Link href="/products/link-existing" className="button secondary">
+          既存eBay出品を紐付ける
+        </Link>
       </div>
       {!ready || loading ? (
         <SkeletonRows />

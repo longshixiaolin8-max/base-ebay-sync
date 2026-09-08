@@ -177,3 +177,15 @@ export function MenuIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Plug icon for the BASE/eBay connection onboarding nav item. */
+export function PlugIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M9 2v5" />
+      <path d="M15 2v5" />
+      <path d="M6 7h12l-1 5a5 5 0 0 1-10 0Z" />
+      <path d="M12 17v5" />
+    </Icon>
+  );
+}

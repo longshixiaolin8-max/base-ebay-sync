@@ -616,13 +616,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
-button.secondary {
+button.secondary,
+.button.secondary {
   background: transparent;
   color: var(--accent);
   border-color: var(--border-strong);
 }
 
-button.secondary:hover:not(:disabled) {
+button.secondary:hover:not(:disabled),
+.button.secondary:hover:not(:disabled) {
   background: var(--accent-soft);
   border-color: var(--accent);
 }

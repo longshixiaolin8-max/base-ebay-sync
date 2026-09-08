@@ -694,6 +694,34 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("GET /admin/products/{id}/preflight-check returns 404 when no draft exists", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/p1/preflight-check"));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("GET /admin/products/{id}/preflight-check reports missing required aspects before approval", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "draft-1", categoryCandidates: [{ ebayCategoryId: "262003", label: "Jewelry" }], itemSpecifics: { Brand: null, Type: "Bracelet" } }],
+    ]);
+    getRequiredItemAspectsMock.mockResolvedValueOnce(["Brand", "Type", "Metal"]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/p1/preflight-check"));
+    expect(res.statusCode).toBe(200);
+    // Brand is null but eBay's own "Unbranded" fallback fills it (applyStandardAspectFallbacks),
+    // so only the aspect with no correct generic fallback (Metal) should be reported missing.
+    expect(JSON.parse(res.body!)).toEqual({ categoryId: "262003", missingAspects: ["Metal"] });
+  });
+
+  it("GET /admin/products/{id}/preflight-check returns no missing aspects once everything required is present", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "draft-1", categoryCandidates: [{ ebayCategoryId: "262003", label: "Jewelry" }], itemSpecifics: { Brand: "Tiffany", Type: "Bracelet" } }],
+    ]);
+    getRequiredItemAspectsMock.mockResolvedValueOnce(["Brand", "Type"]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/p1/preflight-check"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ categoryId: "262003", missingAspects: [] });
+  });
+
   it("GET /admin/ebay/category-suggestions returns eBay's real category suggestions", async () => {
     fakeDb = createFakeDb([]);
     const res = await callHandler(makeEvent("GET", "/admin/ebay/category-suggestions", { q: "silver bracelet" }));
@@ -913,6 +941,20 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/sync/state", { channel: "ebay" }));
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", state: "HEALTHY", reasons: [] });
+    });
+
+    it("GET /admin/oauth/status reports both channels as not connected for a brand-new tenant", async () => {
+      listConnectedAccountIdsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ base: false, ebay: false });
+    });
+
+    it("GET /admin/oauth/status reports a channel connected once an account id exists for it", async () => {
+      listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce([]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: false });
     });
 
     it("GET /admin/slo aggregates sync confidence, drift count, AI failure rate, and recent auto-recovery events", async () => {

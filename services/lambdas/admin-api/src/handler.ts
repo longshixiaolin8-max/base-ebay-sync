@@ -2,10 +2,12 @@ import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
 import {
+  applyStandardAspectFallbacks,
   classifyStaleness,
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
+  findMissingRequiredAspects,
   getPlanLimits,
   ItemCondition,
   matchProductIdentity,
@@ -225,6 +227,34 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       return json(202, { status: "publish_queued" });
+    }
+
+    // Surfaces the exact same required-aspects check ebay-sync-worker runs at actual
+    // publish time (findMissingRequiredAspects/applyStandardAspectFallbacks in
+    // packages/core), but *before* the human clicks approve rather than only after an
+    // async publish job has already failed. Read-only; never blocks approval itself --
+    // the admin UI decides what to do with a non-empty missingAspects list.
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/preflight-check$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      const primaryCategory = draft.categoryCandidates[0];
+      if (!primaryCategory) return json(200, { missingAspects: [], categoryId: null });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const appAccessToken = await adapter.getApplicationAccessToken();
+      const requiredAspects = await adapter.getRequiredItemAspects(appAccessToken, primaryCategory.ebayCategoryId);
+      const itemSpecifics = applyStandardAspectFallbacks(draft.itemSpecifics, requiredAspects);
+      const missingAspects = findMissingRequiredAspects(itemSpecifics, requiredAspects);
+
+      return json(200, { categoryId: primaryCategory.ebayCategoryId, missingAspects });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-condition$/.test(path)) {
@@ -1004,6 +1034,16 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!channel) return json(400, { error: "channel_required" });
       const state = await computeChannelSyncState(db, tenantId, channel);
       return json(200, state);
+    }
+
+    // Onboarding screen (apps/admin/app/onboarding): a simple, reliable "is this channel
+    // connected yet" boolean -- computeChannelSyncState's HEALTHY/DEGRADED/... states are
+    // about ongoing sync health, not "has this tenant ever connected an account", and are
+    // not a safe stand-in for a brand-new tenant that hasn't connected anything at all.
+    if (method === "GET" && path === "/admin/oauth/status") {
+      const [baseAccountId] = await listConnectedAccountIds(db, tenantId, "base");
+      const [ebayAccountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      return json(200, { base: Boolean(baseAccountId), ebay: Boolean(ebayAccountId) });
     }
 
     // --- New in the multi-tenant retrofit: mint the signed OAuth authorize URL server-side
