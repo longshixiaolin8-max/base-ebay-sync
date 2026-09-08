@@ -1161,6 +1161,55 @@ a.stat-card:hover {
   font-size: 0.9rem;
 }
 
+/* ---------- Audit log timeline ---------- */
+
+.audit-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.audit-day-group {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.audit-day-header {
+  padding: 0.6rem 1rem;
+  background: var(--neutral-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--fg-muted);
+}
+
+.audit-entry {
+  border-top: 1px solid var(--border);
+}
+
+.audit-entry-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--fg);
+  min-height: 44px;
+}
+
+.audit-entry-main:hover {
+  background: var(--surface-hover);
+}
+
+.audit-entry-detail {
+  padding: 0 1rem 1rem 3.4rem;
+}
+
 .specifics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

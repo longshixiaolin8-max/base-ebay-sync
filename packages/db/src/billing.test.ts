@@ -28,11 +28,15 @@ describe("createPendingTenant", () => {
 });
 
 describe("getTenantBillingStatus", () => {
-  it("returns the tenant's plan/status/stripeCustomerId", async () => {
+  it("returns the tenant's plan/status/stripeCustomerId/stripeSubscriptionId/name", async () => {
     const db = {
       select: () => ({
         from: () => ({
-          where: () => ({ limit: async () => [{ plan: "standard", status: "active", stripeCustomerId: "cus_123" }] }),
+          where: () => ({
+            limit: async () => [
+              { plan: "standard", status: "active", stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456", name: "Acme Inc" },
+            ],
+          }),
         }),
       }),
     } as unknown as Database;
@@ -41,6 +45,8 @@ describe("getTenantBillingStatus", () => {
       plan: "standard",
       status: "active",
       stripeCustomerId: "cus_123",
+      stripeSubscriptionId: "sub_456",
+      name: "Acme Inc",
     });
   });
 

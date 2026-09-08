@@ -140,7 +140,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/billing/status") {
       const billing = await getTenantBillingStatus(db, tenantId);
       if (!billing) return json(404, { error: "not_found" });
-      return json(200, { plan: billing.plan, status: billing.status });
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      return json(200, {
+        plan: billing.plan,
+        status: billing.status,
+        // Real signal, not a guess: Stripe secret keys are prefixed sk_test_/sk_live_ by
+        // Stripe itself. Lets the UI show a "デモ契約" badge only when this tenant's
+        // billing is genuinely running against Stripe's test mode, never unconditionally.
+        testMode: creds.secretKey.startsWith("sk_test_"),
+      });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
@@ -153,6 +161,95 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         return_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
       });
       return json(200, { url: session.url });
+    }
+
+    if (method === "GET" && path === "/admin/billing/details") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing?.stripeCustomerId) return json(400, { error: "no_stripe_customer" });
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      const stripe = createStripeClient(creds);
+
+      const customer = await stripe.customers.retrieve(billing.stripeCustomerId, {
+        expand: ["invoice_settings.default_payment_method"],
+      });
+      const paymentMethod =
+        !customer.deleted &&
+        customer.invoice_settings?.default_payment_method &&
+        typeof customer.invoice_settings.default_payment_method === "object" &&
+        customer.invoice_settings.default_payment_method.card
+          ? {
+              brand: customer.invoice_settings.default_payment_method.card.brand,
+              last4: customer.invoice_settings.default_payment_method.card.last4,
+              expMonth: customer.invoice_settings.default_payment_method.card.exp_month,
+              expYear: customer.invoice_settings.default_payment_method.card.exp_year,
+            }
+          : null;
+
+      const invoicesRes = await stripe.invoices.list({ customer: billing.stripeCustomerId, limit: 12 });
+      const invoices = invoicesRes.data.map((inv) => ({
+        id: inv.id,
+        amountUsdCents: inv.amount_paid,
+        createdAt: new Date(inv.created * 1000).toISOString(),
+        status: inv.status,
+        hostedInvoiceUrl: inv.hosted_invoice_url ?? null,
+      }));
+
+      let subscription:
+        | {
+            currentPeriodEnd: string | null;
+            cancelAtPeriodEnd: boolean;
+            priceAmount: number | null;
+            priceCurrency: string | null;
+            priceInterval: string | null;
+          }
+        | null = null;
+      if (billing.stripeSubscriptionId) {
+        const sub = await stripe.subscriptions.retrieve(billing.stripeSubscriptionId);
+        // Stripe moved the billing-period fields off the subscription itself and onto
+        // each subscription item in newer API versions -- this platform's subscriptions
+        // are always single-item (one flat plan, see plan-limits.ts), so the first item
+        // is the only one that could ever exist.
+        const item = sub.items.data[0];
+        subscription = {
+          currentPeriodEnd: item?.current_period_end ? new Date(item.current_period_end * 1000).toISOString() : null,
+          cancelAtPeriodEnd: sub.cancel_at_period_end,
+          // The tenant's real, currently-active subscription price -- straight from Stripe,
+          // not a figure this codebase invents or advertises anywhere else.
+          priceAmount: item?.price.unit_amount ?? null,
+          priceCurrency: item?.price.currency ?? null,
+          priceInterval: item?.price.recurring?.interval ?? null,
+        };
+      }
+
+      return json(200, { paymentMethod, invoices, subscription });
+    }
+
+    if (method === "POST" && path === "/admin/billing/cancel") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing?.stripeSubscriptionId) return json(400, { error: "no_stripe_subscription" });
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      const stripe = createStripeClient(creds);
+      // cancel_at_period_end, not an immediate cancellation -- the tenant keeps access
+      // (and its sync/AI-generation quota) through the period it already paid for, exactly
+      // matching the plan card's own "次回更新日に契約終了となります" copy.
+      const sub = await stripe.subscriptions.update(billing.stripeSubscriptionId, { cancel_at_period_end: true });
+      const periodEnd = sub.items.data[0]?.current_period_end;
+      const currentPeriodEnd = periodEnd ? new Date(periodEnd * 1000).toISOString() : null;
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "subscription_cancel_scheduled",
+        entityType: "tenant",
+        entityId: tenantId,
+        after: { cancelAtPeriodEnd: true, currentPeriodEnd },
+      });
+      return json(200, { cancelAtPeriodEnd: sub.cancel_at_period_end, currentPeriodEnd });
+    }
+
+    if (method === "GET" && path === "/admin/tenant") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing) return json(404, { error: "not_found" });
+      return json(200, { name: billing.name });
     }
 
     // Phase 3 of the SaaS conversion ("plan quota enforcement"). Informational only --
@@ -826,6 +923,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           before: { quantity: result.currentQuantity },
           after: { quantity: result.reconstructedQuantity, eventsReplayed: result.eventsReplayed },
         });
+        // The corrected quantity directly addresses whatever this product's open
+        // inventory_drift row(s) were reporting -- resolve them rather than leaving a
+        // stale error sitting in the list after the operator just fixed its root cause.
+        await db
+          .update(syncErrors)
+          .set({ resolved: true })
+          .where(
+            and(
+              eq(syncErrors.tenantId, tenantId),
+              eq(syncErrors.productId, id),
+              eq(syncErrors.errorCode, "inventory_drift"),
+              eq(syncErrors.resolved, false),
+            ),
+          );
       }
 
       return json(200, result);
@@ -1244,6 +1355,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           const latestOrder = sortedByPlacedAt[sortedByPlacedAt.length - 1] ?? null;
           const hasReturn = productOrders.some((o) => ["RETURN_REQUESTED", "RETURNED", "REFUNDED"].includes(o.status));
 
+          const ebayListing = listings.find((l) => l.channel === "ebay");
+
           return {
             productId: product.id,
             sku: product.sku,
@@ -1252,7 +1365,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             images: product.images,
             channelStatus: Object.fromEntries(listings.map((l) => [l.channel, l.status])),
             lastSyncedAt: Object.fromEntries(listings.map((l) => [l.channel, l.lastSyncedAt?.toISOString() ?? null])),
+            // The price this platform actually last pushed to eBay -- the real "current
+            // price" to compare a fresh AI suggestion against, not the recommendation's own
+            // theoretical baseline. Null until a first successful sync has ever happened.
+            currentEbayPriceUsdCents:
+              ebayListing?.lastSyncedPriceJpy != null ? Math.round(ebayListing.lastSyncedPriceJpy * usdPerJpy * 100) : null,
             inventory: breakdown,
+            // Nullable, not defaulted to 0 -- a product whose cost was never entered has no
+            // cost data at all, distinct from one that genuinely cost nothing (see
+            // product_master.cost_jpy's own schema comment). The commerce page sums this
+            // across products that do have it and discloses which ones don't, rather than
+            // silently treating "unknown" as "free" in an aggregate total.
+            costUsdCents: typeof product.costJpy === "number" ? Math.round(product.costJpy * usdPerJpy * 100) : null,
             revenueUsdCents: totalRevenueUsdCents,
             netProfitUsdCents: totalNetProfitUsdCents,
             profitMarginBasisPoints,

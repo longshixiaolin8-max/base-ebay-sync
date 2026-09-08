@@ -121,7 +121,22 @@ let fakeDb: unknown;
 const getDbMock = vi.fn(() => fakeDb);
 const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid" });
 const billingPortalSessionsCreateMock = vi.fn().mockResolvedValue({ url: "https://billing.stripe.example/session" });
-const createStripeClientMock = vi.fn(() => ({ billingPortal: { sessions: { create: billingPortalSessionsCreateMock } } }));
+const customersRetrieveMock = vi.fn().mockResolvedValue({ deleted: false, invoice_settings: { default_payment_method: null } });
+const invoicesListMock = vi.fn().mockResolvedValue({ data: [] });
+const subscriptionsRetrieveMock = vi.fn().mockResolvedValue({
+  cancel_at_period_end: false,
+  items: { data: [{ current_period_end: 1735689600, price: { unit_amount: 980000, currency: "usd", recurring: { interval: "month" } } }] },
+});
+const subscriptionsUpdateMock = vi.fn().mockResolvedValue({
+  cancel_at_period_end: true,
+  items: { data: [{ current_period_end: 1735689600 }] },
+});
+const createStripeClientMock = vi.fn(() => ({
+  billingPortal: { sessions: { create: billingPortalSessionsCreateMock } },
+  customers: { retrieve: customersRetrieveMock },
+  invoices: { list: invoicesListMock },
+  subscriptions: { retrieve: subscriptionsRetrieveMock, update: subscriptionsUpdateMock },
+}));
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
@@ -750,6 +765,34 @@ describe("admin-api handler", () => {
     expect(recordAuditLogMock).not.toHaveBeenCalled();
   });
 
+  it("POST /admin/products/{id}/reconstruct-inventory resolves the product's open inventory_drift errors once applied", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 10,
+      drifted: true,
+      eventsReplayed: 2,
+      applied: true,
+    });
+    const updateMock = vi.fn(() => ({ set: () => ({ where: async () => undefined }) }));
+    fakeDb = { ...createFakeDb([]), update: updateMock };
+    await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(updateMock).toHaveBeenCalled();
+  });
+
+  it("POST /admin/products/{id}/reconstruct-inventory does not touch sync_errors when there was no drift", async () => {
+    applyReconstructedInventoryMock.mockResolvedValueOnce({
+      reconstructedQuantity: 3,
+      currentQuantity: 3,
+      drifted: false,
+      eventsReplayed: 1,
+      applied: false,
+    });
+    const updateMock = vi.fn(() => ({ set: () => ({ where: async () => undefined }) }));
+    fakeDb = { ...createFakeDb([]), update: updateMock };
+    await callHandler(makeEvent("POST", "/admin/products/product-1/reconstruct-inventory", {}, {}));
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
   it("GET /admin/ebay/required-aspects returns eBay's real required aspects for a category", async () => {
     getRequiredItemAspectsMock.mockResolvedValueOnce(["Brand", "Type"]);
     const res = await callHandler(makeEvent("GET", "/admin/ebay/required-aspects", { categoryId: "262003" }));
@@ -1078,6 +1121,61 @@ describe("admin-api handler", () => {
         staleLevel: "fresh",
         hasReturn: false,
       });
+      expect(parsed.products[0].costUsdCents).toBeNull();
+    });
+
+    it("GET /admin/commerce-dashboard surfaces the eBay channel's real last-synced price, converted to USD", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", sku: "sku-1", title: "T1", status: "active", createdAt: new Date(), images: [] }],
+        [{ channel: "ebay", status: "published", lastSyncedPriceJpy: 13000 }],
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 1, reserved: 0, available: 1, safetyBuffer: 0, sellableByChannel: {} });
+      listOrdersForProductMock.mockResolvedValueOnce([]);
+      getSnsContentMock.mockResolvedValueOnce(null);
+      fetchFxRateMock.mockResolvedValueOnce({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+
+      const res = await callHandler(makeEvent("GET", "/admin/commerce-dashboard"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products[0].currentEbayPriceUsdCents).toBe(Math.round(13000 * 0.0067 * 100));
+    });
+
+    it("GET /admin/commerce-dashboard reports a null current eBay price before any sync has ever succeeded", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "p1", sku: "sku-1", title: "T1", status: "draft", createdAt: new Date(), images: [] }],
+        [],
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce(null);
+      listOrdersForProductMock.mockResolvedValueOnce([]);
+      getSnsContentMock.mockResolvedValueOnce(null);
+
+      const res = await callHandler(makeEvent("GET", "/admin/commerce-dashboard"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products[0].currentEbayPriceUsdCents).toBeNull();
+    });
+
+    it("GET /admin/commerce-dashboard converts a product's real cost_jpy to costUsdCents, using the current FX rate", async () => {
+      fakeDb = createFakeDb([
+        [
+          {
+            id: "p1",
+            sku: "sku-1",
+            title: "T1",
+            status: "active",
+            createdAt: new Date(),
+            images: [],
+            costJpy: 3000,
+          },
+        ],
+        [],
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 1, reserved: 0, available: 1, safetyBuffer: 0, sellableByChannel: {} });
+      listOrdersForProductMock.mockResolvedValueOnce([]);
+      getSnsContentMock.mockResolvedValueOnce(null);
+      fetchFxRateMock.mockResolvedValueOnce({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+
+      const res = await callHandler(makeEvent("GET", "/admin/commerce-dashboard"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products[0].costUsdCents).toBe(Math.round(3000 * 0.0067 * 100));
     });
 
     it("GET /admin/dashboard/summary aggregates this-month/last-month KPIs, a daily trend, recent orders, and inventory", async () => {
@@ -1177,13 +1275,128 @@ describe("admin-api handler", () => {
       expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "pending_payment" });
     });
 
-    it("GET /admin/billing/status is reachable even when the tenant is inactive", async () => {
+    it("GET /admin/billing/status is reachable even when the tenant is inactive, and reports Stripe test-mode", async () => {
       getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "past_due", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123" });
 
       const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
 
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "past_due" });
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "past_due", testMode: true });
+    });
+
+    it("GET /admin/billing/status reports testMode false for a live Stripe secret key", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_live_abc123" });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
+
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: false });
+    });
+
+    it("GET /admin/billing/details returns the real Stripe payment method, invoices, and subscription period", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "active",
+        stripeCustomerId: "cus_1",
+        stripeSubscriptionId: "sub_1",
+      });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123" });
+      customersRetrieveMock.mockResolvedValueOnce({
+        deleted: false,
+        invoice_settings: {
+          default_payment_method: { card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2028 } },
+        },
+      });
+      invoicesListMock.mockResolvedValueOnce({
+        data: [
+          {
+            id: "in_1",
+            amount_paid: 980000,
+            created: 1735689600,
+            status: "paid",
+            hosted_invoice_url: "https://invoice.stripe.example/in_1",
+          },
+        ],
+      });
+      subscriptionsRetrieveMock.mockResolvedValueOnce({
+        cancel_at_period_end: false,
+        items: {
+          data: [
+            {
+              current_period_end: 1738368000,
+              price: { unit_amount: 980000, currency: "usd", recurring: { interval: "month" } },
+            },
+          ],
+        },
+      });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/details"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        paymentMethod: { brand: "visa", last4: "4242", expMonth: 12, expYear: 2028 },
+        invoices: [
+          {
+            id: "in_1",
+            amountUsdCents: 980000,
+            createdAt: new Date(1735689600 * 1000).toISOString(),
+            status: "paid",
+            hostedInvoiceUrl: "https://invoice.stripe.example/in_1",
+          },
+        ],
+        subscription: {
+          currentPeriodEnd: new Date(1738368000 * 1000).toISOString(),
+          cancelAtPeriodEnd: false,
+          priceAmount: 980000,
+          priceCurrency: "usd",
+          priceInterval: "month",
+        },
+      });
+    });
+
+    it("GET /admin/billing/details returns 400 when the (active) tenant somehow has no Stripe customer id", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/details"));
+
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("POST /admin/billing/cancel schedules cancellation at period end and records an audit log entry", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "active",
+        stripeCustomerId: "cus_1",
+        stripeSubscriptionId: "sub_1",
+      });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123" });
+      subscriptionsUpdateMock.mockResolvedValueOnce({
+        cancel_at_period_end: true,
+        items: { data: [{ current_period_end: 1738368000 }] },
+      });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/cancel"));
+
+      expect(res.statusCode).toBe(200);
+      expect(subscriptionsUpdateMock).toHaveBeenCalledWith("sub_1", { cancel_at_period_end: true });
+      expect(JSON.parse(res.body!)).toEqual({
+        cancelAtPeriodEnd: true,
+        currentPeriodEnd: new Date(1738368000 * 1000).toISOString(),
+      });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "subscription_cancel_scheduled", entityType: "tenant" }),
+      );
+    });
+
+    it("GET /admin/tenant returns the tenant's real registered name", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", name: "Acme Inc" });
+
+      const res = await callHandler(makeEvent("GET", "/admin/tenant"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ name: "Acme Inc" });
     });
 
     it("POST /admin/billing/portal-session is reachable even when the tenant is inactive, and returns the Stripe portal URL", async () => {

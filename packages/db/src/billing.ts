@@ -20,13 +20,24 @@ export async function createPendingTenant(db: Database, name: string): Promise<{
 export async function getTenantBillingStatus(
   db: Database,
   tenantId: string,
-): Promise<{ plan: string; status: TenantStatus; stripeCustomerId: string | null } | undefined> {
+): Promise<
+  | { plan: string; status: TenantStatus; stripeCustomerId: string | null; stripeSubscriptionId: string | null; name: string }
+  | undefined
+> {
   const [row] = await db
-    .select({ plan: tenants.plan, status: tenants.status, stripeCustomerId: tenants.stripeCustomerId })
+    .select({
+      plan: tenants.plan,
+      status: tenants.status,
+      stripeCustomerId: tenants.stripeCustomerId,
+      stripeSubscriptionId: tenants.stripeSubscriptionId,
+      name: tenants.name,
+    })
     .from(tenants)
     .where(eq(tenants.id, tenantId))
     .limit(1);
-  return row as { plan: string; status: TenantStatus; stripeCustomerId: string | null } | undefined;
+  return row as
+    | { plan: string; status: TenantStatus; stripeCustomerId: string | null; stripeSubscriptionId: string | null; name: string }
+    | undefined;
 }
 
 export async function markTenantActive(

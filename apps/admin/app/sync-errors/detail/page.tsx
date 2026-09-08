@@ -17,6 +17,13 @@ interface InventoryBreakdown {
   sellableByChannel: Record<string, number>;
 }
 
+interface ReconstructPreview {
+  reconstructedQuantity: number;
+  currentQuantity: number;
+  drifted: boolean;
+  eventsReplayed: number;
+}
+
 function SyncErrorDetailInner() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
@@ -32,6 +39,8 @@ function SyncErrorDetailInner() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [reconstructPreview, setReconstructPreview] = useState<ReconstructPreview | null>(null);
+  const [applyingCorrection, setApplyingCorrection] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -66,6 +75,14 @@ function SyncErrorDetailInner() {
             .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
             .slice(0, 10),
         );
+
+        if (found.errorCode === "inventory_drift" && !found.resolved) {
+          await apiGet<ReconstructPreview>(`/admin/products/${found.productId}/reconstruct-inventory`)
+            .then(setReconstructPreview)
+            .catch(() => setReconstructPreview(null));
+        } else {
+          setReconstructPreview(null);
+        }
       }
     } catch (err) {
       setLoadFailed(true);
@@ -90,6 +107,24 @@ function SyncErrorDetailInner() {
       notify(`再試行の登録に失敗しました: ${(err as Error).message}`);
     } finally {
       setRetrying(false);
+    }
+  }
+
+  async function applyCorrection() {
+    if (!error?.productId || applyingCorrection) return;
+    setApplyingCorrection(true);
+    try {
+      const result = await apiPost<{ applied: boolean; reconstructedQuantity: number }>(
+        `/admin/products/${error.productId}/reconstruct-inventory`,
+      );
+      if (result.applied) {
+        notify(`在庫数を${result.reconstructedQuantity}点に更新しました。`, "success");
+      }
+      await load();
+    } catch (err) {
+      notify(`在庫数の更新に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setApplyingCorrection(false);
     }
   }
 
@@ -164,6 +199,36 @@ function SyncErrorDetailInner() {
                     .map(([ch, qty]) => `${ch.toUpperCase()}販売可 ${qty}点`)
                     .join(" / ")}
                 </p>
+              </section>
+            )}
+
+            {reconstructPreview && (
+              <section className="card card-pad">
+                <div className="section-eyebrow">正しい在庫数</div>
+                <p style={{ margin: "0.4rem 0", fontSize: "0.82rem", color: "var(--fg-subtle)" }}>
+                  BASEの入出庫履歴(入庫報告・販売実績)から自動計算した数値です。手入力ではなく、この計算結果がそのまま反映されます。
+                </p>
+                <div className="detail-metric-grid">
+                  <div className="detail-metric">
+                    <div className="detail-metric-value">{reconstructPreview.currentQuantity}</div>
+                    <div className="detail-metric-label">現在の登録在庫</div>
+                  </div>
+                  <div className="detail-metric">
+                    <div className="detail-metric-value" style={{ color: reconstructPreview.drifted ? "var(--accent)" : undefined }}>
+                      {reconstructPreview.reconstructedQuantity}
+                    </div>
+                    <div className="detail-metric-label">計算上の正しい在庫</div>
+                  </div>
+                </div>
+                {reconstructPreview.drifted ? (
+                  <button type="button" onClick={applyCorrection} disabled={applyingCorrection} style={{ marginTop: "0.8rem" }}>
+                    {applyingCorrection ? "反映中..." : `在庫数を${reconstructPreview.reconstructedQuantity}点に修正して再試行`}
+                  </button>
+                ) : (
+                  <p style={{ marginTop: "0.6rem", fontSize: "0.82rem", color: "var(--fg-subtle)" }}>
+                    現在の登録在庫は履歴上の計算値と一致しています。
+                  </p>
+                )}
               </section>
             )}
 
