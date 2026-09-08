@@ -7,28 +7,11 @@ import { useRequireAuth } from "@/lib/use-require-auth";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { BoxIcon, CartIcon, CheckIcon, PlugIcon } from "@/components/icons";
+import { OnboardingStepper } from "@/components/OnboardingStepper";
 
 interface OAuthStatus {
   base: boolean;
   ebay: boolean;
-}
-
-const WIZARD_STEPS = ["接続", "設定", "紐付け", "初回出品"];
-
-function Stepper({ current }: { current: number }) {
-  return (
-    <div className="stepper">
-      {WIZARD_STEPS.map((label, i) => (
-        <div key={label} style={{ display: "contents" }}>
-          <div className="stepper-item" data-state={i < current ? "done" : i === current ? "active" : "pending"}>
-            <span className="stepper-dot">{i < current ? <CheckIcon /> : i + 1}</span>
-            <span className="stepper-label">{label}</span>
-          </div>
-          {i < WIZARD_STEPS.length - 1 && <div className="stepper-connector" data-done={i < current} />}
-        </div>
-      ))}
-    </div>
-  );
 }
 
 /**
@@ -143,7 +126,7 @@ export default function OnboardingPage() {
         </div>
 
         <div style={{ maxWidth: "640px" }}>
-          <Stepper current={step} />
+          <OnboardingStepper current={step} />
 
           {step === 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -260,7 +243,7 @@ export default function OnboardingPage() {
                 ) : (
                   <>
                     <span className="badge warn">{unmanagedCount}件が未紐付けです</span>
-                    <Link href="/products/link-existing" className="button" style={{ display: "block", textAlign: "center", marginTop: "0.8rem" }}>
+                    <Link href="/products/link-existing?onboarding=1" className="button" style={{ display: "block", textAlign: "center", marginTop: "0.8rem" }}>
                       紐付けを開始
                     </Link>
                   </>

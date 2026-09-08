@@ -2059,6 +2059,56 @@ input.otp-digit {
   text-underline-offset: 2px;
 }
 
+.landing-hero-note {
+  margin: 0.75rem 0 0;
+  color: var(--fg-subtle);
+  font-size: 0.82rem;
+}
+
+.landing-example-card {
+  max-width: 460px;
+  margin: 2.5rem auto 0;
+  padding: 1.25rem;
+  text-align: left;
+}
+
+.landing-example-tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--fg-subtle);
+  background: var(--neutral-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.55rem;
+}
+
+.landing-example-figures {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+}
+
+.landing-example-figures dt {
+  font-size: 0.75rem;
+  color: var(--fg-subtle);
+  margin: 0 0 0.2rem;
+}
+
+.landing-example-figures dd {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.landing-example-disclaimer {
+  margin: 0.75rem 0 0;
+  font-size: 0.72rem;
+  color: var(--fg-subtle);
+  text-align: center;
+}
+
 .landing-section {
   padding: 2.5rem 0;
   border-top: 1px solid var(--border);
@@ -2165,6 +2215,23 @@ input.otp-digit {
   display: inline-flex;
   align-items: center;
   gap: 0.3rem;
+}
+
+.landing-plan-price {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.landing-plan-price-amount {
+  font-size: 2rem;
+  font-weight: 800;
+}
+
+.landing-plan-price-unit {
+  color: var(--fg-subtle);
+  font-size: 0.85rem;
 }
 
 .landing-plan-limits {

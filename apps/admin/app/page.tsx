@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { BoxIcon, CheckIcon, CoinIcon, MenuIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
+import { BoxIcon, CoinIcon, MenuIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
+
+// Illustrative only -- not a real tenant's listing. The platform never shows a channel
+// price it hasn't actually synced (see channelListings.lastSyncedPriceJpy elsewhere in
+// this app), so this example is clearly labeled as a sample rather than live data.
+const EXAMPLE_LISTING = {
+  titleJa: "ヴィンテージ リング ガーネット 9号",
+  status: "承認待ち",
+  ebayPriceUsd: 79.0,
+  estimatedProfitJpy: 6200,
+};
 
 const PAIN_POINTS = [
   "英語での商品説明・出品作業に時間と語学力が必要",
@@ -82,18 +92,45 @@ export default function LandingPage() {
       )}
 
       <section className="landing-hero">
-        <h1>BASEの商品を、そのままeBayへ。海外販売を自動化。</h1>
+        <h1>BASEの商品を、eBayへ。在庫と利益も、ひとつに。</h1>
         <p className="landing-hero-lead">
-          BASEで販売中の商品をAIが自動でeBay向けに翻訳・出品。在庫同期から価格計算、売上管理まで、
-          海外販売に必要な作業をひとつのプラットフォームでまとめて自動化します。
+          AIが出品ドラフトを自動作成。内容を確認・承認するだけで出品でき、在庫同期や価格計算までまとめて行えます。
         </p>
         <div className="landing-hero-cta">
           <Link href="/signup" className="landing-cta-primary">
-            招待コードで登録する
+            導入について相談
           </Link>
           <Link href="/login" className="landing-cta-secondary">
             すでにアカウントをお持ちの方
           </Link>
+        </div>
+        <p className="landing-hero-note">招待制で先行導入を受付中</p>
+
+        <div className="card landing-example-card">
+          <span className="landing-example-tag">画面イメージ(サンプル)</span>
+          <div className="match-card" style={{ marginTop: "0.6rem" }}>
+            <div className="match-card-thumb" />
+            <div style={{ flex: 1 }}>
+              <div className="match-card-title">{EXAMPLE_LISTING.titleJa}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.3rem" }}>
+                <span className="badge">BASE</span>
+                <span aria-hidden="true">→</span>
+                <span className="badge">eBay</span>
+                <span className="badge warn">{EXAMPLE_LISTING.status}</span>
+              </div>
+            </div>
+          </div>
+          <dl className="landing-example-figures">
+            <div>
+              <dt>想定価格(eBay)</dt>
+              <dd>US ${EXAMPLE_LISTING.ebayPriceUsd.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>見込み利益</dt>
+              <dd>約¥{EXAMPLE_LISTING.estimatedProfitJpy.toLocaleString()}</dd>
+            </div>
+          </dl>
+          <p className="landing-example-disclaimer">※実際のデータではなく、イメージ例です。</p>
         </div>
       </section>
 
@@ -140,10 +177,12 @@ export default function LandingPage() {
         <h2 className="landing-section-title">ご利用プラン</h2>
         <div className="card card-pad landing-plan-card">
           <div className="landing-plan-header">
-            <strong>スタンダードプラン</strong>
-            <span className="badge ok">
-              <CheckIcon /> ベータ提供中
-            </span>
+            <strong>先行導入プラン</strong>
+            <span className="badge">案</span>
+          </div>
+          <div className="landing-plan-price">
+            <span className="landing-plan-price-amount">¥9,800</span>
+            <span className="landing-plan-price-unit">/月(税別)</span>
           </div>
           <ul className="landing-plan-limits">
             <li>商品登録数 300点まで</li>
@@ -151,7 +190,7 @@ export default function LandingPage() {
             <li>BASE / eBay 連携、在庫同期、ダッシュボードなど全機能利用可能</li>
           </ul>
           <p className="landing-plan-note">
-            現在はベータ期間中のため、招待コードをお持ちの方のみご登録いただけます。料金プランは正式リリース時にご案内します。
+            初期設定費用 ¥19,800(税別)。金額は正式リリースに向けて検討中の案であり、確定した料金ではありません。商品登録数・AI生成回数の上限は実際に運用している値です。現在はベータ期間中のため、招待コードをお持ちの方のみご登録いただけます。
           </p>
         </div>
       </section>

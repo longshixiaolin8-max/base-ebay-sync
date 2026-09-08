@@ -249,14 +249,15 @@ export default function LoginPage() {
               </p>
             )}
             <button type="submit" disabled={submitting || code.length !== 6} style={{ width: "100%", marginTop: "1.1rem" }}>
-              {submitting ? "確認中..." : "確認してサインイン"}
+              {submitting ? "確認中..." : "確認してログイン"}
             </button>
           </form>
 
-          <div className="auth-callout warn">
-            <ShieldIcon />
-            <span>コードを他人に共有しないでください。第三者に教えると、アカウントが不正に利用されるおそれがあります。</span>
-          </div>
+          {stage.step === "totp-code" && (
+            <p style={{ marginTop: "0.7rem", fontSize: "0.78rem", color: "var(--fg-subtle)", textAlign: "center" }}>
+              コードは一定時間で更新されます。
+            </p>
+          )}
 
           <div style={{ marginTop: "1rem", textAlign: "center" }}>
             <button
@@ -271,6 +272,11 @@ export default function LoginPage() {
                 認証アプリ・デバイスを紛失した場合、ご自身での再設定はできません。管理者による本人確認のうえでの復旧対応が必要です。導入時のご連絡先までお問い合わせください。
               </p>
             )}
+          </div>
+
+          <div className="auth-callout warn" style={{ marginTop: "1.25rem" }}>
+            <ShieldIcon />
+            <span>コードを他人に共有しないでください。第三者に教えると、アカウントが不正に利用されるおそれがあります。</span>
           </div>
         </div>
       </div>

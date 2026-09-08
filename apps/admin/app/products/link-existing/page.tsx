@@ -3,7 +3,8 @@
 import type { ProductMaster } from "@ai-ec/core";
 import { fetchAuthSession } from "aws-amplify/auth";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
@@ -11,6 +12,7 @@ import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { LinkIcon } from "@/components/icons";
+import { OnboardingStepper } from "@/components/OnboardingStepper";
 
 interface UnmanagedListing {
   externalId: string;
@@ -44,9 +46,13 @@ function stripHtml(html: string): string {
  * ソース(Inventory Item)には含まれないため表示しない(在庫アイテムAPIは価格を持たず、
  * 実際の価格は別のOffer APIにあるため、ここで数値を出すと必ず偽の$0になってしまう)。
  */
-export default function LinkExistingListingsPage() {
+function LinkExistingListingsInner() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
+  const searchParams = useSearchParams();
+  const fromOnboarding = searchParams.get("onboarding") === "1";
+  const exitHref = fromOnboarding ? "/onboarding" : "/products";
+  const exitLabel = fromOnboarding ? "導入設定へ戻る" : "商品マスターへ戻る";
   const [listings, setListings] = useState<UnmanagedListing[] | null>(null);
   const [products, setProducts] = useState<ProductMaster[]>([]);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
@@ -222,6 +228,11 @@ export default function LinkExistingListingsPage() {
     <>
       <Topbar />
       <div className="page">
+        {fromOnboarding && (
+          <div style={{ maxWidth: "640px", marginBottom: "1.5rem" }}>
+            <OnboardingStepper current={2} />
+          </div>
+        )}
         <div className="page-header">
           <div>
             <h1>商品を紐付ける</h1>
@@ -229,8 +240,8 @@ export default function LinkExistingListingsPage() {
               導入前からeBayに出品していた商品を、BASE側の商品と紐付けます。紐付けないまま出品を承認すると、同じ商品が重複して新規出品される可能性があります。候補は自動判定した参考情報です。必ず内容を確認してから紐付けてください。
             </p>
           </div>
-          <Link href="/products" className="button secondary">
-            商品マスターへ戻る
+          <Link href={exitHref} className="button secondary">
+            {exitLabel}
           </Link>
         </div>
 
@@ -247,16 +258,26 @@ export default function LinkExistingListingsPage() {
           </div>
         ) : !listings || listings.length === 0 ? (
           <div className="table-wrapper">
-            <EmptyState>紐付けが必要な出品は見つかりませんでした。eBayの出品はすべてこのプラットフォームで管理済みです。</EmptyState>
+            <EmptyState>
+              紐付けが必要な出品は見つかりませんでした。eBayの出品はすべてこのプラットフォームで管理済みです。
+              {fromOnboarding && (
+                <>
+                  <br />
+                  <Link href="/onboarding" className="button" style={{ marginTop: "1rem", display: "inline-block" }}>
+                    導入設定へ戻る
+                  </Link>
+                </>
+              )}
+            </EmptyState>
           </div>
         ) : phase === "done" ? (
           <div className="card card-pad" style={{ textAlign: "center", padding: "2.5rem 1.5rem" }}>
             <p style={{ fontSize: "1.05rem", fontWeight: 700, margin: 0 }}>紐付けが完了しました</p>
             <p style={{ color: "var(--fg-subtle)", marginTop: "0.5rem" }}>
-              紐付けが必要な出品は残っていません。商品マスターから確認できます。
+              紐付けが必要な出品は残っていません。{fromOnboarding ? "続けて導入設定を進めてください。" : "商品マスターから確認できます。"}
             </p>
-            <Link href="/products" className="button" style={{ marginTop: "1.25rem", display: "inline-block" }}>
-              商品マスターへ戻る
+            <Link href={exitHref} className="button" style={{ marginTop: "1.25rem", display: "inline-block" }}>
+              {exitLabel}
             </Link>
           </div>
         ) : phase === "summary" ? (
@@ -340,8 +361,13 @@ export default function LinkExistingListingsPage() {
               <span className="match-connector-icon">
                 <LinkIcon />
               </span>
-              {current.suggestedProductId ? (
-                <span className="badge ok">候補あり{typeof current.matchScore === "number" ? `(一致度 ${Math.round(current.matchScore * 100)}%)` : ""}</span>
+              {current.suggestedProductId && typeof current.matchScore !== "number" ? (
+                // No matchScore alongside a suggestion means the backend found this via the
+                // deterministic SKU-based path (see GET /admin/ebay/unmanaged-listings), not
+                // a similarity guess -- safe to state as a fact rather than a percentage.
+                <span className="badge ok">SKU一致</span>
+              ) : current.suggestedProductId ? (
+                <span className="badge ok">候補あり(一致度 {Math.round((current.matchScore ?? 0) * 100)}%)</span>
               ) : (
                 <span className="badge">候補なし</span>
               )}
@@ -431,5 +457,13 @@ export default function LinkExistingListingsPage() {
         ) : null}
       </div>
     </>
+  );
+}
+
+export default function LinkExistingListingsPage() {
+  return (
+    <Suspense fallback={<SkeletonRows />}>
+      <LinkExistingListingsInner />
+    </Suspense>
   );
 }
