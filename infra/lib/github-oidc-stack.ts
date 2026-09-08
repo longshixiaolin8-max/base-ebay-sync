@@ -24,13 +24,26 @@ export class GithubOidcStack extends cdk.Stack {
       clientIds: ["sts.amazonaws.com"],
     });
 
+    const [githubOwner, githubRepoName] = props.githubRepo.split("/");
+
     this.deployRole = new iam.Role(this, "GithubDeployRole", {
       roleName: "ai-ec-platform-github-deploy",
       assumedBy: new iam.WebIdentityPrincipal(provider.openIdConnectProviderArn, {
         StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
         // Restrict to this repo; further restrict `ref:refs/heads/main` once the deploy
         // workflow only ever runs against main behind the required manual-approval gate.
-        StringLike: { "token.actions.githubusercontent.com:sub": `repo:${props.githubRepo}:*` },
+        //
+        // Two accepted `sub` shapes: the classic "repo:owner/repo:*" and the newer
+        // "repo:owner@orgId/repo@repoId:*" that GitHub sends once an org/repo has immutable
+        // IDs enabled in its OIDC subject claim (confirmed live via CloudTrail: this account
+        // sends the immutable-ID form, which the classic-only pattern silently rejected with
+        // "Not authorized to perform sts:AssumeRoleWithWebIdentity").
+        StringLike: {
+          "token.actions.githubusercontent.com:sub": [
+            `repo:${props.githubRepo}:*`,
+            `repo:${githubOwner}@*/${githubRepoName}@*:*`,
+          ],
+        },
       }),
       description: "Assumed by GitHub Actions (OIDC) to run `cdk deploy`. No static AWS keys in GitHub.",
       maxSessionDuration: cdk.Duration.hours(1),

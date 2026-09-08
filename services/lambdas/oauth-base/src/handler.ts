@@ -1,4 +1,5 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import { getAppCredentials, getDb, recordAuditLog, requireEnv, saveOAuthToken, signState, verifyState } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
@@ -16,11 +17,16 @@ function redirectUri(): string {
   return requireEnv("BASE_OAUTH_REDIRECT_URI");
 }
 
-/** GET /oauth/base/authorize — redirects the admin operator to BASE's consent screen. */
+/**
+ * GET /oauth/base/authorize — public, deliberately no tenant hint accepted here (see
+ * oauth-state.ts's StatePayload comment). Kept only as a bootstrap path for the one
+ * hand-provisioned tenant this platform has today; admin-api's authenticated
+ * GET /admin/oauth/base/authorize-url is the real per-tenant entry point going forward.
+ */
 export async function authorize(): Promise<APIGatewayProxyResultV2> {
   const adapter = await createAdapter();
   const creds = await getAppCredentials<BaseAppCredentials>("base");
-  const state = signState(creds.clientSecret);
+  const state = signState(creds.clientSecret, BOOTSTRAP_TENANT_ID);
   const url = adapter.getAuthorizationUrl(state, redirectUri());
   return { statusCode: 302, headers: { Location: url } };
 }
@@ -34,8 +40,9 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   }
 
   const creds = await getAppCredentials<BaseAppCredentials>("base");
+  let tenantId: string;
   try {
-    verifyState(creds.clientSecret, state);
+    tenantId = verifyState(creds.clientSecret, state);
   } catch (err) {
     return { statusCode: 400, body: `Invalid OAuth state: ${(err as Error).message}` };
   }
@@ -49,8 +56,9 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const externalAccountId = process.env.BASE_SHOP_ID ?? "default";
 
   const db = getDb();
-  await saveOAuthToken(db, "base", externalAccountId, tokens);
+  await saveOAuthToken(db, tenantId, "base", externalAccountId, tokens);
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:oauth-base-callback",
     action: "oauth_connected",
     entityType: "oauth_connection",

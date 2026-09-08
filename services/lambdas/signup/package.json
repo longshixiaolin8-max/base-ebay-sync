@@ -1,0 +1,22 @@
+{
+  "name": "@ai-ec/lambda-signup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@ai-ec/db": "workspace:*",
+    "@ai-ec/lambda-shared": "workspace:*",
+    "@aws-sdk/client-cognito-identity-provider": "^3.687.0",
+    "stripe": "^22.6.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

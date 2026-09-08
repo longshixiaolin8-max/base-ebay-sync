@@ -7,15 +7,19 @@ import { idempotencyKeys } from "./schema.js";
  * Postgres-backed IdempotencyStore. Claiming is a single conditional UPSERT so two
  * concurrent Lambda invocations (e.g. duplicate SQS delivery) can never both win the
  * claim — exactly one INSERT/UPDATE returns a row, the other observes the existing one.
+ *
+ * `key` itself stays the sole primary key (see buildIdempotencyKey in packages/core, which
+ * folds tenantId into the key string) -- tenantId here is only for the `tenant_id` column's
+ * filtering/observability value, not for uniqueness.
  */
-export function createDbIdempotencyStore(db: Database): IdempotencyStore {
+export function createDbIdempotencyStore(db: Database, tenantId: string): IdempotencyStore {
   async function tryClaim(key: string, ttlSeconds: number): Promise<IdempotencyRecord | null> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
 
     const claimed = await db
       .insert(idempotencyKeys)
-      .values({ key, status: "in_progress", result: null, createdAt: now, expiresAt })
+      .values({ key, tenantId, status: "in_progress", result: null, createdAt: now, expiresAt })
       .onConflictDoUpdate({
         target: idempotencyKeys.key,
         set: { status: "in_progress", result: null, createdAt: now, expiresAt },

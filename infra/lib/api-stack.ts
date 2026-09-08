@@ -16,6 +16,8 @@ export interface ApiStackProps extends cdk.StackProps {
   oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   oauthEbayCallbackFn: nodejs.NodejsFunction;
   ebayWebhookFn: nodejs.NodejsFunction;
+  signupHandlerFn: nodejs.NodejsFunction;
+  stripeWebhookFn: nodejs.NodejsFunction;
 }
 
 /**
@@ -53,28 +55,32 @@ export class ApiStack extends cdk.Stack {
       });
     };
 
-    addRoute("GetProducts", apigwv2.HttpMethod.GET, "/admin/products", adminIntegration, true);
-    addRoute("GetProduct", apigwv2.HttpMethod.GET, "/admin/products/{id}", adminIntegration, true);
-    addRoute(
-      "ApproveEbayListing",
-      apigwv2.HttpMethod.POST,
-      "/admin/products/{id}/approve-ebay-listing",
-      adminIntegration,
-      true,
-    );
-    addRoute("GetSyncErrors", apigwv2.HttpMethod.GET, "/admin/sync-errors", adminIntegration, true);
-    addRoute("RetrySyncError", apigwv2.HttpMethod.POST, "/admin/sync-errors/{id}/retry", adminIntegration, true);
-    addRoute("GetAuditLog", apigwv2.HttpMethod.GET, "/admin/audit-log", adminIntegration, true);
+    // Every /admin/* route (GET and POST) is collapsed into these two catch-all routes
+    // rather than one explicit HttpRoute per endpoint. admin-api's handler already does its
+    // own internal routing by reading event.rawPath/requestContext.http.method directly (not
+    // API Gateway path parameters), so this changes nothing about route behavior -- it's a
+    // CDK-layer fix only. It's required, not a style choice: API Gateway's Lambda proxy
+    // integration grants one resource-policy statement per distinct HttpRoute, and the 47+
+    // explicit /admin/* routes this API had accumulated pushed adminApiFn's resource policy
+    // past Lambda's hard 20KB size limit the moment Phase 2 added two more routes. Two
+    // catch-all routes need only two statements, independent of how many logical endpoints
+    // admin-api's own handler serves.
+    addRoute("AdminApiGet", apigwv2.HttpMethod.GET, "/admin/{proxy+}", adminIntegration, true);
+    addRoute("AdminApiPost", apigwv2.HttpMethod.POST, "/admin/{proxy+}", adminIntegration, true);
 
-    // /authorize kicks off the OAuth consent flow and must only be triggerable by a
-    // signed-in admin operator; /callback is hit by BASE/eBay's own redirect (no
-    // Cognito session), so it relies on the signed `state` param for CSRF protection.
+    // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
+    // no state-changing action happens here. It was originally gated behind Cognito on the
+    // assumption the admin app would call it with a session token, but no such UI was ever
+    // built, so a plain browser visit (the only way this is actually used) always 401'd.
+    // /callback (BASE/eBay's own redirect target, which never carries a Cognito session
+    // either) already relies on the signed `state` param for CSRF protection, not Cognito --
+    // /authorize is unauthenticated for the same reason and with the same protection.
     addRoute(
       "OauthBaseAuthorize",
       apigwv2.HttpMethod.GET,
       "/oauth/base/authorize",
       new HttpLambdaIntegration("OauthBaseAuthorizeIntegration", props.oauthBaseAuthorizeFn),
-      true,
+      false,
     );
     addRoute(
       "OauthBaseCallback",
@@ -88,7 +94,7 @@ export class ApiStack extends cdk.Stack {
       apigwv2.HttpMethod.GET,
       "/oauth/ebay/authorize",
       new HttpLambdaIntegration("OauthEbayAuthorizeIntegration", props.oauthEbayAuthorizeFn),
-      true,
+      false,
     );
     addRoute(
       "OauthEbayCallback",
@@ -104,5 +110,26 @@ export class ApiStack extends cdk.Stack {
     const ebayWebhookIntegration = new HttpLambdaIntegration("EbayWebhookIntegration", props.ebayWebhookFn);
     addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
+
+    // Public: this is what creates a Cognito session in the first place, so no session can
+    // exist yet. Gated instead by a shared invite code checked inside the handler.
+    addRoute(
+      "Signup",
+      apigwv2.HttpMethod.POST,
+      "/signup",
+      new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn),
+      false,
+    );
+
+    // Public: hit directly by Stripe, which carries no Cognito session either -- authenticity
+    // relies on the Stripe-Signature verification inside the handler, same pattern as the
+    // eBay webhook above.
+    addRoute(
+      "StripeWebhook",
+      apigwv2.HttpMethod.POST,
+      "/webhooks/stripe",
+      new HttpLambdaIntegration("StripeWebhookIntegration", props.stripeWebhookFn),
+      false,
+    );
   }
 }

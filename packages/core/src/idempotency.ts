@@ -33,9 +33,17 @@ export class IdempotencyInProgressError extends Error {
   }
 }
 
-/** Builds a stable, human-debuggable idempotency key from ordered parts. */
-export function buildIdempotencyKey(parts: Array<string | number>): string {
-  return parts.map((p) => String(p).replace(/:/g, "_")).join(":");
+/**
+ * Builds a stable, human-debuggable idempotency key from ordered parts, always scoped to a
+ * tenant. `tenantId` is its own required parameter -- not just one of the parts a caller
+ * might forget to include -- because some parts (a channel-native BASE/eBay order or item
+ * id) are only unique within one tenant's own connected account: two independent tenants'
+ * accounts can produce the same order id, and without tenantId folded into the key, the
+ * second tenant's real sale would be treated as an already-processed duplicate of the
+ * first's and silently dropped.
+ */
+export function buildIdempotencyKey(tenantId: string, parts: Array<string | number>): string {
+  return [tenantId, ...parts].map((p) => String(p).replace(/:/g, "_")).join(":");
 }
 
 /**

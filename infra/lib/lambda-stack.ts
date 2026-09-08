@@ -27,9 +27,16 @@ export interface LambdaStackProps extends cdk.StackProps {
     base: secretsmanager.Secret;
     ebay: secretsmanager.Secret;
     openai: secretsmanager.Secret;
+    stripe: secretsmanager.Secret;
+    signup: secretsmanager.Secret;
   };
   oauthTokenSecretArnPattern: string;
   apiUrl: string;
+  adminAppUrl: string;
+  /** Scoped IAM resource for the signup Lambda's AdminCreateUser/AdminSetUserPassword grant --
+   *  narrower than a wildcard, matching this stack's existing scoped-secret-ARN pattern. */
+  userPoolArn: string;
+  userPoolId: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
@@ -65,6 +72,8 @@ export class LambdaStack extends cdk.Stack {
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
   readonly dlqRedriveFn: nodejs.NodejsFunction;
+  readonly signupHandlerFn: nodejs.NodejsFunction;
+  readonly stripeWebhookFn: nodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
@@ -77,6 +86,10 @@ export class LambdaStack extends cdk.Stack {
       EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
       INVENTORY_SYNC_QUEUE_URL: props.queues.inventorySync.queueUrl,
       AI_PROVIDER: props.config.aiProvider,
+      // Read by @ai-ec/lambda-shared's secrets.ts to build env-scoped Secrets Manager
+      // names (see secrets-stack.ts) so dev and prod, run side by side in the same
+      // account, never read/write each other's app credentials or OAuth tokens.
+      PLATFORM_ENV: props.config.envName,
     };
 
     const oauthTokenSecretsPolicy = new iam.PolicyStatement({
@@ -189,6 +202,10 @@ export class LambdaStack extends cdk.Stack {
     this.ebaySyncWorkerFn.addEventSource(
       new SqsEventSource(props.queues.ebaySync, { batchSize: 5, reportBatchItemFailures: true }),
     );
+    // Needed for the AI mis-listing gate (item #5): when a product's content has changed
+    // since its AI draft was generated, publish()/update() enqueue a fresh ai_generate job
+    // instead of pushing a possibly-stale listing.
+    props.queues.aiGenerate.grantSendMessages(this.ebaySyncWorkerFn);
 
     // --- Inventory sync (double-sell prevention) ---
     this.salesPollerFn = makeFn(
@@ -272,23 +289,87 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
+    // --- Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing") ---
+    this.signupHandlerFn = makeFn(
+      "SignupHandler",
+      "services/lambdas/signup/src/handler.ts",
+      "handler",
+      { COGNITO_USER_POOL_ID: props.userPoolId, ADMIN_APP_URL: props.adminAppUrl },
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
+    props.appCredentialSecrets.signup.grantRead(this.signupHandlerFn);
+    this.signupHandlerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword"],
+        resources: [props.userPoolArn],
+      }),
+    );
+
+    this.stripeWebhookFn = makeFn(
+      "StripeWebhook",
+      "services/lambdas/stripe-webhook/src/handler.ts",
+      "handler",
+      {},
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.stripeWebhookFn);
+
     // --- Admin API ---
     this.adminApiFn = makeFn(
       "AdminApi",
       "services/lambdas/admin-api/src/handler.ts",
       "handler",
-      { EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications` },
-      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to
-      // our own endpoint during destination creation, so this needs more than the old 15s.
-      cdk.Duration.seconds(30),
+      {
+        EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications`,
+        // Commercial-features round's SLO endpoint (GET /admin/slo) reports live DLQ depth --
+        // same env var names dlq-redrive already reads, reused here read-only.
+        AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
+        EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
+        INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
+        // Multi-tenant retrofit's GET /admin/oauth/base/authorize-url mints the same BASE
+        // consent URL oauth-base's own authorize() builds -- same redirect URI, so BASE's
+        // callback (registered against this one fixed URL) works regardless of which route
+        // originally sent the operator there.
+        BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
+        // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
+        // billing portal session it creates.
+        ADMIN_APP_URL: props.adminAppUrl,
+      },
+      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
+      // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
+      // several DB round trips per product across up to 30 products by default -- both need
+      // more than the old 15s, and this comfortably covers either.
+      cdk.Duration.seconds(60),
     );
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
+    for (const dlq of [props.dlqs.aiGenerate, props.dlqs.ebaySync, props.dlqs.inventorySync]) {
+      dlq.grant(this.adminApiFn, "sqs:GetQueueAttributes");
+    }
     // Needed for POST /admin/ebay/location, which reads eBay app credentials and the
     // connected account's OAuth token (already granted to every fn via makeFn) to create
     // the seller's ship-from location.
     props.appCredentialSecrets.ebay.grantRead(this.adminApiFn);
+    // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
+    // to fetch a single item's raw detail response (e.g. to compare against product_master).
+    props.appCredentialSecrets.base.grantRead(this.adminApiFn);
+    // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
+    props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
+    // Needed for the commercial-features round's AI endpoints (SNS script generation,
+    // stale-product suggestions), which call Bedrock directly the same way
+    // ai-generate-worker does.
+    if (props.config.aiProvider === "openai") {
+      props.appCredentialSecrets.openai.grantRead(this.adminApiFn);
+    } else {
+      this.adminApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["bedrock:InvokeModel"],
+          resources: ["*"], // see the identical grant on aiGenerateWorkerFn above for why.
+        }),
+      );
+    }
 
     // productImagesBucket is provisioned for a future image re-hosting step (see README
     // follow-ups); no lambda writes to it yet, so no grant is issued until one does.

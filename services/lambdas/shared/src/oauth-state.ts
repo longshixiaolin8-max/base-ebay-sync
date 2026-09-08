@@ -3,6 +3,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 interface StatePayload {
   nonce: string;
   issuedAt: number;
+  /**
+   * Which tenant this connect flow is for. Minted server-side from the *caller's own*
+   * authenticated session (see admin-api's GET /admin/oauth/{channel}/authorize-url) --
+   * never accepted as a client-supplied query param on the public /oauth/.../authorize
+   * route -- otherwise anyone who could guess/discover another tenant's id could complete
+   * their own OAuth consent and have it attached to the victim tenant's connection.
+   */
+  tenantId: string;
 }
 
 /**
@@ -10,14 +18,15 @@ interface StatePayload {
  * needing a separate "pending states" table). The secret is the OAuth app's client
  * secret pulled from Secrets Manager, so only this platform can mint/verify a state.
  */
-export function signState(secret: string): string {
-  const payload: StatePayload = { nonce: crypto.randomUUID(), issuedAt: Date.now() };
+export function signState(secret: string, tenantId: string): string {
+  const payload: StatePayload = { nonce: crypto.randomUUID(), issuedAt: Date.now(), tenantId };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signature = createHmac("sha256", secret).update(payloadB64).digest("base64url");
   return `${payloadB64}.${signature}`;
 }
 
-export function verifyState(secret: string, state: string, maxAgeMs = 10 * 60 * 1000): void {
+/** Returns the tenantId the state was minted for, once its signature and age check out. */
+export function verifyState(secret: string, state: string, maxAgeMs = 10 * 60 * 1000): string {
   const [payloadB64, signature] = state.split(".");
   if (!payloadB64 || !signature) throw new Error("Malformed OAuth state");
 
@@ -32,4 +41,8 @@ export function verifyState(secret: string, state: string, maxAgeMs = 10 * 60 * 
   if (Date.now() - payload.issuedAt > maxAgeMs) {
     throw new Error("OAuth state expired");
   }
+  if (!payload.tenantId) {
+    throw new Error("OAuth state missing tenantId");
+  }
+  return payload.tenantId;
 }
