@@ -1294,6 +1294,19 @@ describe("admin-api handler", () => {
       expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: false });
     });
 
+    it("GET /admin/billing/status still succeeds with testMode:true when the Stripe secret isn't configured (not JSON)", async () => {
+      // This route is billing-exempt and checked on every page load -- a not-yet-populated
+      // Stripe secret (still holding CDK's generated placeholder, not real credentials) must
+      // never break it, only the testMode hint.
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+      getAppCredentialsMock.mockRejectedValueOnce(new SyntaxError("Unexpected token in JSON"));
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: true });
+    });
+
     it("GET /admin/billing/details returns the real Stripe payment method, invoices, and subscription period", async () => {
       getTenantBillingStatusMock.mockResolvedValue({
         plan: "standard",

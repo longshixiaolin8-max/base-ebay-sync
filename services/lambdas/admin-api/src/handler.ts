@@ -140,15 +140,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/billing/status") {
       const billing = await getTenantBillingStatus(db, tenantId);
       if (!billing) return json(404, { error: "not_found" });
-      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
-      return json(200, {
-        plan: billing.plan,
-        status: billing.status,
+      // This route is billing-exempt and checked on every page load (see
+      // useRequireAuth), so a missing/not-yet-configured Stripe secret must never fail
+      // it -- only the "デモ契約" badge hint is at stake. Absent real credentials is
+      // itself not live billing, so treat that failure as testMode.
+      let testMode = true;
+      try {
+        const creds = await getAppCredentials<StripeAppCredentials>("stripe");
         // Real signal, not a guess: Stripe secret keys are prefixed sk_test_/sk_live_ by
         // Stripe itself. Lets the UI show a "デモ契約" badge only when this tenant's
         // billing is genuinely running against Stripe's test mode, never unconditionally.
-        testMode: creds.secretKey.startsWith("sk_test_"),
-      });
+        testMode = creds.secretKey.startsWith("sk_test_");
+      } catch {
+        // Stripe secret not yet configured with real credentials -- fall through with
+        // the safe default above.
+      }
+      return json(200, { plan: billing.plan, status: billing.status, testMode });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
