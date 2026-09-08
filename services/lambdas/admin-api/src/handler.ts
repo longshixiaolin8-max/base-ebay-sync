@@ -200,7 +200,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .from(inventoryMaster)
         .where(and(eq(inventoryMaster.tenantId, tenantId), eq(inventoryMaster.productId, id)))
         .limit(1);
-      return json(200, { product, listings, inventory });
+      // The AI draft (English title/description/item specifics) was previously never
+      // returned to the frontend at all -- the products page could only blindly approve
+      // or reject, never actually show a human what the AI generated. Included here,
+      // additively, rather than as a separate route, since every caller of this existing
+      // endpoint already wants "everything about this one product."
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      return json(200, { product, listings, inventory, draft: draft ?? null });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/approve-ebay-listing$/.test(path)) {
@@ -286,12 +297,54 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { productId: id, condition: parsed.data });
     }
 
+    // Lets a human fill in a required eBay item specific the AI draft left blank (the
+    // guardrail in packages/ai correctly refuses to invent a value it has no real source
+    // for -- see applyStandardAspectFallbacks's own doc comment on why only Brand gets an
+    // automatic "Unbranded" fallback). Mirrors draft-condition's shape; only ever adds or
+    // corrects entries the human explicitly provides, never removes ones it doesn't
+    // mention, and never touches the generated title/description text.
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-item-specifics$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { itemSpecifics?: Record<string, string | null> };
+      if (!body.itemSpecifics || typeof body.itemSpecifics !== "object") {
+        return json(400, { error: "itemSpecifics_required" });
+      }
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      const merged = { ...draft.itemSpecifics, ...body.itemSpecifics };
+      await db.update(aiListingDraft).set({ itemSpecifics: merged }).where(eq(aiListingDraft.id, draft.id));
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "ai_draft_item_specifics_corrected",
+        entityType: "ai_listing_draft",
+        entityId: draft.id,
+        before: { itemSpecifics: draft.itemSpecifics },
+        after: { itemSpecifics: merged },
+      });
+
+      return json(200, { productId: id, itemSpecifics: merged });
+    }
+
     if (method === "GET" && path === "/admin/sync-errors") {
       const resolvedOnly = event.queryStringParameters?.resolved === "true";
+      const productId = event.queryStringParameters?.productId;
       const rows = await db
         .select()
         .from(syncErrors)
-        .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.resolved, resolvedOnly)))
+        .where(
+          productId
+            ? and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.resolved, resolvedOnly), eq(syncErrors.productId, productId))
+            : and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.resolved, resolvedOnly)),
+        )
         .orderBy(desc(syncErrors.createdAt))
         .limit(200);
       return json(200, { syncErrors: rows });

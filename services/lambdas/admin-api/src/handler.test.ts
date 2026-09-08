@@ -263,15 +263,28 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("GET /admin/products/{id} returns product + listings + inventory", async () => {
-    fakeDb = createFakeDb([[{ id: "p1" }], [{ channel: "ebay" }], [{ quantity: 3 }]]);
+  it("GET /admin/products/{id} returns product + listings + inventory + null draft when none exists", async () => {
+    fakeDb = createFakeDb([[{ id: "p1" }], [{ channel: "ebay" }], [{ quantity: 3 }], []]);
     const res = await callHandler(makeEvent("GET", "/admin/products/p1"));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toEqual({
       product: { id: "p1" },
       listings: [{ channel: "ebay" }],
       inventory: { quantity: 3 },
+      draft: null,
     });
+  });
+
+  it("GET /admin/products/{id} includes the latest AI draft when one exists", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "p1" }],
+      [{ channel: "ebay" }],
+      [{ quantity: 3 }],
+      [{ id: "draft-1", titleEn: "Vintage Ring", itemSpecifics: { Brand: "Unbranded" } }],
+    ]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/p1"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!).draft).toEqual({ id: "draft-1", titleEn: "Vintage Ring", itemSpecifics: { Brand: "Unbranded" } });
   });
 
   it("approve-ebay-listing returns 404 when there is no eBay draft yet", async () => {
@@ -321,6 +334,37 @@ describe("admin-api handler", () => {
       { type: "ai_generate", tenantId: TENANT_A, productId: "p1" },
       expect.stringContaining(`${TENANT_A}:retry:e1:`),
     );
+  });
+
+  it("POST /admin/products/{id}/draft-item-specifics returns 404 when no draft exists", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-item-specifics", {}, { itemSpecifics: { Brand: "Tiffany" } }));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/draft-item-specifics returns 400 without an itemSpecifics body", async () => {
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-item-specifics", {}, {}));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("POST /admin/products/{id}/draft-item-specifics merges the human-provided values into the existing draft", async () => {
+    fakeDb = createFakeDb([[{ id: "draft-1", itemSpecifics: { Brand: null, Type: "Bracelet" } }]]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/p1/draft-item-specifics", {}, { itemSpecifics: { Brand: "Tiffany" } }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ productId: "p1", itemSpecifics: { Brand: "Tiffany", Type: "Bracelet" } });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "ai_draft_item_specifics_corrected", entityId: "draft-1" }),
+    );
+  });
+
+  it("GET /admin/sync-errors filters by productId when provided", async () => {
+    fakeDb = createFakeDb([[{ id: "e1", productId: "p1" }]]);
+    const res = await callHandler(makeEvent("GET", "/admin/sync-errors", { resolved: "false", productId: "p1" }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ syncErrors: [{ id: "e1", productId: "p1" }] });
   });
 
   it("POST /admin/ebay/location creates the location and records an audit log entry", async () => {
