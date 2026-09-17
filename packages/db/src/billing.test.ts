@@ -5,8 +5,28 @@ import {
   findTenantByStripeCustomerId,
   getTenantBillingStatus,
   markTenantActive,
-  markTenantInactive,
+  markTenantCanceledWithGrace,
+  markTenantPastDue,
 } from "./billing.js";
+
+/** Builds a mock DB where the `isStale` pre-check's select sees `lastBillingEventAt`. */
+function dbWithLastBillingEventAt(lastBillingEventAt: Date | null, patchSink: { patch?: Record<string, unknown> }): Database {
+  return {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => [{ lastBillingEventAt }],
+        }),
+      }),
+    }),
+    update: () => ({
+      set: (v: Record<string, unknown>) => {
+        patchSink.patch = v;
+        return { where: async () => undefined };
+      },
+    }),
+  } as unknown as Database;
+}
 
 describe("createPendingTenant", () => {
   it("inserts a new tenant row with status pending_payment and returns its id", async () => {
@@ -28,13 +48,21 @@ describe("createPendingTenant", () => {
 });
 
 describe("getTenantBillingStatus", () => {
-  it("returns the tenant's plan/status/stripeCustomerId/stripeSubscriptionId/name", async () => {
+  it("returns the tenant's plan/status/stripeCustomerId/stripeSubscriptionId/name/grace fields", async () => {
     const db = {
       select: () => ({
         from: () => ({
           where: () => ({
             limit: async () => [
-              { plan: "standard", status: "active", stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456", name: "Acme Inc" },
+              {
+                plan: "standard",
+                status: "active",
+                stripeCustomerId: "cus_123",
+                stripeSubscriptionId: "sub_456",
+                name: "Acme Inc",
+                gracePeriodEndsAt: null,
+                lastBillingEventAt: null,
+              },
             ],
           }),
         }),
@@ -47,6 +75,8 @@ describe("getTenantBillingStatus", () => {
       stripeCustomerId: "cus_123",
       stripeSubscriptionId: "sub_456",
       name: "Acme Inc",
+      gracePeriodEndsAt: null,
+      lastBillingEventAt: null,
     });
   });
 
@@ -60,38 +90,83 @@ describe("getTenantBillingStatus", () => {
 });
 
 describe("markTenantActive", () => {
-  it("sets status to active and stores the Stripe customer/subscription ids", async () => {
-    let patch: Record<string, unknown> | undefined;
-    const db = {
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          patch = v;
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+  it("sets status to active, stores the Stripe ids, clears grace, and records the event time", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+    const eventCreatedAt = new Date("2026-01-01T00:00:00Z");
 
-    await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" });
+    const applied = await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" }, eventCreatedAt);
 
-    expect(patch).toEqual({ status: "active", stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" });
+    expect(applied).toBe(true);
+    expect(sink.patch).toEqual({
+      status: "active",
+      stripeCustomerId: "cus_123",
+      stripeSubscriptionId: "sub_456",
+      gracePeriodEndsAt: null,
+      lastBillingEventAt: eventCreatedAt,
+    });
+  });
+
+  it("does not apply an event older than the tenant's already-applied event (out-of-order guard)", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(new Date("2026-02-01T00:00:00Z"), sink);
+    const staleEventCreatedAt = new Date("2026-01-01T00:00:00Z");
+
+    const applied = await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" }, staleEventCreatedAt);
+
+    expect(applied).toBe(false);
+    expect(sink.patch).toBeUndefined();
   });
 });
 
-describe("markTenantInactive", () => {
-  it("sets the given inactive status", async () => {
-    let patch: Record<string, unknown> | undefined;
-    const db = {
-      update: () => ({
-        set: (v: Record<string, unknown>) => {
-          patch = v;
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+describe("markTenantPastDue", () => {
+  it("sets status to past_due and records the event time", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+    const eventCreatedAt = new Date("2026-01-01T00:00:00Z");
 
-    await markTenantInactive(db, "tenant-a", "past_due");
+    const applied = await markTenantPastDue(db, "tenant-a", eventCreatedAt);
 
-    expect(patch).toEqual({ status: "past_due" });
+    expect(applied).toBe(true);
+    expect(sink.patch).toEqual({ status: "past_due", lastBillingEventAt: eventCreatedAt });
+  });
+
+  it("does not apply a stale event", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(new Date("2026-02-01T00:00:00Z"), sink);
+
+    const applied = await markTenantPastDue(db, "tenant-a", new Date("2026-01-01T00:00:00Z"));
+
+    expect(applied).toBe(false);
+    expect(sink.patch).toBeUndefined();
+  });
+});
+
+describe("markTenantCanceledWithGrace", () => {
+  it("sets status to canceled_grace with a grace period ending 30 days after the event, by default", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+    const eventCreatedAt = new Date("2026-01-01T00:00:00Z");
+
+    const result = await markTenantCanceledWithGrace(db, "tenant-a", eventCreatedAt);
+
+    expect(result.applied).toBe(true);
+    expect(result.gracePeriodEndsAt).toEqual(new Date("2026-01-31T00:00:00Z"));
+    expect(sink.patch).toEqual({
+      status: "canceled_grace",
+      gracePeriodEndsAt: new Date("2026-01-31T00:00:00Z"),
+      lastBillingEventAt: eventCreatedAt,
+    });
+  });
+
+  it("does not apply a stale event, but still returns the grace period it would have set", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(new Date("2026-02-01T00:00:00Z"), sink);
+
+    const result = await markTenantCanceledWithGrace(db, "tenant-a", new Date("2026-01-01T00:00:00Z"));
+
+    expect(result.applied).toBe(false);
+    expect(sink.patch).toBeUndefined();
   });
 });
 

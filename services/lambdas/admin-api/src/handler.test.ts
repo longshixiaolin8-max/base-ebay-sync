@@ -677,6 +677,61 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(404);
   });
 
+  describe("POST /admin/products/{id}/apply-dynamic-price", () => {
+    it("returns 404 for a product that doesn't exist", async () => {
+      fakeDb = createFakeDb([[]]);
+      const res = await callHandler(makeEvent("POST", "/admin/products/missing/apply-dynamic-price"));
+      expect(res.statusCode).toBe(404);
+      expect(enqueueMock).not.toHaveBeenCalled();
+    });
+
+    it("returns 409 when the product has no published eBay listing", async () => {
+      fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000 }], [{ status: "pending_approval", externalId: null }]]);
+      const res = await callHandler(makeEvent("POST", "/admin/products/product-1/apply-dynamic-price"));
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toEqual({ error: "not_published_to_ebay" });
+      expect(enqueueMock).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 when the product has no AI draft yet", async () => {
+      fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000 }], [{ status: "published", externalId: "ext-1" }], []]);
+      const res = await callHandler(makeEvent("POST", "/admin/products/product-1/apply-dynamic-price"));
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body!)).toEqual({ error: "no_draft_for_product" });
+      expect(enqueueMock).not.toHaveBeenCalled();
+    });
+
+    it("writes the recommended price onto the draft, enqueues ebay_update, and records an audit log entry", async () => {
+      fakeDb = createFakeDb([
+        [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+        [{ status: "published", externalId: "ext-1" }],
+        [{ id: "draft-1", suggestedPriceUsd: null }],
+      ]);
+
+      const res = await callHandler(makeEvent("POST", "/admin/products/product-1/apply-dynamic-price"));
+
+      expect(res.statusCode).toBe(202);
+      // costUsd = 67; P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
+      expect(JSON.parse(res.body!)).toMatchObject({ status: "update_queued", priceUsd: 102.94 });
+      expect((fakeDb as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith(expect.anything());
+      expect(enqueueMock).toHaveBeenCalledWith(
+        "ebay-sync-url",
+        { type: "ebay_update", tenantId: TENANT_A, productId: "product-1" },
+        `${TENANT_A}:ebay-update:product-1:apply-price-10294`,
+      );
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({
+          actor: "admin@example.com",
+          action: "dynamic_price_applied",
+          entityId: "product-1",
+          before: { suggestedPriceUsd: null },
+          after: { suggestedPriceUsd: 10294 },
+        }),
+      );
+    });
+  });
+
   it("POST /admin/products/{id}/pricing-config persists the shipping/margin overrides", async () => {
     fakeDb = createFakeDb([]);
     const res = await callHandler(
@@ -1272,7 +1327,7 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/products"));
 
       expect(res.statusCode).toBe(402);
-      expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "pending_payment" });
+      expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "pending_payment", gracePeriodEndsAt: null });
     });
 
     it("GET /admin/billing/status is reachable even when the tenant is inactive, and reports Stripe test-mode", async () => {
@@ -1282,7 +1337,7 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
 
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "past_due", testMode: true });
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "past_due", testMode: true, gracePeriodEndsAt: null });
     });
 
     it("GET /admin/billing/status reports testMode false for a live Stripe secret key", async () => {
@@ -1291,7 +1346,7 @@ describe("admin-api handler", () => {
 
       const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
 
-      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: false });
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: false, gracePeriodEndsAt: null });
     });
 
     it("GET /admin/billing/status still succeeds with testMode:true when the Stripe secret isn't configured (not JSON)", async () => {
@@ -1304,7 +1359,69 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
 
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: true });
+      expect(JSON.parse(res.body!)).toEqual({ plan: "standard", status: "active", testMode: true, gracePeriodEndsAt: null });
+    });
+
+    it("GET /admin/billing/status reports gracePeriodEndsAt for a canceled_grace tenant", async () => {
+      const endsAt = new Date("2026-03-01T00:00:00Z");
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "canceled_grace",
+        stripeCustomerId: "cus_1",
+        gracePeriodEndsAt: endsAt,
+      });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/status"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        plan: "standard",
+        status: "canceled_grace",
+        testMode: true,
+        gracePeriodEndsAt: endsAt.toISOString(),
+      });
+    });
+
+    it("allows GET routes for a canceled_grace tenant still within its grace period", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "canceled_grace",
+        stripeCustomerId: "cus_1",
+        gracePeriodEndsAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/products"));
+
+      expect(res.statusCode).not.toBe(402);
+    });
+
+    it("blocks writes with 402 for a canceled_grace tenant still within its grace period", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "canceled_grace",
+        stripeCustomerId: "cus_1",
+        gracePeriodEndsAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
+
+      const res = await callHandler(makeEvent("POST", "/admin/products/p1/approve-ebay-listing"));
+
+      expect(res.statusCode).toBe(402);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "billing_inactive", status: "canceled_grace" });
+    });
+
+    it("blocks GET routes with 402 once a canceled_grace tenant's grace period has ended", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "canceled_grace",
+        stripeCustomerId: "cus_1",
+        gracePeriodEndsAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      });
+
+      const res = await callHandler(makeEvent("GET", "/admin/products"));
+
+      expect(res.statusCode).toBe(402);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "billing_inactive", status: "canceled_grace" });
     });
 
     it("GET /admin/billing/details returns the real Stripe payment method, invoices, and subscription period", async () => {

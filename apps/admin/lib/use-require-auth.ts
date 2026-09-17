@@ -7,7 +7,7 @@ import { ensureAmplifyConfigured } from "./amplify-config";
 import { apiGet } from "./api-client";
 
 interface BillingStatus {
-  status: "pending_payment" | "active" | "past_due" | "canceled";
+  status: "pending_payment" | "active" | "past_due" | "canceled_grace" | "canceled";
 }
 
 /**
@@ -17,6 +17,11 @@ interface BillingStatus {
  * per-page changes. A failure fetching billing status itself (network/5xx, as opposed to a
  * clean "not active" answer) fails open rather than locking the operator out on a transient
  * error; the existing real tenant is unaffected either way since its status is 'active'.
+ *
+ * 'canceled_grace' is deliberately NOT redirected here: the whole point of that status is
+ * that the tenant keeps read-only access to every page (so it can still view/export its own
+ * data), not just the billing page -- admin-api's own gate is what actually enforces
+ * read-only (any write 402s), this is just the client-side routing.
  */
 export function useRequireAuth(): { ready: boolean } {
   const router = useRouter();
@@ -38,7 +43,7 @@ export function useRequireAuth(): { ready: boolean } {
         }
         try {
           const billing = await apiGet<BillingStatus>("/admin/billing/status");
-          if (billing.status !== "active") {
+          if (billing.status !== "active" && billing.status !== "canceled_grace") {
             router.replace("/billing");
             return;
           }

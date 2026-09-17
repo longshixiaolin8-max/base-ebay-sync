@@ -129,11 +129,25 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // that, except the two billing routes themselves (an inactive tenant must still be
     // able to see *why* it's blocked and fix it via the Stripe portal). The existing real
     // tenant is unaffected: its status is 'active' from the migration's column default.
+    //
+    // 'canceled_grace' (added for the post-cancellation data-egress gap identified in the
+    // commercial-readiness audit) is a narrower carve-out than the exemption above: rather
+    // than blocking every route, a tenant in that state keeps read-only (GET) access to its
+    // own data -- including every CSV export, which is built client-side from these same
+    // GET responses -- until gracePeriodEndsAt, so canceling never locks a store out of its
+    // own data with zero notice. Any write (POST/PUT/DELETE) still 402s immediately.
     const billingExemptRoutes = new Set(["GET /admin/billing/status", "POST /admin/billing/portal-session"]);
     if (!billingExemptRoutes.has(`${method} ${path}`)) {
       const billing = await getTenantBillingStatus(db, tenantId);
-      if (!billing || billing.status !== "active") {
-        return json(402, { error: "billing_inactive", status: billing?.status ?? "unknown" });
+      const inGracePeriod =
+        billing?.status === "canceled_grace" && !!billing.gracePeriodEndsAt && billing.gracePeriodEndsAt.getTime() > Date.now();
+      const allowed = billing?.status === "active" || (inGracePeriod && method === "GET");
+      if (!allowed) {
+        return json(402, {
+          error: "billing_inactive",
+          status: billing?.status ?? "unknown",
+          gracePeriodEndsAt: billing?.gracePeriodEndsAt?.toISOString() ?? null,
+        });
       }
     }
 
@@ -155,7 +169,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         // Stripe secret not yet configured with real credentials -- fall through with
         // the safe default above.
       }
-      return json(200, { plan: billing.plan, status: billing.status, testMode });
+      return json(200, {
+        plan: billing.plan,
+        status: billing.status,
+        testMode,
+        gracePeriodEndsAt: billing.gracePeriodEndsAt?.toISOString() ?? null,
+      });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
@@ -875,6 +894,74 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         targetMarginRatio,
       });
       return json(200, { ...price, fxSource: fx.source });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/apply-dynamic-price$/.test(path)) {
+      // Commercial-readiness follow-up to the dynamic-price preview above: actually pushes
+      // the recommended price to eBay, instead of leaving the operator to update it by hand.
+      // Reuses the exact same path a normal content edit takes (writing suggestedPriceUsd
+      // onto the AI draft, then an "ebay_update" sync job) rather than calling the eBay
+      // adapter directly here, so the update still goes through ebay-sync-worker's existing
+      // safety net (finalSafetyCheckForUpdate, price-anomaly detection, auto-rollback).
+      const id = path.split("/")[3]!;
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const [ebayListing] = await db
+        .select()
+        .from(channelListings)
+        .where(
+          and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, id), eq(channelListings.channel, "ebay")),
+        )
+        .limit(1);
+      if (!ebayListing?.externalId || ebayListing.status !== "published") {
+        return json(409, { error: "not_published_to_ebay" });
+      }
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      const fx = await fetchFxRate();
+      const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : DEFAULT_SHIPPING_USD;
+      const targetMarginRatio =
+        product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO;
+      const price = computeDynamicPrice({
+        costJpy: product.priceJpy,
+        fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
+        shippingUsd,
+        targetMarginRatio,
+      });
+      const suggestedPriceUsdCents = Math.round(price.recommendedPriceUsd * 100);
+
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: suggestedPriceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+
+      const queues = getQueueUrls();
+      await enqueue(
+        queues.ebaySync,
+        { type: "ebay_update", tenantId, productId: id },
+        `${tenantId}:ebay-update:${id}:apply-price-${suggestedPriceUsdCents}`,
+      );
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "dynamic_price_applied",
+        entityType: "product",
+        entityId: id,
+        before: { suggestedPriceUsd: draft.suggestedPriceUsd },
+        after: { suggestedPriceUsd: suggestedPriceUsdCents },
+      });
+
+      return json(202, { status: "update_queued", priceUsd: price.recommendedPriceUsd });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/pricing-config$/.test(path)) {

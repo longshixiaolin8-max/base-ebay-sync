@@ -1,4 +1,10 @@
-import { findTenantByStripeCustomerId, markTenantActive, markTenantInactive } from "@ai-ec/db";
+import {
+  claimWebhookEvent,
+  findTenantByStripeCustomerId,
+  markTenantActive,
+  markTenantCanceledWithGrace,
+  markTenantPastDue,
+} from "@ai-ec/db";
 import { createStripeClient, getAppCredentials, getDb, type StripeAppCredentials } from "@ai-ec/lambda-shared";
 import type Stripe from "stripe";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
@@ -33,6 +39,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
   const db = getDb();
 
+  // Dedup first, before any status mutation: Stripe retries on non-2xx and can occasionally
+  // redeliver an already-processed event, and a second application of e.g.
+  // "checkout.session.completed" would be harmless here but the general pattern (were a
+  // future event type not idempotent) is worth guarding once, centrally.
+  const isNewDelivery = await claimWebhookEvent(db, "stripe", stripeEvent.id);
+  if (!isNewDelivery) {
+    return json(200, { received: true, duplicate: true });
+  }
+
+  // Stripe's own event timestamp (unix seconds), not this Lambda's clock -- lets
+  // markTenant*'s out-of-order guard tell a stale, replayed event from a genuinely newer
+  // one regardless of delivery order.
+  const eventCreatedAt = new Date(stripeEvent.created * 1000);
+
   switch (stripeEvent.type) {
     case "checkout.session.completed": {
       const session = stripeEvent.data.object as Stripe.Checkout.Session;
@@ -40,7 +60,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
       const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
       if (tenantId && customerId && subscriptionId) {
-        await markTenantActive(db, tenantId, { stripeCustomerId: customerId, stripeSubscriptionId: subscriptionId });
+        await markTenantActive(db, tenantId, { stripeCustomerId: customerId, stripeSubscriptionId: subscriptionId }, eventCreatedAt);
       }
       break;
     }
@@ -50,11 +70,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const tenant = await findTenantByStripeCustomerId(db, customerId);
       if (tenant) {
         if (subscription.status === "active" || subscription.status === "trialing") {
-          await markTenantActive(db, tenant.id, { stripeCustomerId: customerId, stripeSubscriptionId: subscription.id });
+          await markTenantActive(db, tenant.id, { stripeCustomerId: customerId, stripeSubscriptionId: subscription.id }, eventCreatedAt);
         } else if (subscription.status === "past_due" || subscription.status === "unpaid") {
-          await markTenantInactive(db, tenant.id, "past_due");
+          await markTenantPastDue(db, tenant.id, eventCreatedAt);
         } else if (subscription.status === "canceled") {
-          await markTenantInactive(db, tenant.id, "canceled");
+          await markTenantCanceledWithGrace(db, tenant.id, eventCreatedAt);
         }
       }
       break;
@@ -63,7 +83,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const subscription = stripeEvent.data.object as Stripe.Subscription;
       const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id;
       const tenant = await findTenantByStripeCustomerId(db, customerId);
-      if (tenant) await markTenantInactive(db, tenant.id, "canceled");
+      if (tenant) await markTenantCanceledWithGrace(db, tenant.id, eventCreatedAt);
       break;
     }
     case "invoice.payment_failed": {
@@ -71,7 +91,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const customerId = typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id;
       if (customerId) {
         const tenant = await findTenantByStripeCustomerId(db, customerId);
-        if (tenant) await markTenantInactive(db, tenant.id, "past_due");
+        if (tenant) await markTenantPastDue(db, tenant.id, eventCreatedAt);
       }
       break;
     }

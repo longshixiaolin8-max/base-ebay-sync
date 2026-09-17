@@ -12,13 +12,38 @@ export const tenants = pgTable("tenants", {
    *  actual feature/quota enforcement are a later phase, not this column's job. */
   plan: text("plan").notNull().default("standard"),
   /** 'pending_payment' (created via self-service signup, checkout not completed yet) |
-   *  'active' | 'past_due' | 'canceled'. Defaults to 'active' so the column add itself
-   *  never touches the existing bootstrap tenant's access -- self-service signup
-   *  explicitly overrides this to 'pending_payment' at insert time. */
+   *  'active' | 'past_due' | 'canceled_grace' | 'canceled'. Defaults to 'active' so the
+   *  column add itself never touches the existing bootstrap tenant's access -- self-service
+   *  signup explicitly overrides this to 'pending_payment' at insert time. */
   status: text("status").notNull().default("active"),
   stripeCustomerId: text("stripe_customer_id"),
   stripeSubscriptionId: text("stripe_subscription_id"),
+  /** Set only when status transitions to 'canceled_grace': the tenant keeps read-only
+   *  (GET-only) access until this instant so it can still export its own data, then the
+   *  billing gate treats it the same as 'canceled'. Null otherwise. */
+  gracePeriodEndsAt: timestamp("grace_period_ends_at", { withTimezone: true }),
+  /** The `created` timestamp (as a real Date, not the Stripe unix seconds) of the most
+   *  recent Stripe event that was actually applied to this tenant's status/subscription
+   *  fields -- an out-of-order-delivery guard: an incoming event older than this is
+   *  acknowledged but never applied, so a stale event replayed after a newer one can't
+   *  wrongly overwrite the tenant's real current state. Null until the first event lands. */
+  lastBillingEventAt: timestamp("last_billing_event_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Dedup ledger for inbound webhook deliveries (Stripe today; source is kept generic in
+ * case another webhook provider needs the same guard later). A provider's own event id is
+ * the key: `INSERT ... ON CONFLICT DO NOTHING` lets a handler tell a genuinely-new
+ * delivery from a redelivery of one it already processed (Stripe retries on any non-2xx,
+ * and can occasionally redeliver a already-acked event) without needing per-tenant scoping
+ * -- unlike `idempotency_keys`, this must work before any tenant has been resolved from the
+ * event payload.
+ */
+export const processedWebhookEvents = pgTable("processed_webhook_events", {
+  id: text("id").primaryKey(),
+  source: text("source").notNull(),
+  processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 /**

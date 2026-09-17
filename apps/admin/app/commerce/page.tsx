@@ -136,6 +136,18 @@ export default function CommercePage() {
     }
   }
 
+  async function applyDynamicPrice(productId: string) {
+    setBusyId(productId);
+    try {
+      const res = await apiPost<{ status: string; priceUsd: number }>(`/admin/products/${productId}/apply-dynamic-price`);
+      notify(`eBay価格を$${res.priceUsd.toFixed(2)}に更新するジョブをキューに追加しました。反映まで数分かかります。`, "success");
+    } catch (err) {
+      notify(`価格の適用に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function generateSuggestion(productId: string) {
     setBusyId(productId);
     try {
@@ -396,11 +408,20 @@ export default function CommercePage() {
                                     提案価格での見込み利益(1点あたり): {usd(Math.round(price.recommendedPriceUsd * price.netMarginRatio * 100))} (利益率{" "}
                                     {(price.netMarginRatio * 100).toFixed(1)}%)
                                   </p>
-                                  <div className="auth-callout" style={{ marginTop: 0 }}>
-                                    <span>
-                                      この提案は未適用です。価格の実反映はまだこの画面から行えません — 商品詳細から手動で更新してください。
-                                    </span>
-                                  </div>
+                                  {typeof row.currentEbayPriceUsdCents === "number" ? (
+                                    <button
+                                      type="button"
+                                      style={{ width: "100%", marginTop: "0.4rem" }}
+                                      onClick={() => void applyDynamicPrice(row.productId)}
+                                      disabled={busyId === row.productId}
+                                    >
+                                      {busyId === row.productId ? "適用中..." : `この価格($${price.recommendedPriceUsd.toFixed(2)})をeBayに適用`}
+                                    </button>
+                                  ) : (
+                                    <div className="auth-callout" style={{ marginTop: 0 }}>
+                                      <span>eBayに未出品のため価格を適用できません。先に出品してください。</span>
+                                    </div>
+                                  )}
                                   <button
                                     type="button"
                                     className="secondary"

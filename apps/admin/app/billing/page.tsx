@@ -8,8 +8,9 @@ import { useToast } from "@/components/Toast";
 
 interface BillingStatus {
   plan: string;
-  status: "pending_payment" | "active" | "past_due" | "canceled";
+  status: "pending_payment" | "active" | "past_due" | "canceled_grace" | "canceled";
   testMode: boolean;
+  gracePeriodEndsAt: string | null;
 }
 
 interface UsageStatus {
@@ -48,6 +49,7 @@ const STATUS_LABEL: Record<BillingStatus["status"], string> = {
   pending_payment: "決済待ち",
   active: "有効",
   past_due: "支払い失敗",
+  canceled_grace: "解約済み(閲覧可能)",
   canceled: "解約済み",
 };
 
@@ -55,6 +57,9 @@ const STATUS_MESSAGE: Record<BillingStatus["status"], string | null> = {
   pending_payment: "決済が完了していません。Stripeの決済画面で登録を完了してください。",
   active: null,
   past_due: "お支払いに失敗しました。下のボタンからお支払い方法を更新してください。",
+  // canceled_grace's message is built dynamically below (it needs the actual end date);
+  // this entry is unused but kept so the Record stays exhaustive over the status union.
+  canceled_grace: null,
   canceled: "サブスクリプションが解約されています。継続するには再度お手続きください。",
 };
 
@@ -160,6 +165,14 @@ export default function BillingPage() {
               </p>
             )}
 
+            {billing.status === "canceled_grace" && billing.gracePeriodEndsAt && (
+              <div className="auth-callout warn" style={{ marginTop: "1rem" }}>
+                <span>
+                  契約は終了しています。データの閲覧・CSVエクスポートは
+                  {new Date(billing.gracePeriodEndsAt).toLocaleDateString("ja-JP")}まで可能です。それ以降はアクセスできなくなります。
+                </span>
+              </div>
+            )}
             {STATUS_MESSAGE[billing.status] && (
               <p style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>{STATUS_MESSAGE[billing.status]}</p>
             )}
