@@ -70,6 +70,7 @@ class InvalidOrderTransitionErrorFake extends Error {}
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
+  tenants: { id: "id", ebayFulfillmentPolicyId: "ebayFulfillmentPolicyId", ebayPaymentPolicyId: "ebayPaymentPolicyId", ebayReturnPolicyId: "ebayReturnPolicyId" },
   inventoryMaster: {},
   syncErrors: { createdAt: "createdAt" },
   syncJobs: {},
@@ -460,8 +461,8 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(409);
   });
 
-  it("POST /admin/ebay/policies opts in and creates the three business policies", async () => {
-    fakeDb = createFakeDb([]);
+  it("POST /admin/ebay/policies opts in, creates the three business policies, and persists their ids", async () => {
+    fakeDb = createFakeDb([[]]); // no existing policy ids yet
     const res = await callHandler(makeEvent("POST", "/admin/ebay/policies"));
     expect(res.statusCode).toBe(201);
     expect(JSON.parse(res.body!)).toEqual({
@@ -470,6 +471,25 @@ describe("admin-api handler", () => {
       returnPolicyId: "rp-1",
     });
     expect(optInToBusinessPoliciesMock).toHaveBeenCalledWith("token");
+    expect((fakeDb as { update: ReturnType<typeof vi.fn> }).update).toHaveBeenCalledWith(expect.anything());
+  });
+
+  it("POST /admin/ebay/policies is idempotent: reuses already-persisted ids instead of creating a second set", async () => {
+    optInToBusinessPoliciesMock.mockClear();
+    createFulfillmentPolicyMock.mockClear();
+    fakeDb = createFakeDb([
+      [{ ebayFulfillmentPolicyId: "fp-existing", ebayPaymentPolicyId: "pp-existing", ebayReturnPolicyId: "rp-existing" }],
+    ]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/policies"));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({
+      fulfillmentPolicyId: "fp-existing",
+      paymentPolicyId: "pp-existing",
+      returnPolicyId: "rp-existing",
+      alreadyConfigured: true,
+    });
+    expect(optInToBusinessPoliciesMock).not.toHaveBeenCalled();
+    expect(createFulfillmentPolicyMock).not.toHaveBeenCalled();
   });
 
   it("GET /admin/ebay/unmanaged-listings finds eBay SKUs with no channel_listings row, deterministically matching our own naming pattern only", async () => {
@@ -1111,17 +1131,27 @@ describe("admin-api handler", () => {
     });
 
     it("GET /admin/oauth/status reports both channels as not connected for a brand-new tenant", async () => {
+      fakeDb = createFakeDb([[]]);
       listConnectedAccountIdsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
       const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ base: false, ebay: false });
+      expect(JSON.parse(res.body!)).toEqual({ base: false, ebay: false, ebayPoliciesConfigured: false });
     });
 
     it("GET /admin/oauth/status reports a channel connected once an account id exists for it", async () => {
+      fakeDb = createFakeDb([[]]);
       listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce([]);
       const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: false });
+      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: false, ebayPoliciesConfigured: false });
+    });
+
+    it("GET /admin/oauth/status reports ebayPoliciesConfigured once the onboarding policies step has run", async () => {
+      fakeDb = createFakeDb([[{ ebayFulfillmentPolicyId: "fp-1" }]]);
+      listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce(["ebay-acct-1"]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: true, ebayPoliciesConfigured: true });
     });
 
     it("GET /admin/slo aggregates sync confidence, drift count, AI failure rate, and recent auto-recovery events", async () => {

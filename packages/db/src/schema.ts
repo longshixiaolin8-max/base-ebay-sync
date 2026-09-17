@@ -28,6 +28,17 @@ export const tenants = pgTable("tenants", {
    *  acknowledged but never applied, so a stale event replayed after a newer one can't
    *  wrongly overwrite the tenant's real current state. Null until the first event lands. */
   lastBillingEventAt: timestamp("last_billing_event_at", { withTimezone: true }),
+  /**
+   * eBay business-policy ids (fulfillment/payment/return) created via
+   * POST /admin/ebay/policies during onboarding. All null until that step is run once.
+   * Persisting these (rather than only ever returning them to the caller) is what lets
+   * onboarding's own "重複して作成される" warning actually be enforced server-side: a
+   * second call reuses these instead of blindly creating a second set of policies, and a
+   * page reload can tell the step is already done instead of resetting to "not configured".
+   */
+  ebayFulfillmentPolicyId: text("ebay_fulfillment_policy_id"),
+  ebayPaymentPolicyId: text("ebay_payment_policy_id"),
+  ebayReturnPolicyId: text("ebay_return_policy_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

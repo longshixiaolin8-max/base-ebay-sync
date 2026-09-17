@@ -12,6 +12,7 @@ import { OnboardingStepper } from "@/components/OnboardingStepper";
 interface OAuthStatus {
   base: boolean;
   ebay: boolean;
+  ebayPoliciesConfigured: boolean;
 }
 
 /**
@@ -61,16 +62,21 @@ export default function OnboardingPage() {
 
   const baseDone = status?.base ?? false;
   const ebayDone = status?.ebay ?? false;
+  // Persisted server-side by POST /admin/ebay/policies (read back via this same status
+  // call), OR'd with the local optimistic flag set right after a successful call below --
+  // otherwise a page reload after completing this step forgot it was done and let this
+  // step's own "重複して作成される" warning actually happen, since nothing stopped a second click.
+  const policiesConfigured = (status?.ebayPoliciesConfigured ?? false) || policiesDone;
 
   // Land on the first step that still needs attention, based on real backend state --
   // computed once the connection status has actually loaded, not before.
   useEffect(() => {
     if (stepInitialized || !status) return;
     if (!baseDone || !ebayDone) setStep(0);
-    else if (!policiesDone) setStep(1);
+    else if (!policiesConfigured) setStep(1);
     else setStep(2);
     setStepInitialized(true);
-  }, [status, baseDone, ebayDone, policiesDone, stepInitialized]);
+  }, [status, baseDone, ebayDone, policiesConfigured, stepInitialized]);
 
   useEffect(() => {
     if (step !== 2 || !ready) return;
@@ -207,10 +213,9 @@ export default function OnboardingPage() {
               <div className="card card-pad">
                 <h3 style={{ margin: 0 }}>eBayの事業者ポリシーを設定する</h3>
                 <p style={{ margin: "0.4rem 0 0.8rem", color: "var(--fg-muted)", fontSize: "0.85rem", lineHeight: 1.6 }}>
-                  配送・支払い・返品ポリシーをeBay側に作成します。eBayへの出品にはこの設定が必須です。※
-                  既に設定済みの場合は再実行すると重複して作成されるため、初回のみ実行してください。
+                  配送・支払い・返品ポリシーをeBay側に作成します。eBayへの出品にはこの設定が必須です。
                 </p>
-                {policiesDone ? (
+                {policiesConfigured ? (
                   <span className="badge ok">完了</span>
                 ) : (
                   <button type="button" onClick={setUpPolicies} disabled={busy === "policies"}>
@@ -222,7 +227,7 @@ export default function OnboardingPage() {
                 <button type="button" className="secondary" onClick={() => setStep(0)}>
                   ← 戻る
                 </button>
-                <button type="button" onClick={() => setStep(2)} disabled={!policiesDone}>
+                <button type="button" onClick={() => setStep(2)} disabled={!policiesConfigured}>
                   次へ
                 </button>
               </div>

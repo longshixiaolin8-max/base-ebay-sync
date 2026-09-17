@@ -10,6 +10,19 @@ import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { ERROR_CODE_LABEL } from "@/lib/sync-error-copy";
 
+/** For fast triage at a glance -- the absolute timestamp (still shown alongside it) is
+ *  the exact record; this is just how long it's been sitting unresolved. */
+function relativeTime(date: Date | string): string {
+  const diffMs = Date.now() - new Date(date).getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "たった今";
+  if (minutes < 60) return `${minutes}分前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}時間前`;
+  const days = Math.floor(hours / 24);
+  return `${days}日前`;
+}
+
 export default function SyncErrorsPage() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
@@ -88,7 +101,9 @@ export default function SyncErrorsPage() {
                       {e.channel && <span className="badge">{e.channel.toUpperCase()}</span>}
                     </div>
                     <div className="sync-error-card-message">{copy?.summary ?? e.errorMessage}</div>
-                    <div className="sync-error-card-time">{new Date(e.createdAt).toLocaleString("ja-JP")}</div>
+                    <div className="sync-error-card-time">
+                      {relativeTime(e.createdAt)} ・ {new Date(e.createdAt).toLocaleString("ja-JP")}
+                    </div>
                   </Link>
                   {e.jobId && (
                     <button type="button" className="secondary" onClick={() => retry(e.id)} disabled={busyId === e.id}>

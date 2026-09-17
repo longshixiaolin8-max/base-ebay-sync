@@ -42,6 +42,7 @@ import {
   releaseMonthlyAiGenerationReservation,
   syncErrors,
   syncJobs,
+  tenants,
   traceSyncHistory,
   transitionOrderStatus,
   tryReserveMonthlyAiGeneration,
@@ -540,6 +541,29 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
     if (method === "POST" && path === "/admin/ebay/policies") {
+      // Idempotent: onboarding's own copy warns that re-running this duplicates the
+      // policies on eBay's side, but nothing previously enforced that -- a second click
+      // (or a second visit to this step after a reload, since policiesDone was a
+      // client-only flag) created a second set every time. Persisted ids let this reuse
+      // the existing ones instead of ever calling eBay's create endpoints twice.
+      const [existing] = await db
+        .select({
+          ebayFulfillmentPolicyId: tenants.ebayFulfillmentPolicyId,
+          ebayPaymentPolicyId: tenants.ebayPaymentPolicyId,
+          ebayReturnPolicyId: tenants.ebayReturnPolicyId,
+        })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .limit(1);
+      if (existing?.ebayFulfillmentPolicyId) {
+        return json(200, {
+          fulfillmentPolicyId: existing.ebayFulfillmentPolicyId,
+          paymentPolicyId: existing.ebayPaymentPolicyId,
+          returnPolicyId: existing.ebayReturnPolicyId,
+          alreadyConfigured: true,
+        });
+      }
+
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
       const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
@@ -552,6 +576,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         adapter.createPaymentPolicy(accessToken, "Standard Payment"),
         adapter.createReturnPolicy(accessToken, "30 Day Returns"),
       ]);
+
+      await db
+        .update(tenants)
+        .set({
+          ebayFulfillmentPolicyId: fulfillmentPolicyId,
+          ebayPaymentPolicyId: paymentPolicyId,
+          ebayReturnPolicyId: returnPolicyId,
+        })
+        .where(eq(tenants.id, tenantId));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1311,7 +1344,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/oauth/status") {
       const [baseAccountId] = await listConnectedAccountIds(db, tenantId, "base");
       const [ebayAccountId] = await listConnectedAccountIds(db, tenantId, "ebay");
-      return json(200, { base: Boolean(baseAccountId), ebay: Boolean(ebayAccountId) });
+      // Whether the onboarding wizard's own "eBayの事業者ポリシーを設定する" step has
+      // already been completed -- read from where POST /admin/ebay/policies persists it,
+      // so a page reload can tell this step is already done instead of resetting to
+      // "not configured" (previously a client-only flag lost on every remount).
+      const [tenantRow] = await db
+        .select({ ebayFulfillmentPolicyId: tenants.ebayFulfillmentPolicyId })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .limit(1);
+      return json(200, {
+        base: Boolean(baseAccountId),
+        ebay: Boolean(ebayAccountId),
+        ebayPoliciesConfigured: Boolean(tenantRow?.ebayFulfillmentPolicyId),
+      });
     }
 
     // --- New in the multi-tenant retrofit: mint the signed OAuth authorize URL server-side

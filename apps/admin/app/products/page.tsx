@@ -61,7 +61,21 @@ const CHANNEL_LABEL: Record<string, string> = {
   delisted: "削除済み",
 };
 
-type FilterTab = "all" | "pending" | "active" | "attention";
+const STALE_BADGE: Record<ProductRow["staleLevel"], string> = {
+  fresh: "badge ok",
+  stale_30: "badge warn",
+  stale_60: "badge warn",
+  stale_90: "badge error",
+};
+
+const STALE_LABEL: Record<ProductRow["staleLevel"], string> = {
+  fresh: "",
+  stale_30: "滞留30日+",
+  stale_60: "滞留60日+",
+  stale_90: "滞留90日+",
+};
+
+type FilterTab = "all" | "pending" | "active" | "attention" | "stale";
 
 const PAGE_SIZE = 30;
 
@@ -109,12 +123,14 @@ export default function ProductsPage() {
 
   const pendingCount = rows.filter((r) => r.status === "ai_generated").length;
   const attentionCount = rows.filter((r) => r.channelStatus.base === "error" || r.channelStatus.ebay === "error").length;
+  const staleCount = rows.filter((r) => r.staleLevel !== "fresh").length;
 
   const filtered = useMemo(() => {
     let list = rows;
     if (tab === "pending") list = list.filter((r) => r.status === "ai_generated");
     else if (tab === "active") list = list.filter((r) => r.channelStatus.ebay === "published");
     else if (tab === "attention") list = list.filter((r) => r.channelStatus.base === "error" || r.channelStatus.ebay === "error");
+    else if (tab === "stale") list = list.filter((r) => r.staleLevel !== "fresh");
     const q = query.trim().toLowerCase();
     if (q) list = list.filter((r) => r.title.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q));
     return list;
@@ -148,6 +164,9 @@ export default function ProductsPage() {
           </button>
           <button type="button" className="filter-tab" data-active={tab === "attention"} onClick={() => setTab("attention")}>
             要確認 {attentionCount > 0 && `(${attentionCount})`}
+          </button>
+          <button type="button" className="filter-tab" data-active={tab === "stale"} onClick={() => setTab("stale")}>
+            滞留 {staleCount > 0 && `(${staleCount})`}
           </button>
         </div>
 
@@ -186,6 +205,7 @@ export default function ProductsPage() {
                           eBay: {CHANNEL_LABEL[p.channelStatus.ebay] ?? p.channelStatus.ebay}
                         </span>
                       )}
+                      {p.staleLevel !== "fresh" && <span className={STALE_BADGE[p.staleLevel]}>{STALE_LABEL[p.staleLevel]}</span>}
                     </div>
                     {p.inventory && (
                       <div className="product-card-stock">

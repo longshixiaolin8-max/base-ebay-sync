@@ -130,6 +130,13 @@ export default function DashboardPage() {
           ((summary.currentMonth.revenueUsdCents - summary.previousMonth.revenueUsdCents) / summary.previousMonth.revenueUsdCents) * 1000,
         ) / 10
       : null;
+  const profitTrendPct =
+    summary && summary.previousMonth.netProfitUsdCents > 0
+      ? Math.round(
+          ((summary.currentMonth.netProfitUsdCents - summary.previousMonth.netProfitUsdCents) / summary.previousMonth.netProfitUsdCents) *
+            1000,
+        ) / 10
+      : null;
 
   function exportReport() {
     if (!summary) return;
@@ -200,10 +207,18 @@ export default function DashboardPage() {
                 <div className="kpi-value">{formatUsd(summary.currentMonth.netProfitUsdCents)}</div>
                 <div className="kpi-label">今月の利益</div>
                 <div className="kpi-sub">
-                  利益率{" "}
-                  {summary.currentMonth.profitMarginBasisPoints != null
-                    ? `${(summary.currentMonth.profitMarginBasisPoints / 100).toFixed(1)}%`
-                    : "—"}
+                  <span>
+                    利益率{" "}
+                    {summary.currentMonth.profitMarginBasisPoints != null
+                      ? `${(summary.currentMonth.profitMarginBasisPoints / 100).toFixed(1)}%`
+                      : "—"}
+                  </span>
+                  {profitTrendPct !== null && (
+                    <span className={`kpi-trend ${profitTrendPct >= 0 ? "up" : "down"}`} style={{ marginLeft: "0.5rem" }}>
+                      {profitTrendPct >= 0 ? "▲" : "▼"} 前月比 {profitTrendPct >= 0 ? "+" : ""}
+                      {profitTrendPct}%
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="kpi-card">
