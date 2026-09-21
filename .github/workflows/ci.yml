@@ -41,3 +41,11 @@ jobs:
       - name: CDK synth (template validation only, no AWS credentials used)
         working-directory: infra
         run: npx cdk synth --all --context githubRepo=${{ github.repository }} --context region=us-east-2 > /dev/null
+
+      # Informational only, not a merge gate -- this monorepo currently carries a real
+      # baseline of transitive-dependency advisories (mostly Next.js/PostCSS) that need
+      # their own dedicated upgrade-and-regression-test round, not a surprise CI failure
+      # on an unrelated PR. Dependabot (.github/dependabot.yml) is what actually drives
+      # fixing these over time; this step just keeps them visible in every run's log.
+      - name: Dependency audit (informational, does not block)
+        run: pnpm audit --audit-level=high || true
