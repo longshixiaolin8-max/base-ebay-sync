@@ -2,6 +2,7 @@ import type { ChannelAdapter, OAuthTokenSet } from "@ai-ec/core";
 import { oauthConnections, type Database } from "@ai-ec/db";
 import {
   CreateSecretCommand,
+  DeleteSecretCommand,
   GetSecretValueCommand,
   PutSecretValueCommand,
   ResourceNotFoundException,
@@ -137,6 +138,40 @@ export async function getAppCredentials<T>(channel: string): Promise<T> {
   const value = JSON.parse(secret.SecretString ?? "{}") as T;
   appCredentialsCache = { ...appCredentialsCache, [channel]: value };
   return value;
+}
+
+export interface DeletedOAuthConnection {
+  tenantId: string;
+  secretArn: string;
+}
+
+/**
+ * Marketplace Account Deletion compliance (eBay's Platform Notifications requirement for
+ * every production keyset): permanently removes every oauth_connections row for a given
+ * channel + externalAccountId -- across all tenants, since eBay's notification names the
+ * external account, not which of our tenants it belongs to -- and the Secrets Manager
+ * secret each one points at. Irreversible by design; this is real personal-data deletion,
+ * not a soft status flag like the rest of this app's channel-connection state.
+ */
+export async function deleteOAuthConnectionsByExternalAccount(
+  db: Database,
+  channel: string,
+  externalAccountId: string,
+): Promise<DeletedOAuthConnection[]> {
+  const rows = await db
+    .delete(oauthConnections)
+    .where(and(eq(oauthConnections.channel, channel), eq(oauthConnections.externalAccountId, externalAccountId)))
+    .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
+
+  for (const row of rows) {
+    try {
+      await secretsClient.send(new DeleteSecretCommand({ SecretId: row.secretArn, ForceDeleteWithoutRecovery: true }));
+    } catch (err) {
+      if (!(err instanceof ResourceNotFoundException)) throw err;
+    }
+  }
+
+  return rows;
 }
 
 export async function listConnectedAccountIds(db: Database, tenantId: string, channel: string): Promise<string[]> {

@@ -6,15 +6,53 @@ import {
 import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  deleteOAuthConnectionsByExternalAccount,
   getAppCredentials,
   getDb,
   getQueueUrls,
   pollChannelSales,
+  recordAuditLog,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const NOTIFICATION_LOOKBACK_MS = 20 * 60 * 1000;
+const MARKETPLACE_ACCOUNT_DELETION_TOPIC = "MARKETPLACE_ACCOUNT_DELETION";
+
+interface EbayNotificationPayload {
+  metadata?: { topic?: string };
+  notification?: { data?: { username?: string; userId?: string } };
+}
+
+/**
+ * eBay requires every production keyset to handle this notification: when a marketplace
+ * user requests their account be deleted/closed, eBay pushes this and expects any personal
+ * data this app holds about that account to be removed. Deliberately does not fall through
+ * to pollChannelSales below -- this is a deletion request, not a "something may have
+ * changed, go check" signal.
+ */
+async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<APIGatewayProxyResultV2> {
+  const username = payload.notification?.data?.username;
+  if (!username) {
+    console.warn("ebay-webhook: MARKETPLACE_ACCOUNT_DELETION notification had no username, ignoring");
+    return { statusCode: 204 };
+  }
+
+  const db = getDb();
+  const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", username);
+  for (const row of deleted) {
+    await recordAuditLog(db, {
+      tenantId: row.tenantId,
+      actor: "system:ebay-webhook",
+      action: "ebay_account_deletion_purge",
+      entityType: "ebay_account",
+      entityId: username,
+      after: { secretArn: row.secretArn },
+    });
+  }
+
+  return { statusCode: 204 };
+}
 
 /**
  * GET /webhooks/ebay/notifications?challenge_code=... — eBay's one-time endpoint-ownership
@@ -69,6 +107,18 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
   } else {
     console.warn("ebay-webhook: notification had no X-EBAY-SIGNATURE header, ignoring delivery");
     return { statusCode: 412 };
+  }
+
+  let payload: EbayNotificationPayload = {};
+  try {
+    payload = JSON.parse(rawBody) as EbayNotificationPayload;
+  } catch {
+    // Malformed body -- fall through to the default "poll now" handling below, matching
+    // this endpoint's existing stance that a notification body is never authoritative.
+  }
+
+  if (payload.metadata?.topic === MARKETPLACE_ACCOUNT_DELETION_TOPIC) {
+    return handleAccountDeletion(payload);
   }
 
   const db = getDb();

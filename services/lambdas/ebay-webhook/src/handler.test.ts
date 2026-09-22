@@ -12,6 +12,8 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   getApplicationAccessToken: getApplicationAccessTokenMock,
   getNotificationPublicKey: getNotificationPublicKeyMock,
 }));
+const deleteOAuthConnectionsByExternalAccountMock = vi.fn().mockResolvedValue([]);
+const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
@@ -19,6 +21,8 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getQueueUrls: () => getQueueUrlsMock(),
   pollChannelSales: (...args: unknown[]) => pollChannelSalesMock(...args),
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
+  deleteOAuthConnectionsByExternalAccount: (...args: unknown[]) => deleteOAuthConnectionsByExternalAccountMock(...args),
+  recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
 }));
 
 const computeChallengeResponseMock = vi.fn((..._args: unknown[]) => "computed-hash");
@@ -50,6 +54,10 @@ describe("ebay-webhook handler", () => {
     computeChallengeResponseMock.mockReturnValue("computed-hash");
     getAppCredentialsMock.mockResolvedValue({ webhookVerificationToken: "verify-me" });
     process.env.EBAY_WEBHOOK_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/notifications";
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([]);
+    parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
+    getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
+    verifyNotificationSignatureMock.mockReturnValue(true);
   });
 
   it("GET answers the challenge_code with the computed hash", async () => {
@@ -111,6 +119,49 @@ describe("ebay-webhook handler", () => {
     )) as { statusCode: number };
 
     expect(res.statusCode).toBe(412);
+    expect(pollChannelSalesMock).not.toHaveBeenCalled();
+  });
+
+  it("POST with a MARKETPLACE_ACCOUNT_DELETION notification purges matching connections instead of polling", async () => {
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([
+      { tenantId: "tenant-a", secretArn: "arn:aws:secretsmanager:secret-1" },
+    ]);
+
+    const res = (await handler(
+      makeEvent({
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({
+          metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+          notification: { data: { username: "closed-user-1", userId: "u-1" } },
+        }),
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(204);
+    expect(pollChannelSalesMock).not.toHaveBeenCalled();
+    expect(deleteOAuthConnectionsByExternalAccountMock).toHaveBeenCalledWith(expect.anything(), "ebay", "closed-user-1");
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tenantId: "tenant-a",
+        action: "ebay_account_deletion_purge",
+        entityId: "closed-user-1",
+      }),
+    );
+  });
+
+  it("acknowledges a MARKETPLACE_ACCOUNT_DELETION notification with no username without purging anything", async () => {
+    const res = (await handler(
+      makeEvent({
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({ metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { data: {} } }),
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(204);
+    expect(deleteOAuthConnectionsByExternalAccountMock).not.toHaveBeenCalled();
     expect(pollChannelSalesMock).not.toHaveBeenCalled();
   });
 });
