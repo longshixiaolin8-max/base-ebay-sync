@@ -316,7 +316,10 @@ export default function CommercePage() {
 
             {rows.length === 0 ? (
               <div className="table-wrapper" style={{ marginTop: "1.25rem" }}>
-                <EmptyState>商品がまだありません。</EmptyState>
+                <EmptyState>
+                  商品がまだありません。BASEの商品は自動で取り込まれます(最短15分ごと)。導入設定がお済みでない場合は
+                  <Link href="/onboarding">導入設定</Link>からBASE連携をご確認ください。
+                </EmptyState>
               </div>
             ) : (
               <>

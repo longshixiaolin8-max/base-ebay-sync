@@ -182,6 +182,18 @@ export default function DashboardPage() {
           <SkeletonRows count={3} />
         ) : (
           <>
+            {/* An empty-state page is the first thing a brand-new tenant actually sees after
+             *  onboarding (BASE/eBay connected, but the periodic sync hasn't run yet) -- a
+             *  bare row of zeros with no explanation reads as broken, not "nothing here yet".
+             *  Reassures with the real sync cadence and points at where progress will show up. */}
+            {products.length === 0 && (
+              <div className="auth-callout" style={{ marginBottom: "1rem" }}>
+                <span>
+                  まだ商品が同期されていません。BASEの商品は自動で取り込まれます(最短15分ごと)。
+                  取り込み状況は<Link href="/products">商品マスター</Link>で確認できます。
+                </span>
+              </div>
+            )}
             <div className="kpi-grid">
               <div className="kpi-card">
                 <span className="stat-card-icon blue">

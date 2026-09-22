@@ -183,7 +183,16 @@ export default function ProductsPage() {
           </div>
         ) : filtered.length === 0 ? (
           <div className="table-wrapper">
-            <EmptyState>{query.trim() || tab !== "all" ? "該当する商品がありません。" : "商品がまだ登録されていません。"}</EmptyState>
+            <EmptyState>
+              {query.trim() || tab !== "all" ? (
+                "該当する商品がありません。"
+              ) : (
+                <>
+                  商品がまだ登録されていません。BASEの商品は自動で取り込まれます(最短15分ごと)。導入設定がお済みでない場合は
+                  <Link href="/onboarding">導入設定</Link>からBASE連携をご確認ください。
+                </>
+              )}
+            </EmptyState>
           </div>
         ) : (
           <>
