@@ -1480,6 +1480,7 @@ describe("admin-api handler", () => {
         ],
       });
       subscriptionsRetrieveMock.mockResolvedValueOnce({
+        status: "active",
         cancel_at_period_end: false,
         items: {
           data: [
@@ -1511,8 +1512,39 @@ describe("admin-api handler", () => {
           priceAmount: 980000,
           priceCurrency: "usd",
           priceInterval: "month",
+          trialEnd: null,
         },
       });
+    });
+
+    it("GET /admin/billing/details reports trialEnd while the free trial is running", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({
+        plan: "standard",
+        status: "active",
+        stripeCustomerId: "cus_1",
+        stripeSubscriptionId: "sub_1",
+      });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123" });
+      customersRetrieveMock.mockResolvedValueOnce({ deleted: false, invoice_settings: {} });
+      invoicesListMock.mockResolvedValueOnce({ data: [] });
+      subscriptionsRetrieveMock.mockResolvedValueOnce({
+        status: "trialing",
+        trial_end: 1738368000,
+        cancel_at_period_end: false,
+        items: {
+          data: [
+            {
+              current_period_end: 1740960000,
+              price: { unit_amount: 980000, currency: "usd", recurring: { interval: "month" } },
+            },
+          ],
+        },
+      });
+
+      const res = await callHandler(makeEvent("GET", "/admin/billing/details"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).subscription).toMatchObject({ trialEnd: new Date(1738368000 * 1000).toISOString() });
     });
 
     it("GET /admin/billing/details returns 400 when the (active) tenant somehow has no Stripe customer id", async () => {

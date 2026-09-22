@@ -86,7 +86,7 @@ export default function SignupPage() {
       <div className="auth-card">
         <Brand />
         <h1>
-          新規登録 <span className="badge">招待制</span>
+          新規登録 <span className="badge">招待制</span> <span className="badge ok">初月無料</span>
         </h1>
         <p style={{ marginTop: "0.5rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
           招待コードをお持ちの方のみご登録いただけます。
@@ -149,7 +149,7 @@ export default function SignupPage() {
             {submitting ? "処理中..." : "登録して決済へ進む"}
           </button>
           <p style={{ fontSize: "0.75rem", color: "var(--fg-subtle)", marginTop: "0.6rem", textAlign: "center" }}>
-            この登録操作自体に料金は発生しません。次にStripeの決済画面(テストモード)に移動します。
+            登録から30日間は無料でご利用いただけます。無料期間中はお支払いは発生しません。次にStripeの決済画面(テストモード)でお支払い方法を登録します。
           </p>
         </form>
         <p className="auth-footnote">

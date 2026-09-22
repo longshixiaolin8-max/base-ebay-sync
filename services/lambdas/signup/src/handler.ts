@@ -26,6 +26,11 @@ function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 
+/** "初月無料" -- 30 days is this codebase's own definition of "one month", matching every
+ *  other calendar-month-shaped duration already computed as a fixed day count (see e.g.
+ *  markTenantCanceledWithGrace's default gracePeriodDays). */
+const FREE_TRIAL_DAYS = 30;
+
 /**
  * POST /signup -- public (no Cognito session exists yet, this is what creates one). Beta
  * access is gated by a single shared invite code (see secrets-stack.ts's signupCredentials),
@@ -104,6 +109,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // set -- carrying tenantId on the session itself (present directly in that event's
     // payload) avoids a bootstrapping problem an id-reverse-lookup can't solve.
     metadata: { tenantId: tenant.id },
+    // First month free for every new signup. No webhook change needed: Stripe's own
+    // subscription.status is "trialing" for the whole period, and stripe-webhook's
+    // customer.subscription.updated handler already treats "trialing" the same as
+    // "active" (full access during the trial); the card on file is only actually
+    // charged once the trial ends, exactly like a normal renewal after that.
+    subscription_data: { trial_period_days: FREE_TRIAL_DAYS },
   });
 
   return json(200, { checkoutUrl: session.url });

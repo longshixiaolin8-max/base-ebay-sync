@@ -179,6 +179,7 @@ export default function LandingPage() {
           <div className="landing-plan-header">
             <strong>先行導入プラン</strong>
             <span className="badge">案</span>
+            <span className="badge ok">初月無料</span>
           </div>
           <div className="landing-plan-price">
             <span className="landing-plan-price-amount">¥9,800</span>
@@ -190,7 +191,7 @@ export default function LandingPage() {
             <li>BASE / eBay 連携、在庫同期、ダッシュボードなど全機能利用可能</li>
           </ul>
           <p className="landing-plan-note">
-            初期設定費用 ¥19,800(税別)。金額は正式リリースに向けて検討中の案であり、確定した料金ではありません。商品登録数・AI生成回数の上限は実際に運用している値です。現在はベータ期間中のため、招待コードをお持ちの方のみご登録いただけます。
+            登録から30日間は無料でご利用いただけます。初期設定費用 ¥19,800(税別)。金額は正式リリースに向けて検討中の案であり、確定した料金ではありません。商品登録数・AI生成回数の上限は実際に運用している値です。現在はベータ期間中のため、招待コードをお持ちの方のみご登録いただけます。
           </p>
         </div>
       </section>

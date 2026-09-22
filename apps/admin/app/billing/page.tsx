@@ -42,6 +42,7 @@ interface BillingDetails {
     priceAmount: number | null;
     priceCurrency: string | null;
     priceInterval: string | null;
+    trialEnd: string | null;
   } | null;
 }
 
@@ -155,9 +156,22 @@ export default function BillingPage() {
             )}
             {details?.subscription?.currentPeriodEnd && (
               <p style={{ margin: "0.3rem 0 0", fontSize: "0.82rem", color: "var(--fg-subtle)" }}>
-                {details.subscription.cancelAtPeriodEnd ? "契約終了日" : "次回更新日"}:{" "}
-                {new Date(details.subscription.currentPeriodEnd).toLocaleDateString("ja-JP")}
+                {details.subscription.cancelAtPeriodEnd
+                  ? "契約終了日"
+                  : details.subscription.trialEnd
+                    ? "無料期間終了日(初回請求日)"
+                    : "次回更新日"}
+                : {new Date(details.subscription.currentPeriodEnd).toLocaleDateString("ja-JP")}
               </p>
+            )}
+            {details?.subscription?.trialEnd && !details.subscription.cancelAtPeriodEnd && (
+              <div className="auth-callout" style={{ marginTop: "0.75rem" }}>
+                <span>
+                  現在無料期間中です。
+                  {new Date(details.subscription.trialEnd).toLocaleDateString("ja-JP")}
+                  まではご利用料金は発生しません。それ以降は登録済みのお支払い方法へ自動的に請求されます。
+                </span>
+              </div>
             )}
             {details?.subscription?.cancelAtPeriodEnd && (
               <p style={{ margin: "0.3rem 0 0", fontSize: "0.82rem", color: "var(--warn)" }}>

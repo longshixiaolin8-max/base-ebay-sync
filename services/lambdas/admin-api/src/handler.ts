@@ -228,6 +228,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             priceAmount: number | null;
             priceCurrency: string | null;
             priceInterval: string | null;
+            trialEnd: string | null;
           }
         | null = null;
       if (billing.stripeSubscriptionId) {
@@ -245,6 +246,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           priceAmount: item?.price.unit_amount ?? null,
           priceCurrency: item?.price.currency ?? null,
           priceInterval: item?.price.recurring?.interval ?? null,
+          // Set only while the free trial (signup's own subscription_data.trial_period_days)
+          // is still running; null once it ends, whether the card was successfully charged
+          // or the subscription lapsed -- the billing page uses this to show the operator
+          // exactly when they'll first actually be charged.
+          trialEnd: sub.status === "trialing" && sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null,
         };
       }
 

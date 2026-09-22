@@ -109,6 +109,7 @@ describe("POST /signup", () => {
       success_url: "https://admin.example/login?checkout=success",
       cancel_url: "https://admin.example/signup",
       metadata: { tenantId: "tenant-new" },
+      subscription_data: { trial_period_days: 30 },
     });
 
     expect(res.statusCode).toBe(200);
