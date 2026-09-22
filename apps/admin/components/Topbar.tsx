@@ -12,10 +12,12 @@ import { BellIcon, MenuIcon, SearchIcon } from "@/components/icons";
 
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "ダッシュボード",
+  "/onboarding": "導入設定",
   "/products": "商品マスター",
   "/commerce": "コマース統合",
   "/sync-errors": "同期エラー",
   "/audit-log": "監査ログ",
+  "/billing": "請求・プラン",
 };
 
 interface TopbarProps {
