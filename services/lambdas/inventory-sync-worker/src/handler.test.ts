@@ -142,9 +142,31 @@ describe("processSale", () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
 
-    await processSale(createFakeDb([]), TENANT_ID, adapters as never, "product-1", sale);
+    await processSale(createFakeDb([[]]), TENANT_ID, adapters as never, "product-1", sale);
 
     expect(setInventory).not.toHaveBeenCalled();
+  });
+
+  it("still records the order and flags a possible double sale when this sale lost the race", async () => {
+    applySaleMock.mockResolvedValue({ quantity: 0, soldOut: true, alreadyZero: true });
+    const adapters = { base: {}, ebay: { setInventory: vi.fn() } } as unknown as Record<string, ChannelAdapter>;
+
+    await processSale(createFakeDb([[{ costJpy: 3000 }]]), TENANT_ID, adapters as never, "product-1", sale);
+
+    expect(upsertOrderReceivedMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ productId: "product-1", channel: "base", externalOrderId: "order-1" }),
+    );
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tenantId: TENANT_ID,
+        channel: "base",
+        productId: "product-1",
+        errorCode: "possible_double_sale",
+        payload: expect.objectContaining({ externalOrderId: "order-1" }),
+      }),
+    );
   });
 
   it("zeroes out the other channel's published listing exactly once when a sale drives stock to zero", async () => {

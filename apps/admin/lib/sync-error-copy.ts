@@ -83,6 +83,18 @@ export const ERROR_CODE_LABEL: Record<string, ErrorCodeCopy> = {
     actionHref: "/billing",
     actionLabel: "請求・プランを確認",
   },
+  possible_double_sale: {
+    title: "同時受注の可能性",
+    summary: "在庫が0になった直後に、もう一方の販路でも同じ商品の注文が入りました。",
+    cause:
+      "BASE・eBayともに「売れた瞬間」を即時通知する仕組みがなく、双方の在庫を0にするまでの短い間に両方で購入されてしまった可能性があります。システムは在庫の二重減算は自動的に防いでいますが、実際に成立してしまった注文そのものは自動キャンセルしていません。",
+    steps: [
+      "BASE・eBay双方の管理画面で、この商品の注文状況を確認してください。",
+      "在庫を用意できない場合は、いずれか一方の注文をキャンセル・返金し、購入者へお詫びの連絡をしてください。",
+      "対応が完了したら、このエラーを解決済みにしてください。",
+    ],
+    retryable: false,
+  },
   product_quota_exceeded: {
     title: "商品登録数の上限に達しました",
     summary: "契約中のプランの商品登録数の上限に達しました。",

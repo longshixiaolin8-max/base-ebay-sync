@@ -12,36 +12,57 @@ import {
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 
+// EventBridge rate() expressions can't go below 1 minute, so that's the schedule
+// (SalesPollerSchedule in infra/lib/lambda-stack.ts). Looping a few times inside each
+// invocation tightens the worst-case gap between "an item sells" and "the other channel's
+// stock gets zeroed" from up to 60s down to roughly POLL_INTERVAL_MS, without needing new
+// infra. LOOP_BUDGET_MS is kept well under both the Lambda's own timeout and the 1-minute
+// schedule period so passes from consecutive invocations don't pile up on each other.
+const POLL_INTERVAL_MS = 15_000;
+const LOOP_BUDGET_MS = 45_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Scheduled (EventBridge) poller: asks each connected channel for orders placed
  * recently and forwards every line item as a "sale happened" event onto the inventory
- * sync queue. The lookback window intentionally overlaps between runs — duplicate
- * events are safe because inventory-sync-worker dedupes on (channel, orderId, sku).
+ * sync queue. The lookback window intentionally overlaps between runs (and between passes
+ * within one run) — duplicate events are safe because inventory-sync-worker dedupes on
+ * (channel, orderId, sku).
  *
  * Neither channel offers a real "item sold" push signal: BASE has no webhook feature at
  * all (confirmed against BASE's own help center), and eBay's Notification API has no
  * direct "item sold" topic (verified live via getTopics) -- the closest signal, LISTING,
  * needs a sell.listing[.read] scope this app's Sandbox keyset doesn't have access to yet
  * (ebay-webhook is built and deployed for when that scope becomes available, but is
- * currently dormant/unregistered). Until then, this 1-minute schedule is the practical
+ * currently dormant/unregistered). Until then, this looped poll is the practical
  * substitute for real-time sync on both channels.
  */
 export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
-  const since = new Date(Date.now() - 5 * 60 * 1000); // 5 min lookback vs. a 1 min schedule
-  const tenants = await listActiveTenants(db);
+  const startedAt = Date.now();
 
-  for (const tenant of tenants) {
-    await pollChannelIfHealthy(db, tenant.id, "base", async () => {
-      const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-      await pollChannelSales(tenant.id, new BaseAdapter(baseCreds), since, db, queues.inventorySync);
-    });
+  for (;;) {
+    const since = new Date(Date.now() - 5 * 60 * 1000); // 5 min lookback vs. a ~15s pass interval
+    const tenants = await listActiveTenants(db);
 
-    await pollChannelIfHealthy(db, tenant.id, "ebay", async () => {
-      const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-      await pollChannelSales(tenant.id, createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
-    });
+    for (const tenant of tenants) {
+      await pollChannelIfHealthy(db, tenant.id, "base", async () => {
+        const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
+        await pollChannelSales(tenant.id, new BaseAdapter(baseCreds), since, db, queues.inventorySync);
+      });
+
+      await pollChannelIfHealthy(db, tenant.id, "ebay", async () => {
+        const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
+        await pollChannelSales(tenant.id, createEbayAdapter(ebayCreds), since, db, queues.inventorySync);
+      });
+    }
+
+    if (Date.now() - startedAt >= LOOP_BUDGET_MS) return;
+    await sleep(POLL_INTERVAL_MS);
   }
 }
 

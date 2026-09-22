@@ -111,12 +111,6 @@ export async function processSale(
     externalEventId: sale.externalOrderId,
   });
 
-  if (result.alreadyZero) {
-    // Another event already drove this to zero first — the double-sell guard: whichever
-    // sale arrives first wins, this one is a safe no-op.
-    return;
-  }
-
   // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
   // record alongside applySale above, never a replacement for it -- applySale already made
   // the real, correctness-critical inventory decision by the time execution reaches here, so
@@ -124,7 +118,9 @@ export async function processSale(
   // adapter currently parses a real sale price out of its orders API response (see
   // listRecentSales in @ai-ec/adapter-base / @ai-ec/adapter-ebay) -- salePriceJpy/
   // salePriceUsdCents are left null here rather than guessed, until that's built and verified
-  // against a real order.
+  // against a real order. Recorded even when alreadyZero below: the buyer really paid on
+  // this channel, so it belongs in this app's order history regardless of what inventory
+  // already showed.
   try {
     const [productForOrder] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
     await upsertOrderReceived(db, {
@@ -147,6 +143,22 @@ export async function processSale(
       errorMessage: (err as Error).message,
       payload: { externalOrderId: sale.externalOrderId },
     });
+  }
+
+  if (result.alreadyZero) {
+    // Another event already drove this to zero first — the double-sell guard stops a second
+    // decrement, but the order recorded just above is a real, already-paid sale that this
+    // product can't actually fulfill. Nothing left to zero out (both channels already read
+    // 0), so the only useful action left is making sure a human notices fast.
+    await recordSyncError(db, {
+      tenantId,
+      channel: sale.channel,
+      productId,
+      errorCode: "possible_double_sale",
+      errorMessage: `${sale.channel} order ${sale.externalOrderId} arrived after this product's stock had already reached zero`,
+      payload: { externalOrderId: sale.externalOrderId, quantitySold: sale.quantitySold, occurredAt: sale.occurredAt },
+    });
+    return;
   }
 
   const otherChannel = otherChannelOf(sale.channel);
