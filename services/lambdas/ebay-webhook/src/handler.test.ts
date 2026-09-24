@@ -151,6 +151,20 @@ describe("ebay-webhook handler", () => {
     );
   });
 
+  it("POST to the platform-notifications path triggers a sales poll and returns 200, regardless of body/signature", async () => {
+    const res = (await handler(
+      makeEvent({
+        rawPath: "/webhooks/ebay/platform-notifications",
+        requestContext: { http: { method: "POST" } } as never,
+        headers: {},
+        body: "<FixedPriceTransaction>...</FixedPriceTransaction>",
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(200);
+    expect(pollChannelSalesMock).toHaveBeenCalledTimes(1);
+  });
+
   it("acknowledges a MARKETPLACE_ACCOUNT_DELETION notification with no username without purging anything", async () => {
     const res = (await handler(
       makeEvent({

@@ -670,6 +670,35 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(201, { destinationId, subscriptionId });
     }
 
+    if (method === "POST" && path === "/admin/ebay/platform-notification-setup") {
+      const body = JSON.parse(event.body ?? "{}") as { alertEmail?: string };
+      if (!body.alertEmail) return json(400, { error: "alertEmail_required" });
+
+      const endpoint = process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL;
+      if (!endpoint) return json(500, { error: "EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL_not_configured" });
+
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      // Requires this application's App ID to already be allow-listed by eBay for
+      // OAuth-based Platform Notifications delivery -- see subscribeToFixedPriceTransactionNotifications.
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const userAccessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+
+      await adapter.subscribeToFixedPriceTransactionNotifications(userAccessToken, endpoint, body.alertEmail);
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "ebay_platform_notification_subscribed",
+        entityType: "ebay_account",
+        entityId: accountId,
+        after: { eventType: "FixedPriceTransaction" },
+      });
+
+      return json(201, { eventType: "FixedPriceTransaction" });
+    }
+
     if (method === "GET" && path === "/admin/ebay/notification-topics") {
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);

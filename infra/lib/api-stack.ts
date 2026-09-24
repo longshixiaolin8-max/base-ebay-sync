@@ -110,6 +110,16 @@ export class ApiStack extends cdk.Stack {
     const ebayWebhookIntegration = new HttpLambdaIntegration("EbayWebhookIntegration", props.ebayWebhookFn);
     addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
+    // Delivery target for the legacy Trading API's Platform Notifications (FixedPriceTransaction),
+    // a wholly different mechanism from the REST Notification API routes above -- see
+    // ebay-webhook's handlePlatformNotification for why no signature scheme applies here.
+    addRoute(
+      "EbayPlatformNotify",
+      apigwv2.HttpMethod.POST,
+      "/webhooks/ebay/platform-notifications",
+      ebayWebhookIntegration,
+      false,
+    );
 
     // Public: this is what creates a Cognito session in the first place, so no session can
     // exist yet. Gated instead by a shared invite code checked inside the handler.

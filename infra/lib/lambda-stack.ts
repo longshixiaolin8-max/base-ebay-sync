@@ -322,6 +322,7 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       {
         EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications`,
+        EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/platform-notifications`,
         // Commercial-features round's SLO endpoint (GET /admin/slo) reports live DLQ depth --
         // same env var names dlq-redrive already reads, reused here read-only.
         AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,

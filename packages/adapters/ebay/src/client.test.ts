@@ -253,6 +253,47 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("subscribes to FixedPriceTransaction Platform Notifications via the Trading API", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => "<Ack>Success</Ack>" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.subscribeToFixedPriceTransactionNotifications(
+      "iaf-token",
+      "https://api.example.com/webhooks/ebay/platform-notifications",
+      "ops@example.com",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/ws/api.dll",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          "X-EBAY-API-CALL-NAME": "SetNotificationPreferences",
+          "X-EBAY-API-IAF-TOKEN": "iaf-token",
+        }),
+      }),
+    );
+    const body = (fetchMock.mock.calls[0]?.[1] as RequestInit).body as string;
+    expect(body).toContain("<ApplicationURL>https://api.example.com/webhooks/ebay/platform-notifications</ApplicationURL>");
+    expect(body).toContain("<AlertEmail>mailto://ops@example.com</AlertEmail>");
+    expect(body).toContain("<EventType>FixedPriceTransaction</EventType>");
+  });
+
+  it("throws when the Trading API acknowledges the subscription request with a Failure", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => "<Ack>Failure</Ack><Errors>...</Errors>" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(
+      adapter.subscribeToFixedPriceTransactionNotifications("iaf-token", "https://api.example.com/hook", "ops@example.com"),
+    ).rejects.toThrow();
+  });
+
   it("creates a fulfillment policy and returns its id", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ fulfillmentPolicyId: "fp-1" }));
     vi.stubGlobal("fetch", fetchMock);

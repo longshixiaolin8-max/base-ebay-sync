@@ -18,6 +18,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda
 
 const NOTIFICATION_LOOKBACK_MS = 20 * 60 * 1000;
 const MARKETPLACE_ACCOUNT_DELETION_TOPIC = "MARKETPLACE_ACCOUNT_DELETION";
+const PLATFORM_NOTIFICATION_PATH = "/webhooks/ebay/platform-notifications";
 
 interface EbayNotificationPayload {
   metadata?: { topic?: string };
@@ -133,7 +134,29 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
   return { statusCode: 204 };
 }
 
+/**
+ * POST /webhooks/ebay/platform-notifications — delivery target for the legacy Trading API's
+ * Platform Notifications (SetNotificationPreferences), used for the FixedPriceTransaction
+ * event. This is a wholly different delivery mechanism from the REST Notification API above
+ * (XML/SOAP-flavored body, no X-EBAY-SIGNATURE, no challenge_code) -- but the same "never
+ * treat the body as authoritative" stance applies: receipt at this dedicated, unguessable
+ * path is itself enough signal to trigger an immediate poll, the same way the REST path's
+ * unverified fallback already does. A forged POST here can, at worst, cause one harmless
+ * extra poll; the real sale facts still only ever come from listRecentSales().
+ */
+async function handlePlatformNotification(): Promise<APIGatewayProxyResultV2> {
+  const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+  const adapter = createEbayAdapter(creds);
+  const db = getDb();
+  const queues = getQueueUrls();
+  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  return { statusCode: 200 };
+}
+
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  if (event.rawPath === PLATFORM_NOTIFICATION_PATH && event.requestContext.http.method === "POST") {
+    return handlePlatformNotification();
+  }
   if (event.requestContext.http.method === "GET") {
     return handleChallenge(event);
   }

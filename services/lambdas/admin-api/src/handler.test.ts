@@ -150,6 +150,7 @@ const createReturnPolicyMock = vi.fn().mockResolvedValue("rp-1");
 const createNotificationDestinationMock = vi.fn().mockResolvedValue({ destinationId: "dest-1" });
 const createNotificationSubscriptionMock = vi.fn().mockResolvedValue({ subscriptionId: "sub-1" });
 const updateNotificationConfigMock = vi.fn().mockResolvedValue(undefined);
+const subscribeToFixedPriceTransactionNotificationsMock = vi.fn().mockResolvedValue(undefined);
 const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
 const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
 const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://ebay.example/oauth?state=signed-state");
@@ -165,6 +166,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createNotificationDestination: createNotificationDestinationMock,
   createNotificationSubscription: createNotificationSubscriptionMock,
   updateNotificationConfig: updateNotificationConfigMock,
+  subscribeToFixedPriceTransactionNotifications: subscribeToFixedPriceTransactionNotificationsMock,
   listProducts: listProductsMock,
   getRequiredItemAspects: getRequiredItemAspectsMock,
 }));
@@ -457,6 +459,45 @@ describe("admin-api handler", () => {
     fakeDb = createFakeDb([]);
     const res = await callHandler(
       makeEvent("POST", "/admin/ebay/webhook-setup", {}, { topicId: "LISTING", alertEmail: "ops@example.com" }),
+    );
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("POST /admin/ebay/platform-notification-setup subscribes to FixedPriceTransaction", async () => {
+    process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/platform-notifications";
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "ops@example.com" }),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(subscribeToFixedPriceTransactionNotificationsMock).toHaveBeenCalledWith(
+      "token",
+      "https://api.example.com/webhooks/ebay/platform-notifications",
+      "ops@example.com",
+    );
+  });
+
+  it("POST /admin/ebay/platform-notification-setup returns 400 without an alertEmail", async () => {
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, {}));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("POST /admin/ebay/platform-notification-setup returns 500 when the endpoint URL is not configured", async () => {
+    delete process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL;
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "ops@example.com" }),
+    );
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("POST /admin/ebay/platform-notification-setup returns 409 when no eBay account is connected", async () => {
+    process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/platform-notifications";
+    listConnectedAccountIdsMock.mockResolvedValueOnce([]);
+    fakeDb = createFakeDb([]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "ops@example.com" }),
     );
     expect(res.statusCode).toBe(409);
   });

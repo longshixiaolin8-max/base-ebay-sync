@@ -247,6 +247,63 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   /**
+   * Subscribes this seller's connected eBay account to Platform Notifications (the legacy
+   * Trading API's push-notification system, distinct from -- and older than -- the REST
+   * Commerce Notification API used by createNotificationDestination/Subscription above) for
+   * the FixedPriceTransaction event: eBay pushes a notification the moment a buyer completes
+   * a fixed-price purchase, rather than this app having to poll for it.
+   *
+   * Requires this application's App ID to be allow-listed by eBay for OAuth-based Platform
+   * Notifications delivery (the X-EBAY-API-IAF-TOKEN header below) -- see
+   * https://developer.ebay.com/api-docs/static/oauth-trad-apis.html. Without that
+   * whitelisting, eBay rejects this call; request it via Developer Technical Support first.
+   *
+   * X-EBAY-API-COMPATIBILITY-LEVEL: pinned to a version confirmed to accept this call as of
+   * this writing -- re-verify against developer.ebay.com/api-docs/user-guides before raising
+   * it, since a too-old value can also be rejected once eBay retires support for it.
+   */
+  async subscribeToFixedPriceTransactionNotifications(
+    userAccessToken: string,
+    endpointUrl: string,
+    alertEmail: string,
+  ): Promise<void> {
+    const body = [
+      '<?xml version="1.0" encoding="utf-8"?>',
+      '<SetNotificationPreferencesRequest xmlns="urn:ebay:apis:eBLBaseComponents">',
+      "  <ApplicationDeliveryPreferences>",
+      "    <ApplicationEnable>Enable</ApplicationEnable>",
+      `    <ApplicationURL>${escapeXml(endpointUrl)}</ApplicationURL>`,
+      "    <AlertEnable>Enable</AlertEnable>",
+      `    <AlertEmail>mailto://${escapeXml(alertEmail)}</AlertEmail>`,
+      "    <DeviceType>Platform</DeviceType>",
+      "  </ApplicationDeliveryPreferences>",
+      "  <UserDeliveryPreferenceArray>",
+      "    <NotificationEnable>",
+      "      <EventType>FixedPriceTransaction</EventType>",
+      "      <EventEnable>Enable</EventEnable>",
+      "    </NotificationEnable>",
+      "  </UserDeliveryPreferenceArray>",
+      "</SetNotificationPreferencesRequest>",
+    ].join("\n");
+
+    const res = await fetch(`${this.apiBaseUrl}/ws/api.dll`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/xml",
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
+        "X-EBAY-API-CALL-NAME": "SetNotificationPreferences",
+        "X-EBAY-API-SITEID": "0",
+        "X-EBAY-API-IAF-TOKEN": userAccessToken,
+      },
+      body,
+    });
+    const text = await res.text();
+    if (!res.ok || /<Ack>Failure<\/Ack>/.test(text)) {
+      throw new EbayApiError(res.status, text);
+    }
+  }
+
+  /**
    * Looks up real eBay category IDs for a free-text query via the Taxonomy API, so category
    * selection is a verified lookup rather than a guessed number.
    */
@@ -670,4 +727,13 @@ function toAspects(itemSpecifics: Record<string, string | null>): Record<string,
     if (value !== null) aspects[key] = [value];
   }
   return aspects;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
