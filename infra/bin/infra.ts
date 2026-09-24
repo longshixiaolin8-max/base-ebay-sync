@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import "source-map-support/register.js";
 import * as cdk from "aws-cdk-lib";
+import { AdminHostingStack } from "../lib/admin-hosting-stack.js";
 import { ApiCoreStack } from "../lib/api-core-stack.js";
 import { ApiStack } from "../lib/api-stack.js";
 import { AuthStack } from "../lib/auth-stack.js";
+import { CloudFrontStack } from "../lib/cloudfront-stack.js";
 import { DatabaseStack } from "../lib/database-stack.js";
 import { loadConfig } from "../lib/config.js";
 import { GithubOidcStack } from "../lib/github-oidc-stack.js";
@@ -12,6 +14,7 @@ import { MonitoringStack } from "../lib/monitoring-stack.js";
 import { QueueStack } from "../lib/queue-stack.js";
 import { SecretsStack } from "../lib/secrets-stack.js";
 import { StorageStack } from "../lib/storage-stack.js";
+import { WafStack } from "../lib/waf-stack.js";
 
 const app = new cdk.App();
 
@@ -19,8 +22,9 @@ const envName = (app.node.tryGetContext("env") as string | undefined) ?? "dev";
 const alarmEmail = app.node.tryGetContext("alarmEmail") as string | undefined;
 const aiProvider = app.node.tryGetContext("aiProvider") as string | undefined;
 const githubRepo = (app.node.tryGetContext("githubRepo") as string | undefined) ?? "OWNER/base-ebay-sync";
+const monthlyBudgetUsd = app.node.tryGetContext("monthlyBudgetUsd") as string | undefined;
 
-const config = loadConfig(envName, alarmEmail, aiProvider);
+const config = loadConfig(envName, alarmEmail, aiProvider, monthlyBudgetUsd);
 
 // Region is read from CDK context (`--context region=...`), not from
 // CDK_DEFAULT_REGION/AWS_REGION — the CDK CLI recomputes those env vars from the
@@ -46,11 +50,15 @@ if (app.node.tryGetContext("bootstrapOidc") === "true") {
 }
 
 const database = new DatabaseStack(app, `${stackPrefix}-Database`, config, { env, tags });
-const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags });
+const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags, envName });
 const storage = new StorageStack(app, `${stackPrefix}-Storage`, config, { env, tags });
 const auth = new AuthStack(app, `${stackPrefix}-Auth`, config, { env, tags });
 const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });
-const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags });
+// Created before ApiCoreStack so its real hosted origin (a stable *.amplifyapp.com URL,
+// independent of anything ApiCoreStack/LambdaStack/ApiStack produce) can tighten the API's
+// CORS config away from the wildcard bootstrap fallback -- see api-core-stack.ts.
+const adminHosting = new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
+const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags, adminOrigin: adminHosting.url });
 
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
@@ -62,9 +70,14 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     base: secrets.baseAppCredentials,
     ebay: secrets.ebayAppCredentials,
     openai: secrets.openAiApiKey,
+    stripe: secrets.stripeAppCredentials,
+    signup: secrets.signupCredentials,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
   apiUrl: apiCore.api.apiEndpoint,
+  adminAppUrl: adminHosting.url,
+  userPoolArn: auth.userPool.userPoolArn,
+  userPoolId: auth.userPool.userPoolId,
   queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
   dlqs: { aiGenerate: queues.aiGenerate.dlq, ebaySync: queues.ebaySync.dlq, inventorySync: queues.inventorySync.dlq },
   productImagesBucket: storage.productImagesBucket,
@@ -74,6 +87,7 @@ lambdas.addStackDependency(secrets);
 lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
 lambdas.addStackDependency(apiCore);
+lambdas.addStackDependency(auth);
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
@@ -87,10 +101,34 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   oauthEbayAuthorizeFn: lambdas.oauthEbayAuthorizeFn,
   oauthEbayCallbackFn: lambdas.oauthEbayCallbackFn,
   ebayWebhookFn: lambdas.ebayWebhookFn,
+  signupHandlerFn: lambdas.signupHandlerFn,
+  stripeWebhookFn: lambdas.stripeWebhookFn,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
 api.addStackDependency(apiCore);
+
+// WAF for the API (task from the commercial-readiness hardening round): HttpApi can't
+// take a WAF Web ACL directly, so this stands up a parallel, WAF-protected CloudFront
+// entry point in front of it -- purely additive, no existing stack depends on either of
+// these two, and nothing (the admin app, BASE's OAuth redirect_uri, eBay's registered
+// webhook destination) is switched over to it yet. See cloudfront-stack.ts's own doc
+// comment for why: both of those are already registered live against the direct
+// execute-api URL, and BASE's side of that can only be changed in BASE's own console.
+const waf = new WafStack(app, `${stackPrefix}-Waf`, {
+  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
+  tags,
+  crossRegionReferences: true,
+});
+const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
+  env,
+  tags,
+  crossRegionReferences: true,
+  api: apiCore.api,
+  webAclArn: waf.webAcl.attrArn,
+});
+cloudfrontApi.addStackDependency(apiCore);
+cloudfrontApi.addStackDependency(waf);
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,

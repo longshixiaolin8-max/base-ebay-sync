@@ -1,3 +1,4 @@
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -10,11 +11,16 @@ import {
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
-/** GET /oauth/ebay/authorize — redirects the admin operator to eBay's consent screen. */
+/**
+ * GET /oauth/ebay/authorize — public, deliberately no tenant hint accepted here (see
+ * oauth-state.ts's StatePayload comment). Kept only as a bootstrap path for the one
+ * hand-provisioned tenant this platform has today; admin-api's authenticated
+ * GET /admin/oauth/ebay/authorize-url is the real per-tenant entry point going forward.
+ */
 export async function authorize(): Promise<APIGatewayProxyResultV2> {
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
   const adapter = createEbayAdapter(creds);
-  const state = signState(creds.clientSecret);
+  const state = signState(creds.clientSecret, BOOTSTRAP_TENANT_ID);
   const url = adapter.getAuthorizationUrl(state, creds.ruName);
   return { statusCode: 302, headers: { Location: url } };
 }
@@ -28,8 +34,9 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   }
 
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+  let tenantId: string;
   try {
-    verifyState(creds.clientSecret, state);
+    tenantId = verifyState(creds.clientSecret, state);
   } catch (err) {
     return { statusCode: 400, body: `Invalid OAuth state: ${(err as Error).message}` };
   }
@@ -40,8 +47,9 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const externalAccountId = process.env.EBAY_SELLER_ID ?? "default";
 
   const db = getDb();
-  await saveOAuthToken(db, "ebay", externalAccountId, tokens);
+  await saveOAuthToken(db, tenantId, "ebay", externalAccountId, tokens);
   await recordAuditLog(db, {
+    tenantId,
     actor: "system:oauth-ebay-callback",
     action: "oauth_connected",
     entityType: "oauth_connection",

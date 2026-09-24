@@ -19,6 +19,8 @@ export interface CreateListingInput {
   categoryId: string;
   itemSpecifics: Record<string, string | null>;
   sku: string;
+  /** eBay ConditionEnum value (e.g. "NEW", "USED_VERY_GOOD") — never guessed by the adapter. */
+  condition: string;
 }
 
 export interface UpdateListingInput extends Partial<Omit<CreateListingInput, "productId" | "sku">> {}

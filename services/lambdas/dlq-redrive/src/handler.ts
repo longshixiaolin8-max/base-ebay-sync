@@ -34,6 +34,9 @@ export async function handler(): Promise<void> {
     const result = await redriveDlq(target.url, target.arn);
     if (result.started) {
       await recordAuditLog(db, {
+        // Platform-level, not any one tenant's action -- a redrive moves whatever's in the
+        // shared DLQ regardless of whose messages they are (see auditLog's tenantId comment).
+        tenantId: null,
         actor: "system:dlq-redrive",
         action: "dlq_redrive_started",
         entityType: "queue",

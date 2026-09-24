@@ -1,20 +1,31 @@
 import type { ExternalProduct } from "@ai-ec/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const applyBaseStockReportMock = vi.fn().mockResolvedValue({ applied: true, quantity: 5 });
+const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+const countProductsMock = vi.fn().mockResolvedValue(0);
 vi.mock("@ai-ec/db", () => ({
   productMaster: { sku: "sku" },
   inventoryMaster: {},
   channelListings: { productId: "productId", channel: "channel" },
+  applyBaseStockReport: (...args: unknown[]) => applyBaseStockReportMock(...args),
+  getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
+  countProducts: (...args: unknown[]) => countProductsMock(...args),
 }));
 
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
+const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   enqueue: (...args: unknown[]) => enqueueMock(...args),
+  recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
 const { upsertProduct } = await import("./handler.js");
 
 const queues = { aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" };
+const TENANT_ID = "tenant-a";
 
 const item: ExternalProduct = {
   externalId: "item-1",
@@ -42,54 +53,97 @@ function createFakeDb(opts: FakeDbOptions) {
   const insertedProductId = opts.insertedProductId ?? "new-product-id";
   let selectCallCount = 0;
 
-  return {
-    select: () => ({
-      from: (table: { productId?: string }) => ({
-        where: () => ({
-          limit: async () => {
-            selectCallCount += 1;
-            // First select() call is always the productMaster-by-sku lookup.
-            if (selectCallCount === 1) {
-              return opts.existingProduct ? [opts.existingProduct] : [];
-            }
-            // Any subsequent select() is the ebay channel_listings lookup.
-            void table;
-            return opts.ebayListing ? [opts.ebayListing] : [];
-          },
+  // Shared by both the top-level db and the tx handle passed into db.transaction()'s
+  // callback -- the real Drizzle transaction session supports the same query-builder
+  // surface as the plain database handle, so the fake mirrors that here too.
+  function makeQueryable() {
+    return {
+      select: () => ({
+        from: (table: { productId?: string }) => ({
+          where: () => ({
+            limit: async () => {
+              selectCallCount += 1;
+              // First select() call is always the productMaster-by-sku lookup.
+              if (selectCallCount === 1) {
+                return opts.existingProduct ? [opts.existingProduct] : [];
+              }
+              // Any subsequent select() is the ebay channel_listings lookup.
+              void table;
+              return opts.ebayListing ? [opts.ebayListing] : [];
+            },
+          }),
         }),
       }),
-    }),
-    update: () => ({
-      set: vi.fn(() => ({ where: async () => undefined })),
-    }),
-    insert: (table: { sku?: string }) => ({
-      values: (v: unknown) => {
-        if (table.sku !== undefined) {
-          // productMaster insert -> caller awaits .returning()
-          return insertResult([{ id: insertedProductId }]);
-        }
-        void v;
-        return insertResult(undefined);
-      },
-    }),
+      update: () => ({
+        set: vi.fn(() => ({ where: async () => undefined })),
+      }),
+      insert: (table: { sku?: string }) => ({
+        values: (v: unknown) => {
+          if (table.sku !== undefined) {
+            // productMaster insert -> caller awaits .returning()
+            return insertResult([{ id: insertedProductId }]);
+          }
+          void v;
+          return insertResult(undefined);
+        },
+      }),
+      execute: async () => undefined,
+    };
+  }
+
+  return {
+    ...makeQueryable(),
+    transaction: async (fn: (tx: ReturnType<typeof makeQueryable>) => Promise<unknown>) => fn(makeQueryable()),
   } as never;
 }
 
 describe("upsertProduct", () => {
   beforeEach(() => {
     enqueueMock.mockClear();
+    applyBaseStockReportMock.mockClear();
+    recordAuditLogMock.mockClear();
+    recordSyncErrorMock.mockClear();
+    getTenantBillingStatusMock.mockClear().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
+    countProductsMock.mockClear().mockResolvedValue(0);
+  });
+
+  it("reconciles BASE's reported stock into inventory_master on every poll of an existing product, even when nothing else changed", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({
+      title: item.title,
+      descriptionHtml: item.descriptionHtml,
+      priceJpy: item.priceJpy,
+      images: item.images,
+    });
+    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, TENANT_ID, "existing-id", item.quantity, item.updatedAt);
+  });
+
+  it("does not attempt stock reconciliation for a brand-new product (nothing to reconcile against yet)", async () => {
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(applyBaseStockReportMock).not.toHaveBeenCalled();
   });
 
   it("inserts a brand-new product, its inventory/base listing rows, and enqueues ai_generate", async () => {
     const db = createFakeDb({ existingProduct: null });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(enqueueMock).toHaveBeenCalledWith(
       queues.aiGenerate,
-      { type: "ai_generate", productId: "new-product-id" },
-      "ai-generate:new-product-id",
+      { type: "ai_generate", tenantId: TENANT_ID, productId: "new-product-id" },
+      `${TENANT_ID}:ai-generate:new-product-id`,
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "product_listed_base", entityId: "new-product-id" }),
     );
   });
 
@@ -105,7 +159,7 @@ describe("upsertProduct", () => {
     });
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -116,7 +170,7 @@ describe("upsertProduct", () => {
       ebayListing: null,
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -127,7 +181,7 @@ describe("upsertProduct", () => {
       ebayListing: { status: "pending_approval" },
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).not.toHaveBeenCalled();
   });
@@ -138,13 +192,56 @@ describe("upsertProduct", () => {
       ebayListing: { status: "published" },
     });
 
-    await upsertProduct(db, queues, item);
+    await upsertProduct(db, queues, TENANT_ID, item);
 
     expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(enqueueMock).toHaveBeenCalledWith(
       queues.ebaySync,
-      { type: "ebay_update", productId: "existing-id" },
-      expect.stringContaining("ebay-update:existing-id:"),
+      { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
+      expect.stringContaining(`${TENANT_ID}:ebay-update:existing-id:`),
     );
+  });
+
+  it("skips creating a new product and records a sync error once the tenant is at its plan's product limit", async () => {
+    countProductsMock.mockResolvedValue(300);
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ tenantId: TENANT_ID, errorCode: "product_quota_exceeded" }),
+    );
+  });
+
+  it("still allows creating a new product just under the plan's product limit", async () => {
+    countProductsMock.mockResolvedValue(299);
+    const db = createFakeDb({ existingProduct: null });
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(recordSyncErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("runs the quota check and the insert inside one transaction, not two separate round-trips", async () => {
+    // Regression test for a real TOCTOU race: countProducts() and the insert used to be
+    // two independent db calls with nothing preventing two overlapping invocations for the
+    // same tenant from both reading the same pre-insert count and both inserting, breaching
+    // the plan limit. The fix must run both inside db.transaction() so a second invocation
+    // is serialized behind the first's commit.
+    countProductsMock.mockResolvedValue(299);
+    const db = createFakeDb({ existingProduct: null });
+    const transactionSpy = vi.spyOn(db as unknown as { transaction: (...a: unknown[]) => unknown }, "transaction");
+
+    await upsertProduct(db, queues, TENANT_ID, item);
+
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+    // countProducts must have been called with the tx handle the transaction callback
+    // received, not the outer db -- otherwise the count-check reads outside the lock's
+    // protection and the race isn't actually closed.
+    const [txArg] = countProductsMock.mock.calls.at(-1)!;
+    expect(txArg).not.toBe(db);
   });
 });

@@ -3,17 +3,57 @@ import {
   parseSignatureHeader,
   verifyNotificationSignature,
 } from "@ai-ec/adapter-ebay";
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  deleteOAuthConnectionsByExternalAccount,
   getAppCredentials,
   getDb,
   getQueueUrls,
   pollChannelSales,
+  recordAuditLog,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const NOTIFICATION_LOOKBACK_MS = 20 * 60 * 1000;
+const MARKETPLACE_ACCOUNT_DELETION_TOPIC = "MARKETPLACE_ACCOUNT_DELETION";
+const PLATFORM_NOTIFICATION_PATH = "/webhooks/ebay/platform-notifications";
+
+interface EbayNotificationPayload {
+  metadata?: { topic?: string };
+  notification?: { data?: { username?: string; userId?: string } };
+}
+
+/**
+ * eBay requires every production keyset to handle this notification: when a marketplace
+ * user requests their account be deleted/closed, eBay pushes this and expects any personal
+ * data this app holds about that account to be removed. Deliberately does not fall through
+ * to pollChannelSales below -- this is a deletion request, not a "something may have
+ * changed, go check" signal.
+ */
+async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<APIGatewayProxyResultV2> {
+  const username = payload.notification?.data?.username;
+  if (!username) {
+    console.warn("ebay-webhook: MARKETPLACE_ACCOUNT_DELETION notification had no username, ignoring");
+    return { statusCode: 204 };
+  }
+
+  const db = getDb();
+  const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", username);
+  for (const row of deleted) {
+    await recordAuditLog(db, {
+      tenantId: row.tenantId,
+      actor: "system:ebay-webhook",
+      action: "ebay_account_deletion_purge",
+      entityType: "ebay_account",
+      entityId: username,
+      after: { secretArn: row.secretArn },
+    });
+  }
+
+  return { statusCode: 204 };
+}
 
 /**
  * GET /webhooks/ebay/notifications?challenge_code=... — eBay's one-time endpoint-ownership
@@ -70,14 +110,53 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
     return { statusCode: 412 };
   }
 
+  let payload: EbayNotificationPayload = {};
+  try {
+    payload = JSON.parse(rawBody) as EbayNotificationPayload;
+  } catch {
+    // Malformed body -- fall through to the default "poll now" handling below, matching
+    // this endpoint's existing stance that a notification body is never authoritative.
+  }
+
+  if (payload.metadata?.topic === MARKETPLACE_ACCOUNT_DELETION_TOPIC) {
+    return handleAccountDeletion(payload);
+  }
+
   const db = getDb();
   const queues = getQueueUrls();
-  await pollChannelSales(adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  // eBay's notification delivery carries no tenant hint at all -- unlike the other pollers,
+  // there's no way to derive which tenant this webhook belongs to without a per-tenant
+  // webhook-registration redesign (tracked as a deferred follow-up to the multi-tenant
+  // retrofit). Hardcoded to the one bootstrap tenant, matching the one real registered
+  // eBay webhook destination that exists today.
+  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
 
   return { statusCode: 204 };
 }
 
+/**
+ * POST /webhooks/ebay/platform-notifications — delivery target for the legacy Trading API's
+ * Platform Notifications (SetNotificationPreferences), used for the FixedPriceTransaction
+ * event. This is a wholly different delivery mechanism from the REST Notification API above
+ * (XML/SOAP-flavored body, no X-EBAY-SIGNATURE, no challenge_code) -- but the same "never
+ * treat the body as authoritative" stance applies: receipt at this dedicated, unguessable
+ * path is itself enough signal to trigger an immediate poll, the same way the REST path's
+ * unverified fallback already does. A forged POST here can, at worst, cause one harmless
+ * extra poll; the real sale facts still only ever come from listRecentSales().
+ */
+async function handlePlatformNotification(): Promise<APIGatewayProxyResultV2> {
+  const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+  const adapter = createEbayAdapter(creds);
+  const db = getDb();
+  const queues = getQueueUrls();
+  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  return { statusCode: 200 };
+}
+
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  if (event.rawPath === PLATFORM_NOTIFICATION_PATH && event.requestContext.http.method === "POST") {
+    return handlePlatformNotification();
+  }
   if (event.requestContext.http.method === "GET") {
     return handleChallenge(event);
   }

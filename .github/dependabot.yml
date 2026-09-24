@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # pnpm workspace: a single lockfile at the repo root covers every package under
+  # apps/, packages/, services/, and infra/, so one "/" entry is enough -- Dependabot
+  # resolves the whole workspace from it rather than needing one entry per package.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

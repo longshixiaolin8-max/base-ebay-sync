@@ -46,3 +46,17 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await authorizedFetch(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
   return res.json() as Promise<T>;
 }
+
+/** For /signup, the one route with no Cognito session to attach -- it's what creates one. */
+export async function publicApiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${getApiBaseUrl()}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const responseBody = await res.text();
+    throw new ApiError(res.status, responseBody || res.statusText);
+  }
+  return res.json() as Promise<T>;
+}

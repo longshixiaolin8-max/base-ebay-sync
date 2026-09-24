@@ -12,6 +12,6 @@ export function getDb(): Database {
   return cachedDb;
 }
 
-export function getIdempotencyStore() {
-  return createDbIdempotencyStore(getDb());
+export function getIdempotencyStore(tenantId: string) {
+  return createDbIdempotencyStore(getDb(), tenantId);
 }
