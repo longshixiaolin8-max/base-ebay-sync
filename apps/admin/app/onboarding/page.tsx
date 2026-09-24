@@ -1,5 +1,6 @@
 "use client";
 
+import { fetchUserAttributes } from "aws-amplify/auth";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
@@ -33,7 +34,8 @@ export default function OnboardingPage() {
   const [policiesDone, setPoliciesDone] = useState(false);
   const [unmanagedCount, setUnmanagedCount] = useState<number | null>(null);
   const [pendingApprovalCount, setPendingApprovalCount] = useState<number | null>(null);
-  const [busy, setBusy] = useState<"base" | "ebay" | "policies" | null>(null);
+  const [busy, setBusy] = useState<"base" | "ebay" | "policies" | "ebayNotifications" | null>(null);
+  const [ebayNotificationsEnabled, setEbayNotificationsEnabled] = useState(false);
   const [step, setStep] = useState(0);
   const [stepInitialized, setStepInitialized] = useState(false);
 
@@ -118,6 +120,28 @@ export default function OnboardingPage() {
     }
   }
 
+  /**
+   * Subscribes this tenant's connected eBay account to Platform Notifications
+   * (FixedPriceTransaction) via POST /admin/ebay/platform-notification-setup -- requires
+   * this application's App ID to already be eBay-whitelisted for OAuth-based Platform
+   * Notifications delivery. Safe to call more than once (SetNotificationPreferences just
+   * re-applies the same subscription), so no persisted "already done" check is needed here.
+   */
+  async function enableEbayRealtimeNotifications() {
+    setBusy("ebayNotifications");
+    try {
+      const attrs = await fetchUserAttributes();
+      if (!attrs.email) throw new Error("ログイン中のメールアドレスを取得できませんでした。");
+      await apiPost("/admin/ebay/platform-notification-setup", { alertEmail: attrs.email });
+      setEbayNotificationsEnabled(true);
+      notify("eBayのリアルタイム通知を有効にしました。", "success");
+    } catch (err) {
+      notify(`リアルタイム通知の有効化に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <>
       <Topbar />
@@ -159,22 +183,54 @@ export default function OnboardingPage() {
                 </button>
               </div>
 
-              <div className="card card-pad" style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                <span
-                  className={`status-dot ${ebayDone ? "ok" : "warn"}`}
-                  style={{ width: "2.2rem", height: "2.2rem", borderRadius: "var(--radius-sm)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontWeight: 700 }}
-                >
-                  {ebayDone ? <CheckIcon /> : "e"}
-                </span>
-                <div style={{ flex: 1 }}>
-                  <h3 style={{ margin: 0 }}>eBay</h3>
-                  <p style={{ margin: "0.3rem 0 0", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
-                    {ebayDone ? <span className="badge ok">接続済み</span> : "接続先の画面でアクセスを許可します。"}
-                  </p>
+              <div className="card card-pad">
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                  <span
+                    className={`status-dot ${ebayDone ? "ok" : "warn"}`}
+                    style={{ width: "2.2rem", height: "2.2rem", borderRadius: "var(--radius-sm)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontWeight: 700 }}
+                  >
+                    {ebayDone ? <CheckIcon /> : "e"}
+                  </span>
+                  <div style={{ flex: 1 }}>
+                    <h3 style={{ margin: 0 }}>eBay</h3>
+                    <p style={{ margin: "0.3rem 0 0", fontSize: "0.85rem", color: "var(--fg-muted)" }}>
+                      {ebayDone ? <span className="badge ok">接続済み</span> : "接続先の画面でアクセスを許可します。"}
+                    </p>
+                  </div>
+                  <button type="button" className={ebayDone ? "secondary" : undefined} onClick={() => connect("ebay")} disabled={busy === "ebay"}>
+                    {busy === "ebay" ? "処理中..." : ebayDone ? "接続を管理" : "eBayに接続"}
+                  </button>
                 </div>
-                <button type="button" className={ebayDone ? "secondary" : undefined} onClick={() => connect("ebay")} disabled={busy === "ebay"}>
-                  {busy === "ebay" ? "処理中..." : ebayDone ? "接続を管理" : "eBayに接続"}
-                </button>
+
+                {ebayDone && (
+                  <div
+                    style={{
+                      marginTop: "0.9rem",
+                      paddingTop: "0.9rem",
+                      borderTop: "1px solid var(--border)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "1rem",
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: "0.85rem", fontWeight: 600 }}>
+                        リアルタイム通知 {ebayNotificationsEnabled && <span className="badge ok">有効</span>}
+                      </div>
+                      <p style={{ margin: "0.2rem 0 0", fontSize: "0.8rem", color: "var(--fg-subtle)" }}>
+                        eBayで商品が売れた瞬間に検知し、BASE側の在庫にすぐ反映します。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={enableEbayRealtimeNotifications}
+                      disabled={busy === "ebayNotifications"}
+                    >
+                      {busy === "ebayNotifications" ? "処理中..." : ebayNotificationsEnabled ? "再設定" : "有効にする"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="card card-pad">
