@@ -285,6 +285,12 @@ export async function applyBaseStockReport(
         eventType: "base_stock_report",
         sequenceAt,
         absoluteQuantity: reportedQuantity,
+        // The actual post-reconciliation value this report drove inventory_master to --
+        // reconstructInventory() replays from this, not absoluteQuantity (see that column's
+        // own comment for why: BASE's raw reported number omits eBay sales it doesn't know
+        // about, which is exactly what ebaySoldSinceBaseSync/this subtraction accounts for).
+        reconciledQuantity,
+        ebaySoldConsumed: current.ebaySoldSinceBaseSync,
         applied: true,
       });
       return { applied: true, quantity: reconciledQuantity };
@@ -335,7 +341,15 @@ export async function reconstructInventory(db: Database, tenantId: string, produ
     return -1;
   })();
 
-  let quantity = lastBaseReportIndex >= 0 ? (sorted[lastBaseReportIndex]!.absoluteQuantity ?? 0) : 0;
+  // Prefer reconciledQuantity (the real post-reconciliation value this report actually drove
+  // inventory_master to) over absoluteQuantity (BASE's raw reported number, which omits any
+  // eBay sale BASE doesn't know about) -- falling back to absoluteQuantity only for a legacy
+  // row written before reconciledQuantity existed, so an old event history still replays
+  // (imperfectly, the same way it always did) rather than throwing.
+  let quantity =
+    lastBaseReportIndex >= 0
+      ? (sorted[lastBaseReportIndex]!.reconciledQuantity ?? sorted[lastBaseReportIndex]!.absoluteQuantity ?? 0)
+      : 0;
   const replayFrom = lastBaseReportIndex >= 0 ? lastBaseReportIndex + 1 : 0;
   let eventsReplayed = lastBaseReportIndex >= 0 ? 1 : 0;
 

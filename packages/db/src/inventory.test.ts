@@ -508,6 +508,83 @@ describe("reconstructInventory", () => {
 
     expect(result.reconstructedQuantity).toBe(0); // floored, never negative
   });
+
+  it("falls back to absoluteQuantity for a legacy base_stock_report event with no reconciledQuantity", async () => {
+    // Simulates a row written before reconciledQuantity/ebaySoldConsumed existed -- these
+    // fields are genuinely absent (not just 0) on such a row.
+    const row = new FakeInventoryRow(5);
+    const db = fakeDb(row);
+    db.events.push({
+      productId: "p1",
+      channel: "base",
+      eventType: "base_stock_report",
+      sequenceAt: new Date("2026-09-01T00:00:00Z"),
+      absoluteQuantity: 5,
+      applied: true,
+    });
+
+    const result = await reconstructInventory(asDatabase(db), "tenant-a", "p1");
+
+    expect(result.reconstructedQuantity).toBe(5);
+  });
+
+  describe("the reconciled-quantity bug fix (integration with applySale + applyBaseStockReport)", () => {
+    it("reconstructs the real post-reconciliation quantity, not BASE's raw reported number, when a BASE report follows an eBay sale it didn't know about", async () => {
+      // The exact scenario from the bug report: BASE=5, then an eBay sale for 1 that BASE
+      // has no idea about, then BASE reports its stock as (still) 5 -- its own count never
+      // moved, since the sale happened on eBay, not BASE. inventory_master correctly
+      // reconciles this to 4 (applyBaseStockReport always did this math right); the bug was
+      // that reconstructInventory previously replayed from the raw absoluteQuantity=5
+      // instead, and would have reported 5 here, masking the real drift-free state as if it
+      // had drifted (or worse, "corrected" a healthy counter down to a wrong number).
+      const row = new FakeInventoryRow(5);
+      const db = asDatabase(fakeDb(row));
+
+      await applySale(db, "tenant-a", "p1", 1, { channel: "ebay", sequenceAt: new Date("2026-09-01T00:01:00Z") });
+      const report = await applyBaseStockReport(db, "tenant-a", "p1", 5, new Date("2026-09-01T00:02:00Z"));
+
+      expect(report).toEqual({ applied: true, quantity: 4 });
+      expect(row.quantity).toBe(4);
+
+      const result = await reconstructInventory(db, "tenant-a", "p1");
+
+      expect(result.reconstructedQuantity).toBe(4);
+      expect(result.currentQuantity).toBe(4);
+      expect(result.drifted).toBe(false);
+    });
+
+    it("still reconstructs correctly for the existing case: an eBay sale after a BASE report", async () => {
+      const row = new FakeInventoryRow(10);
+      const db = asDatabase(fakeDb(row));
+
+      await applyBaseStockReport(db, "tenant-a", "p1", 10, new Date("2026-09-01T00:00:00Z"));
+      await applySale(db, "tenant-a", "p1", 2, { channel: "ebay", sequenceAt: new Date("2026-09-01T01:00:00Z") });
+
+      const result = await reconstructInventory(db, "tenant-a", "p1");
+
+      expect(result.reconstructedQuantity).toBe(8);
+      expect(result.currentQuantity).toBe(8);
+      expect(result.drifted).toBe(false);
+    });
+
+    it("ignores an out-of-order BASE report that was recorded but never applied", async () => {
+      const row = new FakeInventoryRow(5);
+      const db = asDatabase(fakeDb(row));
+
+      await applySale(db, "tenant-a", "p1", 1, { channel: "ebay", sequenceAt: new Date("2026-09-01T00:01:00Z") });
+      await applyBaseStockReport(db, "tenant-a", "p1", 5, new Date("2026-09-01T00:02:00Z"));
+      // A stale/delayed report arriving after a newer one already applied -- recorded with
+      // applied:false, and must never feed into the replay.
+      const outOfOrder = await applyBaseStockReport(db, "tenant-a", "p1", 999, new Date("2026-09-01T00:00:30Z"));
+
+      expect(outOfOrder).toEqual({ applied: false, quantity: 4, reason: "out_of_order" });
+
+      const result = await reconstructInventory(db, "tenant-a", "p1");
+
+      expect(result.reconstructedQuantity).toBe(4); // unaffected by the skipped report's 999
+      expect(result.drifted).toBe(false);
+    });
+  });
 });
 
 describe("applyReconstructedInventory", () => {

@@ -243,8 +243,26 @@ export const inventoryEvents = pgTable("inventory_events", {
   sequenceAt: timestamp("sequence_at", { withTimezone: true }).notNull(),
   /** Set for "sale" events: units sold in this event. */
   quantityDelta: integer("quantity_delta"),
-  /** Set for "base_stock_report" events: BASE's reported absolute stock at sequenceAt. */
+  /** Set for "base_stock_report" events: BASE's reported absolute stock at sequenceAt --
+   *  the raw number BASE reported, BEFORE subtracting ebaySoldSinceBaseSync. Kept as-is for
+   *  audit/debugging; reconstructInventory() must NOT replay from this alone (see
+   *  reconciledQuantity below). */
   absoluteQuantity: integer("absolute_quantity"),
+  /**
+   * Set for an *applied* "base_stock_report" event: what inventory_master.quantity was
+   * actually set to (absoluteQuantity - ebaySoldConsumed), i.e. the real post-reconciliation
+   * value. Added because reconstructInventory() previously replayed from absoluteQuantity
+   * directly -- correct for runtime reconciliation (applyBaseStockReport itself always did
+   * the subtraction right), but wrong for the durable ledger reconstructInventory() replays
+   * from, so a later reconstruction could report a higher-than-actual quantity. Null for a
+   * skipped (applied=false) report, and for any row written before this column existed
+   * (reconstructInventory() falls back to absoluteQuantity for those legacy rows).
+   */
+  reconciledQuantity: integer("reconciled_quantity"),
+  /** Set alongside reconciledQuantity: how much of inventory_master.ebaySoldSinceBaseSync
+   *  was subtracted to produce it (0 if none). Kept for audit/debugging alongside
+   *  absoluteQuantity -- reconciledQuantity alone already has this baked in. */
+  ebaySoldConsumed: integer("ebay_sold_consumed"),
   /** BASE order id / eBay order id, for correlating with the sale that produced this event. */
   externalEventId: text("external_event_id"),
   applied: boolean("applied").notNull().default(true),
