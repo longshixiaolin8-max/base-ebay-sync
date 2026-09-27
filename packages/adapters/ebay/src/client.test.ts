@@ -8,6 +8,7 @@ const config = {
   merchantLocationKey: "loc-1",
   apiBaseUrl: "https://api.example-ebay.test",
   authBaseUrl: "https://auth.example-ebay.test",
+  identityApiBaseUrl: "https://apiz.example-ebay.test",
 };
 
 function jsonResponse(body: unknown, status = 200) {
@@ -251,6 +252,46 @@ describe("EbayAdapter", () => {
       "https://api.example-ebay.test/commerce/notification/v1/public_key/key-1",
       expect.objectContaining({ headers: { Authorization: "Bearer app-token" } }),
     );
+  });
+
+  it("fetches the connected account's immutable eBay userId from the distinct apiz.* Identity API host", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ userId: "007ABCxyeBay", username: "some_seller" }),
+      text: async () => "",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const userId = await adapter.getAuthenticatedUserId("user-token");
+
+    expect(userId).toBe("007ABCxyeBay");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://apiz.example-ebay.test/commerce/identity/v1/user/",
+      expect.objectContaining({ headers: { Authorization: "Bearer user-token" } }),
+    );
+  });
+
+  it("throws rather than returning a fallback id when the Identity API response has no userId", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "{}",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.getAuthenticatedUserId("user-token")).rejects.toThrow(/userId/);
+  });
+
+  it("throws when the Identity API call itself fails (e.g. missing commerce.identity.readonly scope)", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 403, text: async () => "insufficient_scope" });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.getAuthenticatedUserId("user-token")).rejects.toThrow(/403/);
   });
 
   it("subscribes to FixedPriceTransaction Platform Notifications via the Trading API", async () => {

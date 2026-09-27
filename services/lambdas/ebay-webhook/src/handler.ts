@@ -31,23 +31,30 @@ interface EbayNotificationPayload {
  * data this app holds about that account to be removed. Deliberately does not fall through
  * to pollChannelSales below -- this is a deletion request, not a "something may have
  * changed, go check" signal.
+ *
+ * Keyed on userId, not username: oauth_connections' externalAccountId for eBay is now
+ * itself the immutable userId returned by getAuthenticatedUserId (the tenant-isolation fix
+ * that replaced this app's own "default" externalAccountId fallback), so this must match on
+ * the same field to ever find anything to purge. This also matches eBay's own direction here
+ * -- as of September 2025 eBay no longer includes username at all for some regions/accounts
+ * in this exact notification, sending only the immutable user id instead.
  */
 async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<APIGatewayProxyResultV2> {
-  const username = payload.notification?.data?.username;
-  if (!username) {
-    console.warn("ebay-webhook: MARKETPLACE_ACCOUNT_DELETION notification had no username, ignoring");
+  const userId = payload.notification?.data?.userId;
+  if (!userId) {
+    console.warn("ebay-webhook: MARKETPLACE_ACCOUNT_DELETION notification had no userId, ignoring");
     return { statusCode: 204 };
   }
 
   const db = getDb();
-  const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", username);
+  const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", userId);
   for (const row of deleted) {
     await recordAuditLog(db, {
       tenantId: row.tenantId,
       actor: "system:ebay-webhook",
       action: "ebay_account_deletion_purge",
       entityType: "ebay_account",
-      entityId: username,
+      entityId: userId,
       after: { secretArn: row.secretArn },
     });
   }

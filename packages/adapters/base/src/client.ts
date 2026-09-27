@@ -17,6 +17,13 @@ interface BaseTokenResponse {
   scope?: string;
 }
 
+/** GET /1/users/me response -- verified against BASE's own reference
+ *  (gist.github.com/baseinc/9759577): shop_id is documented as "a unique string ID that
+ *  identifies the user" ("ユーザーを識別するユニークなID。文字列型"). */
+interface BaseUserResponse {
+  user: { shop_id: string };
+}
+
 /**
  * BASE's real /1/items response has no "images" array and no "updated" field — verified
  * against a live production item. Photos come as up to 20 flat img1_origin..img20_origin
@@ -126,6 +133,23 @@ export class BaseAdapter implements ChannelAdapter {
       grant_type: "refresh_token",
       refresh_token: refreshToken,
     });
+  }
+
+  /**
+   * The tenant-isolation fix that replaced oauth-base's "default" externalAccountId
+   * fallback: BASE has no shop id in the OAuth token response itself, but GET /1/users/me
+   * (authenticated with this connection's own access token) returns it as shop_id, which
+   * BASE's own reference documents as a unique per-user string id -- exactly what
+   * oauth_connections needs as a stable primary key instead of every BASE connection
+   * colliding on the literal string "default".
+   */
+  async getAuthenticatedShopId(accessToken: string): Promise<string> {
+    const res = await this.authedFetch(accessToken, "/1/users/me");
+    const json = (await res.json()) as BaseUserResponse;
+    if (!json.user?.shop_id) {
+      throw new BaseApiError(res.status, "BASE /1/users/me response had no user.shop_id field");
+    }
+    return json.user.shop_id;
   }
 
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {

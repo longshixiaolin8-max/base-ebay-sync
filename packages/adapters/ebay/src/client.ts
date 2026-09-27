@@ -11,6 +11,7 @@ import type {
 import {
   EBAY_API_DEFAULT_HOST,
   EBAY_AUTH_DEFAULT_HOST,
+  EBAY_IDENTITY_API_DEFAULT_HOST,
   EBAY_OAUTH_SCOPES,
   type EbayAdapterConfig,
 } from "./config.js";
@@ -114,10 +115,12 @@ export class EbayAdapter implements ChannelAdapter {
   readonly channel = "ebay" as const;
   private readonly apiBaseUrl: string;
   private readonly authBaseUrl: string;
+  private readonly identityApiBaseUrl: string;
 
   constructor(private readonly config: EbayAdapterConfig) {
     this.apiBaseUrl = config.apiBaseUrl ?? EBAY_API_DEFAULT_HOST;
     this.authBaseUrl = config.authBaseUrl ?? EBAY_AUTH_DEFAULT_HOST;
+    this.identityApiBaseUrl = config.identityApiBaseUrl ?? EBAY_IDENTITY_API_DEFAULT_HOST;
   }
 
   getAuthorizationUrl(state: string, _redirectUri: string): string {
@@ -132,6 +135,29 @@ export class EbayAdapter implements ChannelAdapter {
 
   async exchangeCodeForToken(code: string): Promise<OAuthTokenSet> {
     return this.requestToken({ grant_type: "authorization_code", code, redirect_uri: this.config.ruName });
+  }
+
+  /**
+   * The tenant-isolation fix that replaced oauth-{base,ebay}'s "default" externalAccountId
+   * fallback: eBay's Commerce Identity API (GET {identityApiBaseUrl}/commerce/identity/v1/user/,
+   * requires the commerce.identity.readonly scope on the USER's own access token, not an app
+   * token) returns this account's immutable userId -- unlike username, it never changes even
+   * if the seller renames their eBay account, which is exactly what oauth_connections needs
+   * as a stable primary key, and it's also what eBay's own MARKETPLACE_ACCOUNT_DELETION
+   * notification payload identifies the account by (see ebay-webhook's handleAccountDeletion).
+   * Note the distinct apiz.* host -- this is the one eBay REST call this adapter makes that
+   * is NOT served from this.apiBaseUrl.
+   */
+  async getAuthenticatedUserId(accessToken: string): Promise<string> {
+    const res = await fetch(`${this.identityApiBaseUrl}/commerce/identity/v1/user/`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) throw new EbayApiError(res.status, await res.text());
+    const body = (await res.json()) as { userId?: string };
+    if (!body.userId) {
+      throw new EbayApiError(res.status, "eBay Identity API response had no userId field");
+    }
+    return body.userId;
   }
 
   async refreshToken(refreshToken: string): Promise<OAuthTokenSet> {

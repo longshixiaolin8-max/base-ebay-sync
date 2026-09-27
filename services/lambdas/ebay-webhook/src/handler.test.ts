@@ -140,15 +140,35 @@ describe("ebay-webhook handler", () => {
 
     expect(res.statusCode).toBe(204);
     expect(pollChannelSalesMock).not.toHaveBeenCalled();
-    expect(deleteOAuthConnectionsByExternalAccountMock).toHaveBeenCalledWith(expect.anything(), "ebay", "closed-user-1");
+    expect(deleteOAuthConnectionsByExternalAccountMock).toHaveBeenCalledWith(expect.anything(), "ebay", "u-1");
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         tenantId: "tenant-a",
         action: "ebay_account_deletion_purge",
-        entityId: "closed-user-1",
+        entityId: "u-1",
       }),
     );
+  });
+
+  it("purges by userId even when eBay omits username entirely (eBay's own Sept-2025 change for some regions)", async () => {
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([
+      { tenantId: "tenant-a", secretArn: "arn:aws:secretsmanager:secret-1" },
+    ]);
+
+    const res = (await handler(
+      makeEvent({
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({
+          metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+          notification: { data: { userId: "u-2" } },
+        }),
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(204);
+    expect(deleteOAuthConnectionsByExternalAccountMock).toHaveBeenCalledWith(expect.anything(), "ebay", "u-2");
   });
 
   it("POST to the platform-notifications path triggers a sales poll and returns 200, regardless of body/signature", async () => {
@@ -165,7 +185,7 @@ describe("ebay-webhook handler", () => {
     expect(pollChannelSalesMock).toHaveBeenCalledTimes(1);
   });
 
-  it("acknowledges a MARKETPLACE_ACCOUNT_DELETION notification with no username without purging anything", async () => {
+  it("acknowledges a MARKETPLACE_ACCOUNT_DELETION notification with no userId without purging anything", async () => {
     const res = (await handler(
       makeEvent({
         requestContext: { http: { method: "POST" } } as never,

@@ -33,7 +33,7 @@ describe("BaseAdapter", () => {
     expect(url.origin + url.pathname).toBe("https://api.example-base.test/1/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("cid");
     expect(url.searchParams.get("state")).toBe("state123");
-    expect(url.searchParams.get("scope")).toBe("read_items write_items read_orders");
+    expect(url.searchParams.get("scope")).toBe("read_items write_items read_orders read_users");
   });
 
   it("exchanges an authorization code for tokens", async () => {
@@ -218,5 +218,25 @@ describe("BaseAdapter", () => {
     vi.stubGlobal("fetch", mockFetchOnce({ error: "unauthorized" }, 401));
     const adapter = new BaseAdapter(config);
     await expect(adapter.getInventory("token", "item-1")).rejects.toThrow(/BASE API error 401/);
+  });
+
+  it("fetches the connected shop's real shop_id via GET /1/users/me", async () => {
+    const fetchMock = mockFetchOnce({ user: { shop_id: "my-real-shop" } });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const shopId = await adapter.getAuthenticatedShopId("token");
+
+    expect(shopId).toBe("my-real-shop");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-base.test/1/users/me",
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer token" }) }),
+    );
+  });
+
+  it("throws rather than returning a fallback id when the response has no shop_id", async () => {
+    vi.stubGlobal("fetch", mockFetchOnce({ user: {} }));
+    const adapter = new BaseAdapter(config);
+    await expect(adapter.getAuthenticatedShopId("token")).rejects.toThrow(/shop_id/);
   });
 });

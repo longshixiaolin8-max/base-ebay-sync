@@ -1,4 +1,9 @@
-import { EBAY_API_SANDBOX_HOST, EBAY_AUTH_SANDBOX_HOST, EbayAdapter } from "@ai-ec/adapter-ebay";
+import {
+  EBAY_API_SANDBOX_HOST,
+  EBAY_AUTH_SANDBOX_HOST,
+  EBAY_IDENTITY_API_SANDBOX_HOST,
+  EbayAdapter,
+} from "@ai-ec/adapter-ebay";
 
 export interface EbayAppCredentials {
   clientId: string;
@@ -21,5 +26,6 @@ export function createEbayAdapter(creds: EbayAppCredentials): EbayAdapter {
     ...creds,
     apiBaseUrl: creds.sandbox ? EBAY_API_SANDBOX_HOST : undefined,
     authBaseUrl: creds.sandbox ? EBAY_AUTH_SANDBOX_HOST : undefined,
+    identityApiBaseUrl: creds.sandbox ? EBAY_IDENTITY_API_SANDBOX_HOST : undefined,
   });
 }

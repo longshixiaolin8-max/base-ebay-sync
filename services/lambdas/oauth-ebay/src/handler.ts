@@ -44,7 +44,21 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const adapter = createEbayAdapter(creds);
   const tokens = await adapter.exchangeCodeForToken(code);
 
-  const externalAccountId = process.env.EBAY_SELLER_ID ?? "default";
+  // Tenant-isolation fix: this used to fall back to the literal string "default" whenever
+  // EBAY_SELLER_ID wasn't set, which every tenant's connection hit in practice (that env var
+  // was never actually set per-tenant) -- meaning every tenant's eBay connection collided on
+  // the same externalAccountId. getAuthenticatedUserId returns eBay's own immutable user id,
+  // which is unique per real eBay account and is also what eBay's own
+  // MARKETPLACE_ACCOUNT_DELETION notification identifies the account by. If this fails (e.g.
+  // the connected token lacks the commerce.identity.readonly scope), the connection must not
+  // be recorded at all -- a saved connection with no way to reliably identify whose eBay
+  // account it is would be worse than no connection.
+  let externalAccountId: string;
+  try {
+    externalAccountId = await adapter.getAuthenticatedUserId(tokens.accessToken);
+  } catch (err) {
+    return { statusCode: 502, body: `Could not identify the connected eBay account: ${(err as Error).message}` };
+  }
 
   const db = getDb();
   await saveOAuthToken(db, tenantId, "ebay", externalAccountId, tokens);

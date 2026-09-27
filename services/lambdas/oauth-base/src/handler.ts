@@ -50,10 +50,18 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const adapter = new BaseAdapter({ clientId: creds.clientId, clientSecret: creds.clientSecret });
   const tokens = await adapter.exchangeCodeForToken(code, redirectUri());
 
-  // BASE's token response does not include a shop id in this simplified flow; the shop
-  // is identified from the first authenticated API call. For a single-shop deployment,
-  // "default" is a stable account key; multi-shop support can key this off the real id.
-  const externalAccountId = process.env.BASE_SHOP_ID ?? "default";
+  // Tenant-isolation fix: this used to fall back to the literal string "default" for every
+  // connection (BASE_SHOP_ID was never actually set per-tenant), meaning every tenant's BASE
+  // connection collided on the same externalAccountId. getAuthenticatedShopId returns BASE's
+  // own real shop_id (GET /1/users/me), unique per shop. If this fails, the connection must
+  // not be recorded at all -- a saved connection with no reliable way to identify whose BASE
+  // shop it is would be worse than no connection.
+  let externalAccountId: string;
+  try {
+    externalAccountId = await adapter.getAuthenticatedShopId(tokens.accessToken);
+  } catch (err) {
+    return { statusCode: 502, body: `Could not identify the connected BASE shop: ${(err as Error).message}` };
+  }
 
   const db = getDb();
   await saveOAuthToken(db, tenantId, "base", externalAccountId, tokens);
