@@ -26,10 +26,13 @@ export async function handler(): Promise<{ bootstrapTenantId: string }> {
 
   // Never created by any migration -- packages/db/src/tenants.ts's BOOTSTRAP_TENANT_ID is
   // referenced throughout the codebase (e.g. ebay-webhook's fallback poll target) as if a
-  // row for it already exists, but nothing before this ever inserted one.
+  // row for it already exists, but nothing before this ever inserted one. The explicit
+  // ::uuid cast is load-bearing: the Data API sends the bound parameter as a plain string,
+  // and "id" won't implicitly coerce text -> uuid (confirmed live: 42804 "column is of
+  // type uuid but expression is of type text" without it).
   await db.execute(sql`
     INSERT INTO "tenants" ("id", "name", "plan", "status")
-    VALUES (${BOOTSTRAP_TENANT_ID}, 'Bootstrap Tenant', 'standard', 'active')
+    VALUES (${BOOTSTRAP_TENANT_ID}::uuid, 'Bootstrap Tenant', 'standard', 'active')
     ON CONFLICT ("id") DO NOTHING
   `);
 

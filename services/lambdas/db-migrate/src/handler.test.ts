@@ -32,6 +32,7 @@ describe("db-migrate handler", () => {
     expect(queryText).toContain("INSERT INTO");
     expect(queryText).toContain("tenants");
     expect(queryText).toContain("ON CONFLICT");
+    expect(queryText).toContain("<param>::uuid");
 
     expect(result).toEqual({ bootstrapTenantId: "00000000-0000-0000-0000-000000000001" });
   });
