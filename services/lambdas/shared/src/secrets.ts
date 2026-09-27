@@ -27,8 +27,18 @@ interface StoredToken {
   scope: string | null;
 }
 
-function secretName(channel: string, externalAccountId: string): string {
-  return `ai-ec-platform/${ENV_SEGMENT}oauth/${channel}/${externalAccountId}`;
+/**
+ * tenantId is a required, non-optional segment of the secret name itself -- not just of
+ * the oauth_connections DB row -- because externalAccountId is not reliably unique across
+ * tenants in practice (see e.g. oauth-base/oauth-ebay's own "default" fallback prior to the
+ * tenant-isolation fix). Without it, two tenants that both resolve to the same
+ * (channel, externalAccountId) would share the exact same Secrets Manager secret NAME, and
+ * since Secrets Manager has no per-tenant concept of its own, the second tenant's
+ * PutSecretValueCommand would silently overwrite the first tenant's live OAuth token --
+ * even though their oauth_connections rows are correctly kept separate by tenantId.
+ */
+function secretName(tenantId: string, channel: string, externalAccountId: string): string {
+  return `ai-ec-platform/${ENV_SEGMENT}oauth/${tenantId}/${channel}/${externalAccountId}`;
 }
 
 /**
@@ -43,11 +53,7 @@ export async function saveOAuthToken(
   externalAccountId: string,
   tokens: OAuthTokenSet,
 ): Promise<void> {
-  // Secret name is intentionally NOT tenant-segmented -- Secrets Manager names are already
-  // globally unique per (channel, externalAccountId) in practice (a real BASE/eBay account
-  // id), and the tenant boundary that actually matters is enforced at the oauth_connections
-  // row (below), which is what every read of this connection goes through first.
-  const name = secretName(channel, externalAccountId);
+  const name = secretName(tenantId, channel, externalAccountId);
   const value: StoredToken = {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,

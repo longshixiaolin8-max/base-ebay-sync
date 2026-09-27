@@ -34,6 +34,13 @@ export class SecretsStack extends cdk.Stack {
     super(scope, id, props);
 
     const envSegment = props.envName === "dev" ? "" : `${props.envName}/`;
+    // Only a prefix for IAM scoping (see oauthTokenSecretArnPattern in infra/bin/infra.ts) --
+    // the actual secrets under it are created dynamically at runtime by saveOAuthToken
+    // (services/lambdas/shared/src/secrets.ts), not provisioned here. Its full name is
+    // `${oauthTokenPrefix}${tenantId}/${channel}/${externalAccountId}` -- the tenantId
+    // segment is required so that two tenants resolving to the same (channel,
+    // externalAccountId) (e.g. a not-yet-known BASE shop id) never share the same Secrets
+    // Manager secret name. This prefix already covers that longer path with no change here.
     this.oauthTokenPrefix = `ai-ec-platform/${envSegment}oauth/`;
 
     this.baseAppCredentials = new secretsmanager.Secret(this, "BaseAppCredentials", {
