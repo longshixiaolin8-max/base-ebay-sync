@@ -231,3 +231,21 @@ export function ShieldIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Pulse/heartbeat icon for the system-health (SLO) nav item. */
+export function ActivityIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M22 12h-4l-3 8-6-16-3 8H2" />
+    </Icon>
+  );
+}
+
+/** Chevron used for expand/collapse toggles on diagnostic panels. */
+export function ChevronIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={16} height={16}>
+      <path d="m6 9 6 6 6-6" />
+    </Icon>
+  );
+}

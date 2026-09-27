@@ -971,12 +971,25 @@ describe("admin-api handler", () => {
   });
 
   describe("commercial-features round", () => {
-    it("GET /admin/orders lists orders, optionally filtered by status", async () => {
-      listOrdersMock.mockResolvedValueOnce([{ id: "o1", status: "SHIPPED" }]);
+    it("GET /admin/orders lists orders, optionally filtered by status, enriched with product info", async () => {
+      listOrdersMock.mockResolvedValueOnce([{ id: "o1", status: "SHIPPED", productId: "p1" }]);
+      fakeDb = createFakeDb([[{ id: "p1", sku: "SKU-1", title: "Product One", images: [] }]]);
       const res = await callHandler(makeEvent("GET", "/admin/orders", { status: "SHIPPED" }));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ orders: [{ id: "o1", status: "SHIPPED" }] });
+      expect(JSON.parse(res.body!)).toEqual({
+        orders: [
+          { id: "o1", status: "SHIPPED", productId: "p1", product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } },
+        ],
+      });
       expect(listOrdersMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, { status: "SHIPPED", limit: undefined });
+    });
+
+    it("GET /admin/orders skips the product lookup entirely when there are no orders", async () => {
+      listOrdersMock.mockResolvedValueOnce([]);
+      fakeDb = createFakeDb([]); // no select results queued -- would throw if the route tried to consume one
+      const res = await callHandler(makeEvent("GET", "/admin/orders"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ orders: [] });
     });
 
     it("GET /admin/products/{id}/orders lists that product's orders", async () => {

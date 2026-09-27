@@ -15,7 +15,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/onboarding": "導入設定",
   "/products": "商品マスター",
   "/commerce": "コマース統合",
+  "/orders": "注文管理",
   "/sync-errors": "同期エラー",
+  "/system-health": "システム状態",
   "/audit-log": "監査ログ",
   "/billing": "請求・プラン",
 };

@@ -9,14 +9,16 @@ import { ensureAmplifyConfigured, getApiBaseUrl } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { AlertIcon, BoxIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SyncIcon } from "@/components/icons";
+import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SyncIcon } from "@/components/icons";
 
 const LINKS = [
   { href: "/dashboard", label: "ダッシュボード", icon: DashboardIcon },
   { href: "/onboarding", label: "導入設定", icon: PlugIcon },
   { href: "/products", label: "商品マスター", icon: BoxIcon },
   { href: "/commerce", label: "コマース統合", icon: SyncIcon },
+  { href: "/orders", label: "注文管理", icon: CartIcon },
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },
+  { href: "/system-health", label: "システム状態", icon: ActivityIcon },
   { href: "/audit-log", label: "監査ログ", icon: FileIcon },
   { href: "/billing", label: "請求", icon: CoinIcon },
 ];

@@ -66,7 +66,7 @@ import {
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -1122,7 +1122,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const status = OrderStatus.safeParse(event.queryStringParameters?.status);
       const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
       const orderRows = await listOrders(db, tenantId, { status: status.success ? status.data : undefined, limit });
-      return json(200, { orders: orderRows });
+
+      // The orders table only has product_id -- every other order-management screen this
+      // platform has (commerce-dashboard, product detail) already joins in sku/title/images
+      // for display, so the standalone order list does the same rather than making the
+      // frontend show a bare UUID or fire one lookup per row.
+      const productIds = [...new Set(orderRows.map((o) => o.productId))];
+      const productRows = productIds.length
+        ? await db
+            .select({ id: productMaster.id, sku: productMaster.sku, title: productMaster.title, images: productMaster.images })
+            .from(productMaster)
+            .where(and(eq(productMaster.tenantId, tenantId), inArray(productMaster.id, productIds)))
+        : [];
+      const productById = new Map(productRows.map((p) => [p.id, p]));
+
+      const enriched = orderRows.map((o) => ({ ...o, product: productById.get(o.productId) ?? null }));
+      return json(200, { orders: enriched });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/orders$/.test(path)) {
