@@ -1,13 +1,15 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
 import {
-  applySale,
+  applySaleWithOutbox,
   calculateChannelAvailableQuantity,
   channelListings,
   inventoryMaster,
   isChannelIsolated,
   productMaster,
+  syncJobs,
   upsertOrderReceived,
+  type ApplySaleWithOutboxResult,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -31,6 +33,21 @@ interface SaleDetectedMessage {
 
 function otherChannelOf(channel: ChannelType): ChannelType {
   return channel === "base" ? "ebay" : "base";
+}
+
+/**
+ * Marks a failure that already happened *inside* dispatchPhaseB, which has already recorded
+ * its own sync_error (with a jobId the admin retry UI can act on) and updated the sync_jobs
+ * row before rethrowing to get this SQS message retried. Rethrown so the handler's own
+ * batchItemFailures bookkeeping still applies, but distinctly named so the outer catch (see
+ * handler() below) doesn't record a second, jobId-less duplicate of the same error --
+ * mirrors how IdempotencyInProgressError is already special-cased there.
+ */
+class PhaseBDispatchError extends Error {
+  constructor(cause: Error) {
+    super(cause.message);
+    this.name = "PhaseBDispatchError";
+  }
 }
 
 export const handler: SQSHandler = async (event: SQSEvent) => {
@@ -75,13 +92,28 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         );
       }
 
+      // Phase A: the inventory decrement, its ledger entry, order bookkeeping, and (atomically
+      // with the decrement, inside applySaleWithOutbox's own transaction) an outbox row
+      // recording that the other channel still needs its quantity pushed. withIdempotency
+      // wraps ONLY this -- it runs at most once per real sale event, full stop, regardless of
+      // whether Phase B below ever succeeds. This is the actual fix for the double-decrement
+      // bug: previously Phase B's own failure (a flaky external API call) made the *whole*
+      // guarded closure throw, which made withIdempotency mark the key "failed" -- and a
+      // failed key is exactly the one status this store's tryClaim will re-claim on the next
+      // SQS redelivery, replaying the decrement a second time for the same real-world sale.
       const key = buildIdempotencyKey(tenantId, ["sale", sale.channel, sale.externalOrderId, sale.externalProductId]);
-      await withIdempotency(idempotencyStore, key, () =>
-        processSale(db, tenantId, adapters, listing.productId, sale),
-      );
+      const phaseA = await withIdempotency(idempotencyStore, key, () => runPhaseA(db, tenantId, listing.productId, sale));
+
+      // Phase B: dispatch the outbox row, if any. Deliberately outside withIdempotency --
+      // this must be free to run again on every redelivery (its own failure here never
+      // re-triggers Phase A above, cached or not) until it succeeds. Naturally idempotent:
+      // it recomputes the live quantity fresh each time rather than trusting a value computed
+      // back whenever Phase A actually ran, so pushing the same already-correct number to
+      // BASE/eBay twice is harmless.
+      await dispatchPhaseB(db, tenantId, adapters, listing.productId, sale, phaseA);
     } catch (err) {
       const error = err as Error;
-      if (error.name !== "IdempotencyInProgressError") {
+      if (error.name !== "IdempotencyInProgressError" && error.name !== "PhaseBDispatchError") {
         await recordSyncError(db, {
           tenantId,
           channel: sale.channel,
@@ -98,29 +130,36 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
   return { batchItemFailures: failures };
 };
 
-export async function processSale(
+/**
+ * Phase A -- see handler()'s own comment on why withIdempotency wraps exactly this and
+ * nothing more. Order bookkeeping (upsertOrderReceived) is included here, not because it
+ * needs the same hard atomicity as the inventory decrement (it's already idempotent via its
+ * own onConflictDoNothing on (channel, externalOrderId, productId)), but so it's attempted
+ * exactly once per real sale event rather than redundantly on every Phase B retry. Its own
+ * failure is deliberately swallowed here (never re-thrown) -- a bookkeeping miss must never
+ * block or fail the sale itself, matching this platform's existing stance verified by this
+ * file's own test suite.
+ */
+export async function runPhaseA(
   db: ReturnType<typeof getDb>,
   tenantId: string,
-  adapters: Record<ChannelType, ChannelAdapter>,
   productId: string,
   sale: SaleEvent,
-): Promise<void> {
-  const result = await applySale(db, tenantId, productId, sale.quantitySold, {
+): Promise<ApplySaleWithOutboxResult> {
+  const outbox = await applySaleWithOutbox(db, tenantId, productId, sale.quantitySold, {
     channel: sale.channel,
     sequenceAt: sale.occurredAt,
     externalEventId: sale.externalOrderId,
+    otherChannel: otherChannelOf(sale.channel),
   });
 
   // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
-  // record alongside applySale above, never a replacement for it -- applySale already made
-  // the real, correctness-critical inventory decision by the time execution reaches here, so
-  // a failure recording the order must never propagate and threaten that. Neither channel's
+  // record alongside applySaleWithOutbox above, never a replacement for it. Neither channel's
   // adapter currently parses a real sale price out of its orders API response (see
   // listRecentSales in @ai-ec/adapter-base / @ai-ec/adapter-ebay) -- salePriceJpy/
   // salePriceUsdCents are left null here rather than guessed, until that's built and verified
-  // against a real order. Recorded even when alreadyZero below: the buyer really paid on
-  // this channel, so it belongs in this app's order history regardless of what inventory
-  // already showed.
+  // against a real order. Recorded even when alreadyZero: the buyer really paid on this
+  // channel, so it belongs in this app's order history regardless of what inventory showed.
   try {
     const [productForOrder] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
     await upsertOrderReceived(db, {
@@ -145,9 +184,27 @@ export async function processSale(
     });
   }
 
-  if (result.alreadyZero) {
+  return outbox;
+}
+
+/**
+ * Phase B: dispatch the outbox row applySaleWithOutbox left behind (if any) by actually
+ * pushing the freshly-reduced quantity to the other channel. Re-reads sync_jobs' own status
+ * first and skips if another (concurrent or already-succeeded) attempt already completed it
+ * -- SQS's at-least-once delivery means this can legitimately run more than once for the
+ * same message.
+ */
+export async function dispatchPhaseB(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  adapters: Record<ChannelType, ChannelAdapter>,
+  productId: string,
+  sale: SaleEvent,
+  phaseA: ApplySaleWithOutboxResult,
+): Promise<void> {
+  if (phaseA.sale.alreadyZero) {
     // Another event already drove this to zero first — the double-sell guard stops a second
-    // decrement, but the order recorded just above is a real, already-paid sale that this
+    // decrement, but the order recorded in Phase A is a real, already-paid sale that this
     // product can't actually fulfill. Nothing left to zero out (both channels already read
     // 0), so the only useful action left is making sure a human notices fast.
     await recordSyncError(db, {
@@ -161,18 +218,20 @@ export async function processSale(
     return;
   }
 
+  if (!phaseA.outboxJobId) return; // no other channel published — nothing to dispatch
+
+  const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, phaseA.outboxJobId)).limit(1);
+  if (!job || job.status === "completed") return; // already dispatched by a concurrent/earlier attempt
+
   const otherChannel = otherChannelOf(sale.channel);
   const [otherListing] = await db
     .select()
     .from(channelListings)
     .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)))
     .limit(1);
+  if (otherListing?.status !== "published" || !otherListing.externalId) return;
 
-  if (result.soldOut) {
-    await db.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
-  }
-
-  if (otherListing?.status === "published" && otherListing.externalId) {
+  try {
     // Item A of the third hardening round ("チャネル障害時の隔離モード"). This is exactly
     // the scenario a plain "is an account connected?" check can't catch: eBay's
     // oauth_connections row can be present (accountId found) while its stored access token
@@ -196,7 +255,7 @@ export async function processSale(
 
     const [accountId] = await listConnectedAccountIds(db, tenantId, otherChannel);
     if (!accountId) {
-      if (result.soldOut) {
+      if (phaseA.sale.soldOut) {
         throw new Error(`Sold out on ${sale.channel} but no ${otherChannel} account is connected to zero it out`);
       }
       // Not sold out — the other channel's own next scheduled/triggered sync will catch
@@ -206,16 +265,12 @@ export async function processSale(
     const adapter = adapters[otherChannel];
     const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
+    // Recomputed fresh, live, right before pushing -- never trusted from whenever Phase A
+    // actually ran, since this call may be a retry happening well after that.
     let pushedQuantity: number;
-    if (result.soldOut) {
+    if (phaseA.sale.soldOut) {
       pushedQuantity = 0;
     } else {
-      // Item #3 of the second hardening round (即時同期, a reinterpretation of 在庫予約ロック:
-      // neither BASE nor eBay gives this platform a hook to reserve stock *before* a buyer
-      // checks out on either one, so the closest real equivalent is shrinking the window a
-      // sale sits unreflected on the other channel). Previously a partial decrement (still
-      // in stock afterward) just waited for that channel's own next scheduled/triggered sync
-      // cycle to notice — push the freshly-reduced available quantity right now instead.
       const [product] = await db.select().from(productMaster).where(eq(productMaster.id, productId)).limit(1);
       const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
       if (!product || !inventory) return; // nothing to push without both rows
@@ -232,15 +287,32 @@ export async function processSale(
       .update(channelListings)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, otherChannel)));
+    await db.update(syncJobs).set({ status: "completed", updatedAt: new Date() }).where(eq(syncJobs.id, job.id));
 
     await recordAuditLog(db, {
       tenantId,
       actor: "system:inventory-sync-worker",
-      action: result.soldOut ? "inventory_zeroed_due_to_sale" : "inventory_immediate_sync_after_sale",
+      action: phaseA.sale.soldOut ? "inventory_zeroed_due_to_sale" : "inventory_immediate_sync_after_sale",
       entityType: "product",
       entityId: productId,
       after: { soldOnChannel: sale.channel, orderId: sale.externalOrderId, syncedChannel: otherChannel, pushedQuantity },
     });
+  } catch (err) {
+    const error = err as Error;
+    await db
+      .update(syncJobs)
+      .set({ status: "failed", attempts: job.attempts + 1, updatedAt: new Date() })
+      .where(eq(syncJobs.id, job.id));
+    await recordSyncError(db, {
+      tenantId,
+      channel: sale.channel,
+      productId,
+      jobId: job.id,
+      errorCode: "channel_inventory_push_failed",
+      errorMessage: error.message,
+      payload: { externalOrderId: sale.externalOrderId },
+    });
+    throw new PhaseBDispatchError(error);
   }
 }
 

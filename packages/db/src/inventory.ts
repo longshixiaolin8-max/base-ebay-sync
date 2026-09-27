@@ -1,7 +1,17 @@
 import type { ChannelType } from "@ai-ec/core";
 import { and, eq } from "drizzle-orm";
 import type { Database } from "./client.js";
-import { inventoryEvents, inventoryMaster } from "./schema.js";
+import { channelListings, inventoryEvents, inventoryMaster, productMaster, syncJobs } from "./schema.js";
+
+/** Structural subset of Database (mirrors @ai-ec/db's usage.ts Queryable, extended with
+ *  update/insert) that a Drizzle transaction callback's `tx` handle also satisfies -- lets
+ *  applySale run against either a plain Database or an in-flight transaction, since
+ *  applySaleWithOutbox below calls it as the first write inside its own db.transaction(). */
+export interface InventoryWriteDb {
+  select: Database["select"];
+  update: Database["update"];
+  insert: Database["insert"];
+}
 
 export class ConcurrentInventoryUpdateError extends Error {
   constructor(productId: string) {
@@ -39,7 +49,7 @@ export interface ApplySaleOptions {
 }
 
 export async function applySale(
-  db: Database,
+  db: InventoryWriteDb,
   tenantId: string,
   productId: string,
   quantitySold: number,
@@ -91,6 +101,105 @@ export async function applySale(
   }
 
   throw new ConcurrentInventoryUpdateError(productId);
+}
+
+export interface ApplySaleWithOutboxResult {
+  sale: ApplySaleResult;
+  /** Non-null exactly when the other channel has a published listing that needs its
+   *  quantity pushed. Null when there's nothing to sync (no other listing, or this sale
+   *  lost the double-sell race and alreadyZero is true). */
+  outboxJobId: string | null;
+}
+
+/**
+ * Item #4 of the commercial-features hardening round ("在庫同期の二重減算をTransactional
+ * Outboxで修正"). This is the ONLY place inventory-sync-worker calls applySale from --
+ * previously it called applySale directly, then separately called the other channel's
+ * setInventory() in the very same withIdempotency()-guarded closure. That meant a failure
+ * in setInventory() (a flaky external API call) made the whole closure throw, which made
+ * withIdempotency mark the key "failed" -- and a failed key is exactly the one status
+ * createDbIdempotencyStore's tryClaim will re-claim on the next SQS redelivery, replaying
+ * applySale a second time for the same real-world sale. Confirmed: this is a genuine,
+ * reproducible double-decrement, not a hypothetical.
+ *
+ * The fix is a strict phase split:
+ *  - Phase A (this function): the inventory decrement, its ledger entry, and -- atomically,
+ *    in the same DB transaction, so this platform can never decrement without also
+ *    durably remembering that the other channel still needs to hear about it -- an outbox
+ *    row (sync_jobs) recording that intent. This is the only phase withIdempotency wraps,
+ *    so it runs at MOST once per real sale event, full stop, regardless of what happens
+ *    to the other channel afterward.
+ *  - Phase B (the caller, outside withIdempotency): dispatches the outbox row by actually
+ *    calling the other channel's setInventory(), recomputing the live quantity fresh
+ *    rather than trusting a value computed back in Phase A. Retryable indefinitely (SQS
+ *    redelivery naturally retries it) because it's naturally idempotent -- pushing the same
+ *    already-correct quantity to BASE/eBay repeatedly is harmless, unlike re-running Phase A.
+ *
+ * sync_jobs' own (tenantId, idempotencyKey) unique constraint is a second, DB-level backstop
+ * against ever inserting two outbox rows for the same sale, on top of withIdempotency's own
+ * app-level guard -- belt and suspenders, not a substitute for it (see applySale's own
+ * docstring on why CAS alone was never enough).
+ */
+export async function applySaleWithOutbox(
+  db: Database,
+  tenantId: string,
+  productId: string,
+  quantitySold: number,
+  options: ApplySaleOptions & { otherChannel: ChannelType },
+): Promise<ApplySaleWithOutboxResult> {
+  return db.transaction(async (tx) => {
+    const sale = await applySale(tx, tenantId, productId, quantitySold, options);
+
+    // Moved into this same transaction (was a separate post-hoc update in the caller): the
+    // "sold_out" status flag on the product must never be lost even if Phase B (dispatching
+    // the outbox below) never runs at all -- e.g. no other channel is connected to push to.
+    if (sale.soldOut) {
+      await tx.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
+    }
+
+    if (sale.alreadyZero) {
+      return { sale, outboxJobId: null };
+    }
+
+    const [otherListing] = await tx
+      .select()
+      .from(channelListings)
+      .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, options.otherChannel)))
+      .limit(1);
+
+    if (otherListing?.status !== "published" || !otherListing.externalId) {
+      return { sale, outboxJobId: null };
+    }
+
+    const idempotencyKey = `channel_inventory_push:${options.channel}:${options.externalEventId ?? "unknown"}:${productId}`;
+    const [inserted] = await tx
+      .insert(syncJobs)
+      .values({
+        tenantId,
+        type: "channel_inventory_push",
+        idempotencyKey,
+        productId,
+        payload: { soldChannel: options.channel, otherChannel: options.otherChannel, soldOut: sale.soldOut },
+        status: "pending",
+      })
+      .onConflictDoNothing({ target: [syncJobs.tenantId, syncJobs.idempotencyKey] })
+      .returning({ id: syncJobs.id });
+
+    let outboxJobId = inserted?.id ?? null;
+    if (!outboxJobId) {
+      // onConflictDoNothing means a row for this exact sale already existed -- shouldn't
+      // happen given withIdempotency's own gate around this whole function, but cheap
+      // insurance costs one extra read rather than leaving the caller with no job to dispatch.
+      const [existing] = await tx
+        .select({ id: syncJobs.id })
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.idempotencyKey, idempotencyKey)))
+        .limit(1);
+      outboxJobId = existing?.id ?? null;
+    }
+
+    return { sale, outboxJobId };
+  });
 }
 
 export interface ApplyBaseStockReportResult {
