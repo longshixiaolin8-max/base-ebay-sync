@@ -74,6 +74,7 @@ export class LambdaStack extends cdk.Stack {
   readonly dlqRedriveFn: nodejs.NodejsFunction;
   readonly signupHandlerFn: nodejs.NodejsFunction;
   readonly stripeWebhookFn: nodejs.NodejsFunction;
+  readonly dbMigrateFn: nodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
@@ -314,6 +315,38 @@ export class LambdaStack extends cdk.Stack {
       cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.stripe.grantRead(this.stripeWebhookFn);
+
+    // --- Database migrations ---
+    // No environment has ever had a script or CI step that actually applies
+    // packages/db/migrations/*.sql -- every one so far was run by hand from a session that
+    // happened to have direct database access. Meant to be invoked manually (AWS Console
+    // "Test", or `aws lambda invoke`) once per fresh environment and again whenever new
+    // migrations are added; drizzle's own migrator tracks what's already applied, so
+    // repeat invocations are safe. Built directly (not via makeFn) because it alone needs
+    // packages/db/migrations copied into its bundle -- migrate() reads those files at
+    // runtime, and esbuild bundling doesn't pull in non-JS assets on its own.
+    this.dbMigrateFn = new nodejs.NodejsFunction(this, "DbMigrate", {
+      entry: path.join(REPO_ROOT, "services/lambdas/db-migrate/src/handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
+      depsLockFilePath: LOCK_FILE,
+      logRetention: logs.RetentionDays.ONE_MONTH,
+      environment: commonEnv,
+      bundling: {
+        ...ESM_BUNDLING,
+        commandHooks: {
+          beforeBundling: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => [
+            `cp -r ${inputDir}/packages/db/migrations ${outputDir}/migrations`,
+          ],
+          beforeInstall: () => [],
+        },
+      },
+    });
+    props.cluster.grantDataApiAccess(this.dbMigrateFn);
 
     // --- Admin API ---
     this.adminApiFn = makeFn(

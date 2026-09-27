@@ -92,7 +92,9 @@ pnpm -r run test
 4. `cdk bootstrap`を対象アカウント/リージョンに対して実行。
 5. `.github/workflows/deploy.yml` を `workflow_dispatch` から実行(environment=dev または prod)。
 6. デプロイ後、Secrets Managerの `ai-ec-platform/app-credentials/{base,ebay,openai}` に実クレデンシャルを手動投入。
-7. Cognitoに管理者ユーザーを作成(`aws cognito-idp admin-create-user`)。
+7. AWSコンソールで `DbMigrate` Lambda(`services/lambdas/db-migrate`)を1回テスト実行し、`packages/db/migrations/*.sql` を適用してブートストラップテナント行を作成する(繰り返し実行しても安全 -- drizzleの標準マイグレーターが適用済みを記録する)。新しいマイグレーションを追加した際も、同じLambdaを再実行すればよい。
+8. Cognitoに管理者ユーザーを作成(`aws cognito-idp admin-create-user`。カスタム属性 `custom:tenant_id` に、ステップ7で作成したブートストラップテナントのID(`00000000-0000-0000-0000-000000000001`)を設定する)。
+
 
 ### 2. 通常のデプロイフロー
 

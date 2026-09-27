@@ -1,0 +1,37 @@
+import { getDb } from "@ai-ec/lambda-shared";
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
+import { sql } from "drizzle-orm";
+import { migrate } from "drizzle-orm/aws-data-api/pg/migrator";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Applies every pending packages/db/migrations/*.sql file (drizzle's own aws-data-api
+ * migrator, which tracks what's already applied in its own __drizzle_migrations table --
+ * safe to invoke repeatedly, including against an already-migrated database), then seeds
+ * the platform's fixed bootstrap tenant row.
+ *
+ * No environment (dev or prod) has ever had a script or CI step that actually runs these
+ * migrations -- every one of them was applied by hand from a session that happened to have
+ * direct database access at the time (see README's old "一度きりの人手による" bootstrap
+ * step). This Lambda is meant to be invoked manually (AWS Console "Test", or `aws lambda
+ * invoke`) once per fresh environment, and again whenever new migrations are added.
+ */
+export async function handler(): Promise<{ bootstrapTenantId: string }> {
+  const db = getDb();
+
+  await migrate(db, { migrationsFolder: path.join(__dirname, "migrations") });
+
+  // Never created by any migration -- packages/db/src/tenants.ts's BOOTSTRAP_TENANT_ID is
+  // referenced throughout the codebase (e.g. ebay-webhook's fallback poll target) as if a
+  // row for it already exists, but nothing before this ever inserted one.
+  await db.execute(sql`
+    INSERT INTO "tenants" ("id", "name", "plan", "status")
+    VALUES (${BOOTSTRAP_TENANT_ID}, 'Bootstrap Tenant', 'standard', 'active')
+    ON CONFLICT ("id") DO NOTHING
+  `);
+
+  return { bootstrapTenantId: BOOTSTRAP_TENANT_ID };
+}

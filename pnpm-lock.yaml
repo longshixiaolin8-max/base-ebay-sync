@@ -249,6 +249,28 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@20.19.43)
 
+  services/lambdas/db-migrate:
+    dependencies:
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.36.1
+        version: 0.36.4(@aws-sdk/client-rds-data@3.1120.0)(@types/react@18.3.31)(react@18.3.1)
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
   services/lambdas/dlq-redrive:
     dependencies:
       '@ai-ec/lambda-shared':
