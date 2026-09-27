@@ -516,6 +516,67 @@ export class EbayAdapter implements ChannelAdapter {
     return { externalId: input.sku };
   }
 
+  /**
+   * eBay's Inventory API has no PATCH on inventory_item -- only GET, PUT
+   * (createOrReplaceInventoryItem), and DELETE (confirmed against eBay's own current API
+   * reference; there is no partial-update method for this resource). PUT is a full
+   * replace, not a merge -- any field omitted from the body is cleared, not left as-is
+   * (confirmed live: an update that only touched quantity had silently wiped the listing's
+   * required "Type" aspect, breaking republish with errorId 25002). So every write to this
+   * resource -- setInventory included, which used to send a bare PATCH the real API would
+   * reject -- goes through this same fetch-current-then-full-replace path, changing only
+   * the fields actually passed in `overrides`.
+   *
+   * Returns the exact pre-update body (a full no-op restore of what was just overwritten),
+   * so a caller than also modifies the offer's price afterward (see updateListing) can roll
+   * this content half back if that second call fails.
+   */
+  private async replaceInventoryItemPreservingFields(
+    accessToken: string,
+    externalId: string,
+    overrides: {
+      quantity?: number;
+      condition?: string;
+      titleEn?: string;
+      descriptionHtmlEn?: string;
+      images?: string[];
+      itemSpecifics?: Record<string, string | null>;
+    },
+  ): Promise<{ priorBody: Record<string, unknown> }> {
+    const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
+    const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
+    const priorBody = {
+      availability: {
+        shipToLocationAvailability: { quantity: current.availability?.shipToLocationAvailability?.quantity ?? 0 },
+      },
+      condition: current.condition,
+      product: {
+        title: current.product?.title,
+        description: current.product?.description,
+        imageUrls: current.product?.imageUrls,
+        aspects: current.product?.aspects,
+      },
+    };
+    await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        availability: {
+          shipToLocationAvailability: {
+            quantity: overrides.quantity ?? current.availability?.shipToLocationAvailability?.quantity ?? 0,
+          },
+        },
+        condition: overrides.condition ?? current.condition,
+        product: {
+          title: overrides.titleEn ?? current.product?.title,
+          description: overrides.descriptionHtmlEn ?? current.product?.description,
+          imageUrls: overrides.images ?? current.product?.imageUrls,
+          aspects: overrides.itemSpecifics ? toAspects(overrides.itemSpecifics) : current.product?.aspects,
+        },
+      }),
+    });
+    return { priorBody };
+  }
+
   async updateListing(accessToken: string, externalId: string, input: UpdateListingInput): Promise<void> {
     let contentPutApplied = false;
     let priorInventoryItemBody: Record<string, unknown> | undefined;
@@ -528,45 +589,15 @@ export class EbayAdapter implements ChannelAdapter {
       input.condition !== undefined ||
       input.itemSpecifics !== undefined
     ) {
-      // eBay's PUT inventory_item is a full replace, not a merge -- any field we omit is
-      // cleared, not left as-is (confirmed live: an update that only touched quantity had
-      // silently wiped the listing's required "Type" aspect, breaking republish with
-      // errorId 25002). Fetch the raw current item so every field not explicitly being
-      // changed here is carried over instead of dropped.
-      const currentRes = await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`);
-      const current = (await currentRes.json()) as EbayInventoryItem & { condition?: string };
-      // The exact same body, but with every field defaulted to its pre-update value --
-      // i.e. a full no-op restore of "current" -- kept in case the price PUT below fails
-      // and this content half needs to be rolled back (see EbayPartialUpdateRolledBackError).
-      priorInventoryItemBody = {
-        availability: {
-          shipToLocationAvailability: { quantity: current.availability?.shipToLocationAvailability?.quantity ?? 0 },
-        },
-        condition: current.condition,
-        product: {
-          title: current.product?.title,
-          description: current.product?.description,
-          imageUrls: current.product?.imageUrls,
-          aspects: current.product?.aspects,
-        },
-      };
-      await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          availability: {
-            shipToLocationAvailability: {
-              quantity: input.quantity ?? current.availability?.shipToLocationAvailability?.quantity ?? 0,
-            },
-          },
-          condition: input.condition ?? current.condition,
-          product: {
-            title: input.titleEn ?? current.product?.title,
-            description: input.descriptionHtmlEn ?? current.product?.description,
-            imageUrls: input.images ?? current.product?.imageUrls,
-            aspects: input.itemSpecifics ? toAspects(input.itemSpecifics) : current.product?.aspects,
-          },
-        }),
+      const { priorBody } = await this.replaceInventoryItemPreservingFields(accessToken, externalId, {
+        quantity: input.quantity,
+        condition: input.condition,
+        titleEn: input.titleEn,
+        descriptionHtmlEn: input.descriptionHtmlEn,
+        images: input.images,
+        itemSpecifics: input.itemSpecifics,
       });
+      priorInventoryItemBody = priorBody;
       contentPutApplied = true;
     }
 
@@ -600,10 +631,7 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async setInventory(accessToken: string, externalId: string, quantity: number): Promise<void> {
-    await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${externalId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ availability: { shipToLocationAvailability: { quantity } } }),
-    });
+    await this.replaceInventoryItemPreservingFields(accessToken, externalId, { quantity });
   }
 
   async getInventory(accessToken: string, externalId: string): Promise<number | null> {

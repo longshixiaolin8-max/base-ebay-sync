@@ -589,19 +589,51 @@ describe("EbayAdapter", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("sets inventory quantity via PATCH", async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({}));
+  it("sets inventory quantity via a fetch-then-full-replace PUT, never PATCH", async () => {
+    // eBay's Inventory API has no PATCH on inventory_item -- only GET, PUT
+    // (createOrReplaceInventoryItem), and DELETE. A bare PATCH here would be rejected by
+    // the real API; setInventory must fetch the current item and PUT it back with only
+    // quantity changed, same as updateListing already does for its own content fields.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          sku: "SKU-1",
+          condition: "USED_GOOD",
+          product: {
+            title: "Existing Title",
+            description: "<p>existing</p>",
+            imageUrls: ["https://img.example/1.jpg"],
+            aspects: { Type: ["Bracelet"] },
+          },
+          availability: { shipToLocationAvailability: { quantity: 9 } },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
 
     const adapter = new EbayAdapter(config);
     await adapter.setInventory("token", "SKU-1", 0);
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example-ebay.test/sell/inventory/v1/inventory_item/SKU-1");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.method).toBeUndefined(); // GET
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
       "https://api.example-ebay.test/sell/inventory/v1/inventory_item/SKU-1",
-      expect.objectContaining({ method: "PATCH" }),
+      expect.objectContaining({ method: "PUT" }),
     );
-    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+
+    const body = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string);
+    // The one field actually being changed.
     expect(body.availability.shipToLocationAvailability.quantity).toBe(0);
+    // Everything else preserved exactly as fetched -- title/description/images/aspects/
+    // condition would otherwise be silently wiped by eBay's full-replace PUT semantics.
+    expect(body.condition).toBe("USED_GOOD");
+    expect(body.product.title).toBe("Existing Title");
+    expect(body.product.description).toBe("<p>existing</p>");
+    expect(body.product.imageUrls).toEqual(["https://img.example/1.jpg"]);
+    expect(body.product.aspects).toEqual({ Type: ["Bracelet"] });
   });
 
   it("listRecentSales captures the line item's USD total as salePriceUsdCents", async () => {
