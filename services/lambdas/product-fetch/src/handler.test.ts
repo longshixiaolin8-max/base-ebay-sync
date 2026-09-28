@@ -5,9 +5,10 @@ const applyBaseStockReportMock = vi.fn().mockResolvedValue({ applied: true, quan
 const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
 const countProductsMock = vi.fn().mockResolvedValue(0);
 vi.mock("@ai-ec/db", () => ({
-  productMaster: { sku: "sku" },
-  inventoryMaster: {},
-  channelListings: { productId: "productId", channel: "channel" },
+  productMaster: { __table: "productMaster", sku: "sku" },
+  inventoryMaster: { __table: "inventoryMaster" },
+  channelListings: { __table: "channelListings", productId: "productId", channel: "channel" },
+  syncJobs: { __table: "syncJobs", tenantId: "tenantId", idempotencyKey: "idempotencyKey", id: "id", type: "type", status: "status" },
   applyBaseStockReport: (...args: unknown[]) => applyBaseStockReportMock(...args),
   getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
   countProducts: (...args: unknown[]) => countProductsMock(...args),
@@ -22,7 +23,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
-const { upsertProduct } = await import("./handler.js");
+const { upsertProduct, dispatchPendingOutboxJobs } = await import("./handler.js");
 
 const queues = { aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" };
 const TENANT_ID = "tenant-a";
@@ -43,45 +44,134 @@ function insertResult(returningValue: unknown) {
   return promise;
 }
 
-interface FakeDbOptions {
-  existingProduct?: { id: string; contentHash: string } | null;
-  ebayListing?: { status: string } | null;
-  insertedProductId?: string;
+interface FakeProductRow {
+  id: string;
+  contentHash: string;
+  [key: string]: unknown;
 }
 
-function createFakeDb(opts: FakeDbOptions) {
-  const insertedProductId = opts.insertedProductId ?? "new-product-id";
-  let selectCallCount = 0;
+interface FakeJobRow {
+  id: string;
+  tenantId: string;
+  type: string;
+  idempotencyKey: string;
+  productId: string | null;
+  payload: Record<string, unknown>;
+  status: string;
+  attempts: number;
+}
 
-  // Shared by both the top-level db and the tx handle passed into db.transaction()'s
-  // callback -- the real Drizzle transaction session supports the same query-builder
-  // surface as the plain database handle, so the fake mirrors that here too.
-  function makeQueryable() {
+interface FakeDbOptions {
+  existingProduct?: FakeProductRow | null;
+  ebayListing?: { status: string } | null;
+  insertedProductId?: string;
+  /** Shared across calls so tests can drive two upsertProduct/dispatchPendingOutboxJobs
+   *  invocations against the same underlying outbox state (dedup, then dispatch). */
+  jobsStore?: FakeJobRow[];
+  /** Simulates a failure that happens *inside* the transaction, right after the outbox row
+   *  would have been inserted -- proves the whole transaction (product change + outbox
+   *  row) rolls back together rather than leaving an orphaned outbox row behind. */
+  throwAfterOutboxInsert?: boolean;
+}
+
+/**
+ * A single stateful fake spanning everything upsertProduct and dispatchPendingOutboxJobs
+ * touch: productMaster (select/update/insert), channelListings (select), and syncJobs
+ * (insert with a real (tenantId, idempotencyKey) dedup guard, and the multi-row
+ * select/sequential-update dispatchPendingOutboxJobs itself uses) -- table identity is
+ * tracked via each mocked table's own `__table` marker rather than drizzle's real Symbol
+ * name (unavailable once @ai-ec/db itself is mocked).
+ */
+function createFakeDb(opts: FakeDbOptions) {
+  const jobsStore = opts.jobsStore ?? [];
+  let productRow: FakeProductRow | null = opts.existingProduct ? { ...opts.existingProduct } : null;
+  let jobIdCounter = 0;
+  const productUpdateCalls: Record<string, unknown>[] = [];
+  let dispatchTargets: FakeJobRow[] = [];
+  let dispatchCursor = 0;
+
+  function makeQueryable(pendingJobs: FakeJobRow[]) {
     return {
       select: () => ({
-        from: (table: { productId?: string }) => ({
-          where: () => ({
-            limit: async () => {
-              selectCallCount += 1;
-              // First select() call is always the productMaster-by-sku lookup.
-              if (selectCallCount === 1) {
-                return opts.existingProduct ? [opts.existingProduct] : [];
-              }
-              // Any subsequent select() is the ebay channel_listings lookup.
-              void table;
-              return opts.ebayListing ? [opts.ebayListing] : [];
-            },
-          }),
+        from: (table: { __table?: string }) => {
+          if (table.__table === "syncJobs") {
+            return {
+              where: () => {
+                // Serves two real call sites with different shapes: dispatchPendingOutboxJobs
+                // awaits this directly (bulk query, no .limit()); insertOutboxJob's
+                // post-conflict fallback lookup chains .limit(1) instead. The fallback's
+                // result is never inspected by upsertProduct (fire-and-forget), so it's
+                // safe to always resolve it to an empty match here.
+                dispatchTargets = jobsStore.filter((j) => j.status === "pending" || j.status === "failed");
+                dispatchCursor = 0;
+                const p = Promise.resolve(dispatchTargets) as Promise<FakeJobRow[]> & { limit?: (n: number) => Promise<FakeJobRow[]> };
+                p.limit = async () => [];
+                return p;
+              },
+            };
+          }
+          return {
+            where: () => ({
+              limit: async () => {
+                if (table.__table === "productMaster") {
+                  return productRow ? [productRow] : [];
+                }
+                if (table.__table === "channelListings") {
+                  return opts.ebayListing ? [opts.ebayListing] : [];
+                }
+                return [];
+              },
+            }),
+          };
+        },
+      }),
+      update: (table: { __table?: string }) => ({
+        set: (v: Record<string, unknown>) => ({
+          where: async () => {
+            if (table.__table === "productMaster" && productRow) {
+              productUpdateCalls.push(v);
+              Object.assign(productRow, v);
+            } else if (table.__table === "syncJobs") {
+              const job = dispatchTargets[dispatchCursor];
+              dispatchCursor += 1;
+              if (job) Object.assign(job, v);
+            }
+          },
         }),
       }),
-      update: () => ({
-        set: vi.fn(() => ({ where: async () => undefined })),
-      }),
-      insert: (table: { sku?: string }) => ({
-        values: (v: unknown) => {
-          if (table.sku !== undefined) {
-            // productMaster insert -> caller awaits .returning()
-            return insertResult([{ id: insertedProductId }]);
+      insert: (table: { __table?: string }) => ({
+        values: (v: Record<string, unknown>) => {
+          if (table.__table === "productMaster") {
+            return insertResult([{ id: opts.insertedProductId ?? "new-product-id" }]);
+          }
+          if (table.__table === "syncJobs") {
+            return {
+              onConflictDoNothing: () => {
+                const key = `${v.tenantId as string}:${v.idempotencyKey as string}`;
+                const alreadyExists =
+                  jobsStore.some((j) => `${j.tenantId}:${j.idempotencyKey}` === key) ||
+                  pendingJobs.some((j) => `${j.tenantId}:${j.idempotencyKey}` === key);
+                if (alreadyExists) {
+                  return insertResult([]);
+                }
+                jobIdCounter += 1;
+                const row: FakeJobRow = {
+                  id: `job-${jobIdCounter}`,
+                  status: "pending",
+                  attempts: 0,
+                  tenantId: v.tenantId as string,
+                  type: v.type as string,
+                  idempotencyKey: v.idempotencyKey as string,
+                  productId: (v.productId as string) ?? null,
+                  payload: v.payload as Record<string, unknown>,
+                };
+                pendingJobs.push(row);
+                if (opts.throwAfterOutboxInsert) {
+                  throw new Error("simulated mid-transaction failure");
+                }
+                return insertResult([row]);
+              },
+            };
           }
           void v;
           return insertResult(undefined);
@@ -92,14 +182,27 @@ function createFakeDb(opts: FakeDbOptions) {
   }
 
   return {
-    ...makeQueryable(),
-    transaction: async (fn: (tx: ReturnType<typeof makeQueryable>) => Promise<unknown>) => fn(makeQueryable()),
+    ...makeQueryable(jobsStore),
+    transaction: async (fn: (tx: ReturnType<typeof makeQueryable>) => Promise<unknown>) => {
+      const pendingJobs: FakeJobRow[] = [];
+      const productSnapshot = productRow ? { ...productRow } : null;
+      try {
+        const result = await fn(makeQueryable(pendingJobs));
+        jobsStore.push(...pendingJobs); // "commit": only now do outbox rows become visible
+        return result;
+      } catch (err) {
+        productRow = productSnapshot; // "rollback": undo any product mutation from this attempt
+        throw err; // pendingJobs is simply discarded -- never reaches jobsStore
+      }
+    },
+    getProductRow: () => productRow,
+    getProductUpdateCalls: () => productUpdateCalls,
   } as never;
 }
 
 describe("upsertProduct", () => {
   beforeEach(() => {
-    enqueueMock.mockClear();
+    enqueueMock.mockReset().mockResolvedValue(undefined);
     applyBaseStockReportMock.mockClear();
     recordAuditLogMock.mockClear();
     recordSyncErrorMock.mockClear();
@@ -109,15 +212,10 @@ describe("upsertProduct", () => {
 
   it("reconciles BASE's reported stock into inventory_master on every poll of an existing product, even when nothing else changed", async () => {
     const { contentHash } = await import("@ai-ec/core");
-    const hash = contentHash({
-      title: item.title,
-      descriptionHtml: item.descriptionHtml,
-      priceJpy: item.priceJpy,
-      images: item.images,
-    });
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
     expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, TENANT_ID, "existing-id", item.quantity, item.updatedAt);
   });
@@ -125,22 +223,28 @@ describe("upsertProduct", () => {
   it("does not attempt stock reconciliation for a brand-new product (nothing to reconcile against yet)", async () => {
     const db = createFakeDb({ existingProduct: null });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
     expect(applyBaseStockReportMock).not.toHaveBeenCalled();
   });
 
-  it("inserts a brand-new product, its inventory/base listing rows, and enqueues ai_generate", async () => {
-    const db = createFakeDb({ existingProduct: null });
+  it("inserts a brand-new product, its inventory/base listing rows, and a pending ai_generate outbox job -- never enqueuing directly", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).toHaveBeenCalledTimes(1);
-    expect(enqueueMock).toHaveBeenCalledWith(
-      queues.aiGenerate,
-      { type: "ai_generate", tenantId: TENANT_ID, productId: "new-product-id" },
-      `${TENANT_ID}:ai-generate:new-product-id`,
-    );
+    // The product-fetch DB write and the SQS enqueue are no longer the same operation --
+    // upsertProduct only ever commits the outbox row; dispatchPendingOutboxJobs is what
+    // actually calls SQS, on a separate pass. This is the core of the outbox fix.
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(jobsStore).toHaveLength(1);
+    expect(jobsStore[0]).toMatchObject({
+      type: "ai_generate",
+      status: "pending",
+      idempotencyKey: `${TENANT_ID}:ai-generate:new-product-id`,
+      payload: { type: "ai_generate", tenantId: TENANT_ID, productId: "new-product-id" },
+    });
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ action: "product_listed_base", entityId: "new-product-id" }),
@@ -148,67 +252,94 @@ describe("upsertProduct", () => {
   });
 
   it("does nothing when the content hash is unchanged since the last poll", async () => {
-    // Same hash the real contentHash() would compute for `item` — precomputed so the
-    // no-op branch is taken without needing to import the hashing function here too.
     const { contentHash } = await import("@ai-ec/core");
-    const hash = contentHash({
-      title: item.title,
-      descriptionHtml: item.descriptionHtml,
-      priceJpy: item.priceJpy,
-      images: item.images,
-    });
-    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash }, jobsStore });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(jobsStore).toHaveLength(0);
   });
 
-  it("updates the product but does not touch eBay when no eBay listing exists yet", async () => {
-    const db = createFakeDb({
-      existingProduct: { id: "existing-id", contentHash: "stale-hash" },
-      ebayListing: null,
-    });
+  it("updates the product but creates no outbox job when no eBay listing exists yet", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: null, jobsStore });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(jobsStore).toHaveLength(0);
   });
 
   it("does not push an edit to eBay while the listing is still pending human approval", async () => {
+    const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({
       existingProduct: { id: "existing-id", contentHash: "stale-hash" },
       ebayListing: { status: "pending_approval" },
+      jobsStore,
     });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(jobsStore).toHaveLength(0);
   });
 
-  it("enqueues ebay_update when a BASE edit changes a product with an already-published eBay listing", async () => {
+  it("product update + eBay update job: a BASE edit to a product with an already-published eBay listing commits the update and a pending ebay_update outbox job in one transaction", async () => {
+    const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({
       existingProduct: { id: "existing-id", contentHash: "stale-hash" },
       ebayListing: { status: "published" },
+      jobsStore,
     });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).toHaveBeenCalledTimes(1);
-    expect(enqueueMock).toHaveBeenCalledWith(
-      queues.ebaySync,
-      { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
-      expect.stringContaining(`${TENANT_ID}:ebay-update:existing-id:`),
-    );
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect((db as unknown as { getProductUpdateCalls: () => unknown[] }).getProductUpdateCalls()).toHaveLength(1);
+    expect(jobsStore).toHaveLength(1);
+    expect(jobsStore[0]).toMatchObject({
+      type: "ebay_update",
+      status: "pending",
+      productId: "existing-id",
+      payload: { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
+    });
+    expect(jobsStore[0]!.idempotencyKey).toContain(`${TENANT_ID}:ebay-update:existing-id:`);
+  });
+
+  it("同じcontentHashで重複jobなし: two overlapping upserts for the same change never create two outbox jobs", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const dbA = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: { status: "published" }, jobsStore });
+    const dbB = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: { status: "published" }, jobsStore });
+
+    await upsertProduct(dbA, TENANT_ID, item);
+    await upsertProduct(dbB, TENANT_ID, item);
+
+    expect(jobsStore).toHaveLength(1); // the second insert's idempotencyKey conflicts with the first's
+  });
+
+  it("DB rollback時outboxだけ残らない: a failure inside the transaction after the outbox insert leaves neither the product update nor the outbox row committed", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: "stale-hash" },
+      ebayListing: { status: "published" },
+      jobsStore,
+      throwAfterOutboxInsert: true,
+    });
+
+    await expect(upsertProduct(db, TENANT_ID, item)).rejects.toThrow("simulated mid-transaction failure");
+
+    expect(jobsStore).toHaveLength(0); // never committed
+    expect((db as unknown as { getProductRow: () => FakeProductRow | null }).getProductRow()).toMatchObject({ contentHash: "stale-hash" }); // update rolled back
   });
 
   it("skips creating a new product and records a sync error once the tenant is at its plan's product limit", async () => {
     countProductsMock.mockResolvedValue(300);
-    const db = createFakeDb({ existingProduct: null });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(jobsStore).toHaveLength(0);
     expect(recordSyncErrorMock).toHaveBeenCalledWith(
       db,
       expect.objectContaining({ tenantId: TENANT_ID, errorCode: "product_quota_exceeded" }),
@@ -217,31 +348,135 @@ describe("upsertProduct", () => {
 
   it("still allows creating a new product just under the plan's product limit", async () => {
     countProductsMock.mockResolvedValue(299);
-    const db = createFakeDb({ existingProduct: null });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
-    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(jobsStore).toHaveLength(1);
     expect(recordSyncErrorMock).not.toHaveBeenCalled();
   });
 
   it("runs the quota check and the insert inside one transaction, not two separate round-trips", async () => {
-    // Regression test for a real TOCTOU race: countProducts() and the insert used to be
-    // two independent db calls with nothing preventing two overlapping invocations for the
-    // same tenant from both reading the same pre-insert count and both inserting, breaching
-    // the plan limit. The fix must run both inside db.transaction() so a second invocation
-    // is serialized behind the first's commit.
     countProductsMock.mockResolvedValue(299);
     const db = createFakeDb({ existingProduct: null });
     const transactionSpy = vi.spyOn(db as unknown as { transaction: (...a: unknown[]) => unknown }, "transaction");
 
-    await upsertProduct(db, queues, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item);
 
     expect(transactionSpy).toHaveBeenCalledTimes(1);
-    // countProducts must have been called with the tx handle the transaction callback
-    // received, not the outer db -- otherwise the count-check reads outside the lock's
-    // protection and the race isn't actually closed.
     const [txArg] = countProductsMock.mock.calls.at(-1)!;
     expect(txArg).not.toBe(db);
+  });
+});
+
+describe("dispatchPendingOutboxJobs", () => {
+  beforeEach(() => {
+    enqueueMock.mockReset().mockResolvedValue(undefined);
+    recordSyncErrorMock.mockClear();
+  });
+
+  it("new product作成後SQS障害 → outbox残る, then 次dispatcherで送信成功: a failed dispatch leaves the job retryable, and the next pass sends it", async () => {
+    const job: FakeJobRow = {
+      id: "job-1",
+      tenantId: TENANT_ID,
+      type: "ai_generate",
+      idempotencyKey: `${TENANT_ID}:ai-generate:p1`,
+      productId: "p1",
+      payload: { type: "ai_generate", tenantId: TENANT_ID, productId: "p1" },
+      status: "pending",
+      attempts: 0,
+    };
+    const jobsStore = [job];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
+
+    enqueueMock.mockRejectedValueOnce(new Error("SQS unavailable"));
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(job.status).toBe("failed");
+    expect(job.attempts).toBe(1);
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ tenantId: TENANT_ID, productId: "p1", errorCode: "product_fetch_dispatch_failed" }),
+    );
+
+    // A later dispatcher pass re-reads this still-"failed" job (status IN pending/failed)
+    // and retries it -- this time SQS accepts it.
+    enqueueMock.mockResolvedValueOnce(undefined);
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(job.status).toBe("completed");
+    expect(enqueueMock).toHaveBeenLastCalledWith(queues.aiGenerate, job.payload, job.idempotencyKey);
+  });
+
+  it("dispatches an ebay_update job to the eBay sync queue and a ai_generate job to the AI generate queue", async () => {
+    const aiJob: FakeJobRow = {
+      id: "job-1",
+      tenantId: TENANT_ID,
+      type: "ai_generate",
+      idempotencyKey: `${TENANT_ID}:ai-generate:p1`,
+      productId: "p1",
+      payload: { type: "ai_generate", tenantId: TENANT_ID, productId: "p1" },
+      status: "pending",
+      attempts: 0,
+    };
+    const ebayJob: FakeJobRow = {
+      id: "job-2",
+      tenantId: TENANT_ID,
+      type: "ebay_update",
+      idempotencyKey: `${TENANT_ID}:ebay-update:p2:hash`,
+      productId: "p2",
+      payload: { type: "ebay_update", tenantId: TENANT_ID, productId: "p2" },
+      status: "pending",
+      attempts: 0,
+    };
+    const jobsStore = [aiJob, ebayJob];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
+
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(enqueueMock).toHaveBeenCalledWith(queues.aiGenerate, aiJob.payload, aiJob.idempotencyKey);
+    expect(enqueueMock).toHaveBeenCalledWith(queues.ebaySync, ebayJob.payload, ebayJob.idempotencyKey);
+    expect(aiJob.status).toBe("completed");
+    expect(ebayJob.status).toBe("completed");
+  });
+
+  it("SQS failureでDB商品変更は失われない: a dispatch failure only ever mutates the outbox job's own status, never the product row it describes", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: "stale-hash" },
+      ebayListing: { status: "published" },
+      jobsStore,
+    });
+
+    await upsertProduct(db, TENANT_ID, item);
+    expect(jobsStore).toHaveLength(1);
+    const productRowAfterCommit = { ...(db as unknown as { getProductRow: () => FakeProductRow | null }).getProductRow() };
+
+    enqueueMock.mockRejectedValueOnce(new Error("SQS down"));
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(jobsStore[0]!.status).toBe("failed"); // only the outbox row's status changed
+    expect((db as unknown as { getProductRow: () => FakeProductRow | null }).getProductRow()).toEqual(productRowAfterCommit); // product untouched
+  });
+
+  it("does not touch a job whose type it does not recognize", async () => {
+    const job: FakeJobRow = {
+      id: "job-1",
+      tenantId: TENANT_ID,
+      type: "some_other_job_type",
+      idempotencyKey: "k",
+      productId: null,
+      payload: {},
+      status: "pending",
+      attempts: 0,
+    };
+    const jobsStore = [job];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
+
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(job.status).toBe("pending");
   });
 });
