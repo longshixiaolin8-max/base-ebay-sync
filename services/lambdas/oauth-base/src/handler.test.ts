@@ -18,22 +18,24 @@ const getAppCredentialsMock = vi.fn();
 const getDbMock = vi.fn().mockReturnValue({} as never);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const saveOAuthTokenMock = vi.fn().mockResolvedValue(undefined);
-const signStateMock = vi.fn().mockReturnValue("signed-state");
 const verifyStateMock = vi.fn().mockReturnValue("tenant-a");
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 
-vi.mock("@ai-ec/db", () => ({ BOOTSTRAP_TENANT_ID: "bootstrap-tenant" }));
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: (...args: unknown[]) => getDbMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   saveOAuthToken: (...args: unknown[]) => saveOAuthTokenMock(...args),
-  signState: (...args: unknown[]) => signStateMock(...args),
   verifyState: (...args: unknown[]) => verifyStateMock(...args),
 }));
 
-const { callback } = await import("./handler.js");
+const handlerModule = await import("./handler.js");
+const { callback } = handlerModule;
+
+it("no longer exports a public authorize() handler (round 12: public OAuth authorize routeを廃止)", () => {
+  expect("authorize" in handlerModule).toBe(false);
+});
 
 function makeEvent(query: Record<string, string>): APIGatewayProxyEventV2 {
   return { queryStringParameters: query } as unknown as APIGatewayProxyEventV2;

@@ -5,7 +5,7 @@ import { fetchUserAttributes, signOut } from "aws-amplify/auth";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { ensureAmplifyConfigured, getApiBaseUrl } from "@/lib/amplify-config";
+import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -89,6 +89,21 @@ export function Sidebar() {
     }
   }
 
+  // The public GET /oauth/ebay/authorize route was removed (round 12 hardening --
+  // "public OAuth authorize routeを廃止"): OAuth connect now always starts from this
+  // authenticated admin session, via GET /admin/oauth/ebay/authorize-url, which mints the
+  // signed state for *this caller's own* tenantId server-side rather than trusting a
+  // client-supplied one.
+  async function reconnectEbay() {
+    try {
+      const res = await apiGet<{ url: string }>("/admin/oauth/ebay/authorize-url");
+      window.open(res.url, "_blank", "noopener,noreferrer");
+    } catch {
+      // Best-effort reconnect link in the sidebar -- a failure here just means nothing
+      // opened; the same action is always also available from /onboarding or /commerce.
+    }
+  }
+
   const initial = email ? email[0]!.toUpperCase() : "?";
 
   return (
@@ -122,9 +137,9 @@ export function Sidebar() {
           <span className={`status-dot ${statusDotClass(ebayState?.state)}`} />
           eBay {ebayState ? (ebayState.state === "HEALTHY" ? "接続済み" : ebayState.state) : "確認中..."}
           {ebayState && ebayState.state !== "HEALTHY" && (
-            <a href={`${getApiBaseUrl()}/oauth/ebay/authorize`} target="_blank" rel="noopener noreferrer" className="reconnect-link">
+            <button type="button" onClick={reconnectEbay} className="reconnect-link">
               再接続
-            </a>
+            </button>
           )}
         </div>
       </div>

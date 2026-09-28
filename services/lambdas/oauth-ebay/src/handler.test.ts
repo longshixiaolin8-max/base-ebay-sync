@@ -5,29 +5,29 @@ const getAppCredentialsMock = vi.fn();
 const getDbMock = vi.fn().mockReturnValue({} as never);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const saveOAuthTokenMock = vi.fn().mockResolvedValue(undefined);
-const signStateMock = vi.fn().mockReturnValue("signed-state");
 const verifyStateMock = vi.fn().mockReturnValue("tenant-a");
 const exchangeCodeForTokenMock = vi.fn();
 const getAuthenticatedUserIdMock = vi.fn();
-const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://auth.example/consent");
 const createEbayAdapterMock = vi.fn().mockReturnValue({
   exchangeCodeForToken: exchangeCodeForTokenMock,
   getAuthenticatedUserId: getAuthenticatedUserIdMock,
-  getAuthorizationUrl: getAuthorizationUrlMock,
 });
 
-vi.mock("@ai-ec/db", () => ({ BOOTSTRAP_TENANT_ID: "bootstrap-tenant" }));
 vi.mock("@ai-ec/lambda-shared", () => ({
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: (...args: unknown[]) => getDbMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   saveOAuthToken: (...args: unknown[]) => saveOAuthTokenMock(...args),
-  signState: (...args: unknown[]) => signStateMock(...args),
   verifyState: (...args: unknown[]) => verifyStateMock(...args),
 }));
 
-const { callback } = await import("./handler.js");
+const handlerModule = await import("./handler.js");
+const { callback } = handlerModule;
+
+it("no longer exports a public authorize() handler (round 12: public OAuth authorize routeを廃止)", () => {
+  expect("authorize" in handlerModule).toBe(false);
+});
 
 function makeEvent(query: Record<string, string>): APIGatewayProxyEventV2 {
   return { queryStringParameters: query } as unknown as APIGatewayProxyEventV2;

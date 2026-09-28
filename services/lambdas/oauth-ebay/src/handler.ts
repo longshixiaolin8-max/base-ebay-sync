@@ -1,29 +1,13 @@
-import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
   getDb,
   recordAuditLog,
   saveOAuthToken,
-  signState,
   verifyState,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-
-/**
- * GET /oauth/ebay/authorize — public, deliberately no tenant hint accepted here (see
- * oauth-state.ts's StatePayload comment). Kept only as a bootstrap path for the one
- * hand-provisioned tenant this platform has today; admin-api's authenticated
- * GET /admin/oauth/ebay/authorize-url is the real per-tenant entry point going forward.
- */
-export async function authorize(): Promise<APIGatewayProxyResultV2> {
-  const creds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapter = createEbayAdapter(creds);
-  const state = signState(creds.clientSecret, BOOTSTRAP_TENANT_ID);
-  const url = adapter.getAuthorizationUrl(state, creds.ruName);
-  return { statusCode: 302, headers: { Location: url } };
-}
 
 /** GET /oauth/ebay/callback?code=...&state=... — exchanges the code and stores the token. */
 export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {

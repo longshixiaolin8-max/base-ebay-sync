@@ -6,7 +6,6 @@ import type { ComponentType, SVGProps } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
-import { getApiBaseUrl } from "@/lib/amplify-config";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
@@ -109,6 +108,19 @@ export default function DashboardPage() {
       .catch((err) => notify(`ダッシュボードの取得に失敗しました: ${(err as Error).message}`))
       .finally(() => setLoading(false));
   }, [ready, notify]);
+
+  // The public GET /oauth/ebay/authorize route was removed (round 12 hardening); OAuth
+  // connect now always starts from this authenticated admin session via the authenticated
+  // GET /admin/oauth/ebay/authorize-url, which mints the signed state for this caller's own
+  // tenantId server-side.
+  async function reconnectEbay() {
+    try {
+      const res = await apiGet<{ url: string }>("/admin/oauth/ebay/authorize-url");
+      window.open(res.url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      notify(`連携の開始に失敗しました: ${(err as Error).message}`);
+    }
+  }
 
   const pendingApproval = products.filter((p) => p.status === "ai_generated").length;
   const active = products.filter((p) => p.status === "active").length;
@@ -371,15 +383,9 @@ export default function DashboardPage() {
                   <span>
                     {ebayState ? (ebayState.state === "HEALTHY" ? "正常" : ebayState.state) : "確認中..."}
                     {ebayState && ebayState.state !== "HEALTHY" && (
-                      <a
-                        href={`${getApiBaseUrl()}/oauth/ebay/authorize`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="reconnect-link"
-                        style={{ marginLeft: "0.5rem" }}
-                      >
+                      <button type="button" onClick={reconnectEbay} className="reconnect-link" style={{ marginLeft: "0.5rem" }}>
                         再接続
-                      </a>
+                      </button>
                     )}
                   </span>
                 </div>

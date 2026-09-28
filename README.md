@@ -71,8 +71,8 @@ packages/
   ai/               AI生成サービス + ガードレール(Bedrock/OpenAI切替可能)
 services/lambdas/
   shared/           DB接続・Secrets・SQS・監査ログ等の共通ヘルパー
-  oauth-base/       BASE OAuth authorize/callback
-  oauth-ebay/       eBay OAuth authorize/callback
+  oauth-base/       BASE OAuth callback(公開)。authorize-urlの発行はadmin-apiの認証済みroute
+  oauth-ebay/       eBay OAuth callback(公開)。authorize-urlの発行はadmin-apiの認証済みroute
   product-fetch/    BASE商品ポーリング→商品マスター反映(EventBridge)
   ai-generate-worker/  AI生成ワーカー(SQS)
   ebay-sync-worker/    eBay出品/更新ワーカー(SQS)
@@ -107,6 +107,7 @@ pnpm -r run test
 6. デプロイ後、Secrets Managerの `ai-ec-platform/app-credentials/{base,ebay,openai}` に実クレデンシャルを手動投入。
 7. AWSコンソールで `DbMigrate` Lambda(`services/lambdas/db-migrate`)を1回テスト実行し、`packages/db/migrations/*.sql` を適用してブートストラップテナント行を作成する(繰り返し実行しても安全 -- drizzleの標準マイグレーターが適用済みを記録する)。新しいマイグレーションを追加した際も、同じLambdaを再実行すればよい。
 8. Cognitoに管理者ユーザーを作成(`aws cognito-idp admin-create-user`。カスタム属性 `custom:tenant_id` に、ステップ7で作成したブートストラップテナントのID(`00000000-0000-0000-0000-000000000001`)を設定する)。
+9. BASE/eBayのOAuth接続は、ステップ8で作成した管理者アカウントで管理画面にログインし、`/onboarding`(または`/commerce`・サイドバー)の「連携」ボタンから行う。**(round 12の変更点)** 以前存在した公開・無認証の `GET /oauth/{base,ebay}/authorize` ルートは廃止した — マルチテナントSaaSでは危険(認証なしに任意のtenantIdへOAuth接続を紐付けられた)なため。ステップ8で作成したCognitoユーザーは`custom:tenant_id`にブートストラップテナントIDを持つので、認証済みの`GET /admin/oauth/{channel}/authorize-url`が自動的に同じテナント向けの署名済みstateを発行する — 追加の移行作業は不要。
 
 
 ### 2. 通常のデプロイフロー

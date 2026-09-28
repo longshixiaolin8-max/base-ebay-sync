@@ -60,9 +60,7 @@ const ESM_BUNDLING: Partial<nodejs.BundlingOptions> = {
 
 export class LambdaStack extends cdk.Stack {
   readonly adminApiFn: nodejs.NodejsFunction;
-  readonly oauthBaseAuthorizeFn: nodejs.NodejsFunction;
   readonly oauthBaseCallbackFn: nodejs.NodejsFunction;
-  readonly oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   readonly oauthEbayCallbackFn: nodejs.NodejsFunction;
   readonly ebayWebhookFn: nodejs.NodejsFunction;
   readonly productFetchFn: nodejs.NodejsFunction;
@@ -138,26 +136,22 @@ export class LambdaStack extends cdk.Stack {
     };
 
     // --- OAuth ---
-    this.oauthBaseAuthorizeFn = makeFn(
-      "OauthBaseAuthorize",
-      "services/lambdas/oauth-base/src/handler.ts",
-      "authorize",
-      { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
-    );
+    // Round 12 hardening ("public OAuth authorize routeを廃止"): only /callback is public
+    // now (BASE/eBay's own redirect target, which never carries a Cognito session either --
+    // protected by verifyState's signed, tenant-bound, time-limited state instead). The
+    // /authorize step itself moved entirely to admin-api's authenticated
+    // GET /admin/oauth/{base,ebay}/authorize-url, which mints that same signed state from
+    // *this caller's own* tenantId -- so there's no longer a separate Authorize Lambda/route
+    // for either channel.
     this.oauthBaseCallbackFn = makeFn(
       "OauthBaseCallback",
       "services/lambdas/oauth-base/src/handler.ts",
       "callback",
       { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
     );
-    this.oauthEbayAuthorizeFn = makeFn("OauthEbayAuthorize", "services/lambdas/oauth-ebay/src/handler.ts", "authorize");
     this.oauthEbayCallbackFn = makeFn("OauthEbayCallback", "services/lambdas/oauth-ebay/src/handler.ts", "callback");
-    for (const fn of [this.oauthBaseAuthorizeFn, this.oauthBaseCallbackFn]) {
-      props.appCredentialSecrets.base.grantRead(fn);
-    }
-    for (const fn of [this.oauthEbayAuthorizeFn, this.oauthEbayCallbackFn]) {
-      props.appCredentialSecrets.ebay.grantRead(fn);
-    }
+    props.appCredentialSecrets.base.grantRead(this.oauthBaseCallbackFn);
+    props.appCredentialSecrets.ebay.grantRead(this.oauthEbayCallbackFn);
 
     this.ebayWebhookFn = makeFn(
       "EbayWebhook",
@@ -395,10 +389,9 @@ export class LambdaStack extends cdk.Stack {
         AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
         EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
         INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
-        // Multi-tenant retrofit's GET /admin/oauth/base/authorize-url mints the same BASE
-        // consent URL oauth-base's own authorize() builds -- same redirect URI, so BASE's
-        // callback (registered against this one fixed URL) works regardless of which route
-        // originally sent the operator there.
+        // GET /admin/oauth/base/authorize-url (this platform's sole BASE OAuth entry point
+        // as of round 12's "public OAuth authorize routeを廃止") needs the same fixed
+        // redirect URI BASE's own callback is registered against.
         BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
         // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
         // billing portal session it creates.

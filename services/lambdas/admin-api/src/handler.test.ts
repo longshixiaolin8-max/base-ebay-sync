@@ -1395,6 +1395,34 @@ describe("admin-api handler", () => {
       expect(getAuthorizationUrlMock).toHaveBeenCalledWith("signed-state", "ru-1");
       expect(JSON.parse(res.body!)).toEqual({ url: "https://ebay.example/oauth?state=signed-state" });
     });
+
+    it("does the same for BASE -- this authenticated route is now the sole entry point for both channels", async () => {
+      fakeDb = createFakeDb([]);
+      signStateMock.mockClear();
+      getAppCredentialsMock.mockResolvedValueOnce({ clientId: "base-cid", clientSecret: "base-csecret" });
+
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/base/authorize-url"));
+
+      expect(res.statusCode).toBe(200);
+      expect(signStateMock).toHaveBeenCalledWith("base-csecret", TENANT_A);
+      const { url } = JSON.parse(res.body!) as { url: string };
+      const parsed = new URL(url);
+      expect(parsed.searchParams.get("client_id")).toBe("base-cid");
+      expect(parsed.searchParams.get("state")).toBe("signed-state");
+      expect(parsed.searchParams.get("redirect_uri")).toBe("https://api.example/oauth/base/callback");
+    });
+
+    it("never accepts a client-supplied tenantId -- the state is always minted from the caller's own authenticated tenantId", async () => {
+      fakeDb = createFakeDb([]);
+      signStateMock.mockClear();
+      getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", clientSecret: "csecret", ruName: "ru-1" });
+
+      await callHandler(makeEvent("GET", "/admin/oauth/ebay/authorize-url", { tenantId: "some-other-tenant" }));
+
+      // The query string is simply never read for this -- tenantId always comes from
+      // tenantIdFromEvent(event)'s authenticated Cognito claims (TENANT_A in these tests).
+      expect(signStateMock).toHaveBeenCalledWith("csecret", TENANT_A);
+    });
   });
 
   describe("billing", () => {

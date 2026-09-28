@@ -4,7 +4,6 @@ import type { AuditLogEntry } from "@ai-ec/core";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
-import { getApiBaseUrl } from "@/lib/amplify-config";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { AUDIT_ACTION_LABEL } from "@/lib/audit-action-copy";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
@@ -106,6 +105,19 @@ export default function CommercePage() {
       notify(`コマース統合ビューの取得に失敗しました: ${(err as Error).message}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  // The public GET /oauth/ebay/authorize route was removed (round 12 hardening); OAuth
+  // connect now always starts from this authenticated admin session via the authenticated
+  // GET /admin/oauth/ebay/authorize-url, which mints the signed state for this caller's own
+  // tenantId server-side.
+  async function reconnectEbay() {
+    try {
+      const res = await apiGet<{ url: string }>("/admin/oauth/ebay/authorize-url");
+      window.open(res.url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      notify(`連携の開始に失敗しました: ${(err as Error).message}`);
     }
   }
 
@@ -273,9 +285,9 @@ export default function CommercePage() {
                   <span className={`status-dot ${ebayState ? (ebayState.state === "HEALTHY" ? "ok" : "warn") : "warn"}`} />
                   eBay {ebayState ? (ebayState.state === "HEALTHY" ? "接続済み" : ebayState.state) : "確認中..."}
                   {ebayState && ebayState.state !== "HEALTHY" && (
-                    <a href={`${getApiBaseUrl()}/oauth/ebay/authorize`} target="_blank" rel="noopener noreferrer" className="reconnect-link">
+                    <button type="button" onClick={reconnectEbay} className="reconnect-link">
                       再接続
-                    </a>
+                    </button>
                   )}
                 </span>
               </div>

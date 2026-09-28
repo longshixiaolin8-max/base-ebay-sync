@@ -11,9 +11,7 @@ export interface ApiStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
   userPoolClient: cognito.UserPoolClient;
   adminApiFn: nodejs.NodejsFunction;
-  oauthBaseAuthorizeFn: nodejs.NodejsFunction;
   oauthBaseCallbackFn: nodejs.NodejsFunction;
-  oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   oauthEbayCallbackFn: nodejs.NodejsFunction;
   ebayWebhookFn: nodejs.NodejsFunction;
   signupHandlerFn: nodejs.NodejsFunction;
@@ -68,32 +66,19 @@ export class ApiStack extends cdk.Stack {
     addRoute("AdminApiGet", apigwv2.HttpMethod.GET, "/admin/{proxy+}", adminIntegration, true);
     addRoute("AdminApiPost", apigwv2.HttpMethod.POST, "/admin/{proxy+}", adminIntegration, true);
 
-    // /authorize only builds a signed `state` and 302s to BASE/eBay's own consent screen --
-    // no state-changing action happens here. It was originally gated behind Cognito on the
-    // assumption the admin app would call it with a session token, but no such UI was ever
-    // built, so a plain browser visit (the only way this is actually used) always 401'd.
-    // /callback (BASE/eBay's own redirect target, which never carries a Cognito session
-    // either) already relies on the signed `state` param for CSRF protection, not Cognito --
-    // /authorize is unauthenticated for the same reason and with the same protection.
-    addRoute(
-      "OauthBaseAuthorize",
-      apigwv2.HttpMethod.GET,
-      "/oauth/base/authorize",
-      new HttpLambdaIntegration("OauthBaseAuthorizeIntegration", props.oauthBaseAuthorizeFn),
-      false,
-    );
+    // Round 12 hardening ("public OAuth authorize routeを廃止"): the old public
+    // GET /oauth/{base,ebay}/authorize routes (unauthenticated, minted state for the fixed
+    // BOOTSTRAP_TENANT_ID only) are gone -- OAuth connect now always starts from
+    // admin-api's authenticated GET /admin/oauth/{base,ebay}/authorize-url, which mints
+    // that same signed state for the *caller's own* tenantId instead of a client-supplied
+    // (or hardcoded) one. Only /callback stays here and stays public: it's BASE/eBay's own
+    // redirect target, which never carries a Cognito session either -- its protection is
+    // verifyState's signed, tenant-bound, time-limited state, not this route's auth gate.
     addRoute(
       "OauthBaseCallback",
       apigwv2.HttpMethod.GET,
       "/oauth/base/callback",
       new HttpLambdaIntegration("OauthBaseCallbackIntegration", props.oauthBaseCallbackFn),
-      false,
-    );
-    addRoute(
-      "OauthEbayAuthorize",
-      apigwv2.HttpMethod.GET,
-      "/oauth/ebay/authorize",
-      new HttpLambdaIntegration("OauthEbayAuthorizeIntegration", props.oauthEbayAuthorizeFn),
       false,
     );
     addRoute(
