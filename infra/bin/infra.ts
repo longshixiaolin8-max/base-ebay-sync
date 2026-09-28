@@ -23,8 +23,11 @@ const alarmEmail = app.node.tryGetContext("alarmEmail") as string | undefined;
 const aiProvider = app.node.tryGetContext("aiProvider") as string | undefined;
 const githubRepo = (app.node.tryGetContext("githubRepo") as string | undefined) ?? "OWNER/base-ebay-sync";
 const monthlyBudgetUsd = app.node.tryGetContext("monthlyBudgetUsd") as string | undefined;
+// "direct" (default, unchanged) or "cloudfront" -- see PlatformConfig.apiEntrypoint's own
+// doc comment and README's runbook before ever passing --context apiEntrypoint=cloudfront.
+const apiEntrypoint = app.node.tryGetContext("apiEntrypoint") as string | undefined;
 
-const config = loadConfig(envName, alarmEmail, aiProvider, monthlyBudgetUsd);
+const config = loadConfig(envName, alarmEmail, aiProvider, monthlyBudgetUsd, apiEntrypoint);
 
 // Region is read from CDK context (`--context region=...`), not from
 // CDK_DEFAULT_REGION/AWS_REGION — the CDK CLI recomputes those env vars from the
@@ -60,6 +63,32 @@ const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });
 const adminHosting = new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
 const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags, adminOrigin: adminHosting.url });
 
+// WAF-protected CloudFront entry point in front of apiCore.api -- created before LambdaStack
+// (unlike the rest of this file's original ordering) because computing apiUrl below needs
+// its auto-generated domain name, which only exists once the distribution itself does.
+// Standing this up is still purely additive: config.apiEntrypoint (default "direct") is
+// what actually decides whether anything downstream (BASE_OAUTH_REDIRECT_URI, the eBay
+// webhook destinations, CLOUDFRONT_SHARED_SECRET) ever uses it -- see cloudfront-stack.ts
+// and config.ts's own doc comments, and README's runbook for the real cutover.
+const waf = new WafStack(app, `${stackPrefix}-Waf`, {
+  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
+  tags,
+  crossRegionReferences: true,
+});
+const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
+  env,
+  tags,
+  crossRegionReferences: true,
+  api: apiCore.api,
+  webAclArn: waf.webAcl.attrArn,
+  sharedSecret: secrets.cloudfrontSharedSecret,
+});
+cloudfrontApi.addStackDependency(apiCore);
+cloudfrontApi.addStackDependency(waf);
+cloudfrontApi.addStackDependency(secrets);
+
+const apiUrl = config.apiEntrypoint === "cloudfront" ? `https://${cloudfrontApi.distribution.domainName}` : apiCore.api.apiEndpoint;
+
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
   tags,
@@ -74,8 +103,9 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     signup: secrets.signupCredentials,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
-  apiUrl: apiCore.api.apiEndpoint,
+  apiUrl,
   adminAppUrl: adminHosting.url,
+  cloudFrontSharedSecret: secrets.cloudfrontSharedSecret,
   userPoolArn: auth.userPool.userPoolArn,
   userPoolId: auth.userPool.userPoolId,
   queues: {
@@ -98,6 +128,7 @@ lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
 lambdas.addStackDependency(apiCore);
 lambdas.addStackDependency(auth);
+lambdas.addStackDependency(cloudfrontApi); // apiUrl may reference its domain name (config.apiEntrypoint === "cloudfront")
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
@@ -115,28 +146,6 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
 api.addStackDependency(apiCore);
-
-// WAF for the API (task from the commercial-readiness hardening round): HttpApi can't
-// take a WAF Web ACL directly, so this stands up a parallel, WAF-protected CloudFront
-// entry point in front of it -- purely additive, no existing stack depends on either of
-// these two, and nothing (the admin app, BASE's OAuth redirect_uri, eBay's registered
-// webhook destination) is switched over to it yet. See cloudfront-stack.ts's own doc
-// comment for why: both of those are already registered live against the direct
-// execute-api URL, and BASE's side of that can only be changed in BASE's own console.
-const waf = new WafStack(app, `${stackPrefix}-Waf`, {
-  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
-  tags,
-  crossRegionReferences: true,
-});
-const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
-  env,
-  tags,
-  crossRegionReferences: true,
-  api: apiCore.api,
-  webAclArn: waf.webAcl.attrArn,
-});
-cloudfrontApi.addStackDependency(apiCore);
-cloudfrontApi.addStackDependency(waf);
 
 new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,

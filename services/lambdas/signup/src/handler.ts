@@ -5,7 +5,14 @@ import {
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { createPendingTenant } from "@ai-ec/db";
-import { createStripeClient, getAppCredentials, getDb, requireEnv, type StripeAppCredentials } from "@ai-ec/lambda-shared";
+import {
+  createStripeClient,
+  getAppCredentials,
+  getDb,
+  requireCloudFrontOrigin,
+  requireEnv,
+  type StripeAppCredentials,
+} from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 interface SignupCredentials {
@@ -40,6 +47,9 @@ const FREE_TRIAL_DAYS = 30;
  * until the Stripe webhook confirms the subscription is actually active.
  */
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   let body: SignupRequestBody;
   try {
     body = JSON.parse(event.body ?? "{}") as SignupRequestBody;

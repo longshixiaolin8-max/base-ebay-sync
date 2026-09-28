@@ -31,6 +31,7 @@ const createStripeClientMock = vi.fn(() => ({
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: () => getDbMock(),
+  requireCloudFrontOrigin: () => null,
   requireEnv: (name: string) => requireEnvMock(name),
   createStripeClient: () => createStripeClientMock(),
 }));

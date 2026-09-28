@@ -28,6 +28,7 @@ export class SecretsStack extends cdk.Stack {
   readonly openAiApiKey: secretsmanager.Secret;
   readonly stripeAppCredentials: secretsmanager.Secret;
   readonly signupCredentials: secretsmanager.Secret;
+  readonly cloudfrontSharedSecret: secretsmanager.Secret;
   readonly oauthTokenPrefix: string;
 
   constructor(scope: Construct, id: string, props: SecretsStackProps) {
@@ -72,6 +73,21 @@ export class SecretsStack extends cdk.Stack {
     this.signupCredentials = new secretsmanager.Secret(this, "SignupCredentials", {
       secretName: `ai-ec-platform/${envSegment}app-credentials/signup`,
       description: "Shared invite code required by the public /signup flow. Fill in manually after deploy.",
+    });
+
+    // Round 15 hardening ("WAFを実際の本番経路に適用"). Unlike every secret above, this one
+    // needs no manual fill-in -- it's an internal value with no external registration, so
+    // CDK generates it. CloudFrontStack injects it as a custom header on every request it
+    // forwards to the origin API; requireCloudFrontOrigin (services/lambdas/shared/src) reads
+    // it at runtime and compares it against the incoming request's header, letting a Lambda
+    // tell "this came through the WAF-protected CloudFront distribution" apart from "this
+    // hit the direct execute-api URL" -- HTTP API v2 supports neither a resource policy nor
+    // a direct WAF association (confirmed against AWS's own docs), so this shared-header
+    // pattern is the recommended alternative, not a guessed workaround.
+    this.cloudfrontSharedSecret = new secretsmanager.Secret(this, "CloudFrontSharedSecret", {
+      secretName: `ai-ec-platform/${envSegment}cloudfront-shared-secret`,
+      description: "Auto-generated -- CloudFront injects this as a custom header; Lambdas verify it. Never filled in manually.",
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
     });
   }
 }

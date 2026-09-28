@@ -3,6 +3,7 @@ import {
   getAppCredentials,
   getDb,
   recordAuditLog,
+  requireCloudFrontOrigin,
   saveOAuthToken,
   verifyState,
   type EbayAppCredentials,
@@ -11,6 +12,9 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda
 
 /** GET /oauth/ebay/callback?code=...&state=... — exchanges the code and stores the token. */
 export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   const code = event.queryStringParameters?.code;
   const state = event.queryStringParameters?.state;
   if (!code || !state) {

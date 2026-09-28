@@ -33,6 +33,9 @@ export interface LambdaStackProps extends cdk.StackProps {
   oauthTokenSecretArnPattern: string;
   apiUrl: string;
   adminAppUrl: string;
+  /** Only actually read (as CLOUDFRONT_SHARED_SECRET) when config.apiEntrypoint is
+   *  "cloudfront" -- see requireCloudFrontOrigin in services/lambdas/shared/src. */
+  cloudFrontSharedSecret: secretsmanager.Secret;
   /** Scoped IAM resource for the signup Lambda's AdminCreateUser/AdminSetUserPassword grant --
    *  narrower than a wildcard, matching this stack's existing scoped-secret-ARN pattern. */
   userPoolArn: string;
@@ -94,6 +97,12 @@ export class LambdaStack extends cdk.Stack {
       // names (see secrets-stack.ts) so dev and prod, run side by side in the same
       // account, never read/write each other's app credentials or OAuth tokens.
       PLATFORM_ENV: props.config.envName,
+      // requireCloudFrontOrigin treats this as a pure no-op when unset -- only actually
+      // set (and enforced) once config.apiEntrypoint is "cloudfront", so this round's own
+      // deploy can never itself break traffic still using the direct execute-api URL.
+      ...(props.config.apiEntrypoint === "cloudfront"
+        ? { CLOUDFRONT_SHARED_SECRET: props.cloudFrontSharedSecret.secretValue.unsafeUnwrap() }
+        : {}),
     };
 
     const oauthTokenSecretsPolicy = new iam.PolicyStatement({
@@ -400,6 +409,12 @@ export class LambdaStack extends cdk.Stack {
       },
     });
     props.cluster.grantDataApiAccess(this.dbMigrateFn);
+    // Round 15 hardening ("DB migrationをdeployに統合"): the deploy workflow looks this
+    // output up (`aws cloudformation describe-stacks`) right after `cdk deploy` to invoke
+    // this exact function -- an explicit output rather than a hardcoded name because CDK
+    // auto-generates this function's real name (no `functionName` override here), and that
+    // generated name isn't predictable ahead of a real deploy.
+    new cdk.CfnOutput(this, "DbMigrateFunctionName", { value: this.dbMigrateFn.functionName });
 
     // --- Admin API ---
     this.adminApiFn = makeFn(

@@ -7,7 +7,13 @@ import {
   markTenantCanceledWithGrace,
   markTenantPastDue,
 } from "@ai-ec/db";
-import { createStripeClient, getAppCredentials, getDb, type StripeAppCredentials } from "@ai-ec/lambda-shared";
+import {
+  createStripeClient,
+  getAppCredentials,
+  getDb,
+  requireCloudFrontOrigin,
+  type StripeAppCredentials,
+} from "@ai-ec/lambda-shared";
 import type Stripe from "stripe";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
@@ -21,6 +27,9 @@ function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
  * below via the stored webhook signing secret), not this route's auth gate.
  */
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   const signatureHeader = event.headers?.["stripe-signature"] ?? event.headers?.["Stripe-Signature"];
   if (!signatureHeader) {
     return json(400, { error: "missing_signature" });

@@ -34,6 +34,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: () => getAppCredentialsMock(),
   getDb: () => getDbMock(),
   createStripeClient: () => createStripeClientMock(),
+  requireCloudFrontOrigin: () => null,
 }));
 
 const { handler } = await import("./handler.js");

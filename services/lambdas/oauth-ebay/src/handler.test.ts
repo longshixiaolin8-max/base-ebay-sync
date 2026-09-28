@@ -18,6 +18,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: (...args: unknown[]) => getDbMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  requireCloudFrontOrigin: () => null,
   saveOAuthToken: (...args: unknown[]) => saveOAuthTokenMock(...args),
   verifyState: (...args: unknown[]) => verifyStateMock(...args),
 }));

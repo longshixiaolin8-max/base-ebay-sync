@@ -67,9 +67,70 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - **エンドポイント自体に秘密トークンを埋め込む**: `POST /admin/ebay/platform-notification-setup`が登録時に`signWebhookDestinationToken`(HMAC、このアプリのeBay client secret、有効期限なし)でテナントごとのトークンを発行し、`/webhooks/ebay/platform-notifications/{token}`という形でeBayに登録する。これにより(1)完全に推測可能だった静的パスがなくなり、(2)eBayの通知ペイロード自体にはテナント情報が一切ないという問題も同時に解決する(トークンからtenantIdを復元)。
 - **debounce/coalescing**: `triggerCoalescedPoll`が`idempotency_keys`テーブルを純粋なrate-limitミューテックスとして再利用(`complete()`を呼ばず`tryClaim`のTTLだけを使う)し、同一tenant/channelへの通知は20秒間に1回しか実際のpollを起動しない。実際のpollは`ebayPlatformNotificationPoll` SQSキュー経由で別Lambda(`dispatchPoll`)が行うため、webhook自体のリクエストパス上では同期的なeBay API呼び出しが一切発生しない。
 - **API Gateway throttling**: このルートだけ`5 req/s, burst 10`に制限(他ルートの既定は`50 req/s, burst 100`)。
-- **WAF**: 現時点ではCloudFrontにのみ付与されており、直接のAPI Gatewayエンドポイントには適用されていない(Prompt 15で対応予定)。
+- **WAF**: round 15でCloudFrontを実際の本番経路として使えるようにした(下の「WAF/CloudFrontの本番適用」参照)。デフォルトはまだ直接execute-apiのままで、切り替えは明示的な運用手順が必要。
 - **既存のeBay Platform Notification購読への影響**: ルートが`{token}`必須になったため、**このデプロイ前に登録された(トークンなしの)購読はeBayからの配信が404になる**。該当テナントで`POST /admin/ebay/platform-notification-setup`を再実行し、新しいトークン付きURLで再登録すること。
 - REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)は今回スコープ外 — 既にBOOTSTRAP_TENANT_ID固定だが、署名検証があるため悪用リスクは低い。debounceのみ同じ仕組みを適用した。
+
+### WAF/CloudFrontの本番適用と、direct execute-api URLの制限
+
+**現状(round 15完了時点)**: `infra/lib/cloudfront-stack.ts`のWAF付きCloudFrontディストリビューションは技術的に完成している(`CACHING_DISABLED` + `OriginRequestPolicy.ALL_VIEWER`で認証ヘッダ・生bodyともに素通し確認済み)が、**デフォルトでは何もこれを使っていない**。`PlatformConfig.apiEntrypoint`(`infra/lib/config.ts`)が`"direct"`(既定)か`"cloudfront"`かを1箇所で決める:
+
+- `"direct"`(既定・現状維持): `BASE_OAUTH_REDIRECT_URI`・eBay webhook宛先・管理画面のAPI URLは全部これまで通り直接execute-apiのURL。WAFは立っているが本番トラフィックは一切通らない。
+- `"cloudfront"`: 上記すべてがCloudFrontのURLに切り替わる。**同時に**、CloudFrontが注入するシークレットヘッダ(`X-CloudFront-Secret`、Secrets Manager `cloudfront-shared-secret`から自動生成)をLambda側の`requireCloudFrontOrigin`(`services/lambdas/shared/src/cloudfront-origin.ts`)が検証するようになり、このヘッダを持たない直接execute-apiへのリクエストは403で拒否される。**HTTP API v2はresource policyもWAFの直接アタッチも非対応**(REST APIとの既知の違い、AWS公式ドキュメントで確認済み)なので、この「共有シークレットヘッダ」がAWS自身も推奨する代替策。
+
+**なぜ自動で切り替えないか**: `BASE_OAUTH_REDIRECT_URI`はBASEの開発者コンソール側にも登録されており、Stripeのwebhook宛先もStripeダッシュボード側の設定。このコードベースだけでは変更できない。ここを揃えずに`apiEntrypoint`だけ切り替えると、新規BASE接続とStripe webhook配信がその場で壊れる。
+
+**切り替え手順(この順序を守ること)**:
+
+1. BASEの開発者コンソールで、このアプリのOAuthアプリ設定のredirect_uriを`https://<CloudFrontドメイン>/oauth/base/callback`に**追加**(既存の直接URLを消すのはまだ早い — 後述)。
+2. Stripeダッシュボード → Webhooks で、エンドポイントURLを`https://<CloudFrontドメイン>/webhooks/stripe`に更新(またはCloudFront宛の新エンドポイントを追加)。
+3. `apps/admin/.env.local`(gitignore対象、Amplifyのビルド設定ではなくローカルのビルド時にJSへ焼き込まれる)の`NEXT_PUBLIC_API_BASE_URL`をCloudFrontのURLに変更し、管理画面を再ビルド・再デプロイ。
+4. `cdk deploy --all --context apiEntrypoint=cloudfront ...`(または`deploy.yml`のworkflow_dispatch入力にcontextを追加)を実行。これでLambda側のURL群とCLOUDFRONT_SHARED_SECRETが切り替わる。
+5. 管理画面から実際にBASE/eBay接続・Stripe課金・商品同期が新URL経由で動くことを確認。
+6. 問題なければ、eBayの各webhook購読(`POST /admin/ebay/webhook-setup`・`POST /admin/ebay/platform-notification-setup`)をテナントごとに再実行してCloudFront URLへ再登録。
+7. 数日〜1週間、旧URL(直接execute-api)への到達がないことをCloudWatch Logsで確認できたら、BASEコンソールから旧redirect_uriを削除。
+
+**ロールバック**: `apiEntrypoint`を`"direct"`に戻して再デプロイすれば、Lambda側は即座に旧URL/旧設定に戻る(BASE/Stripe側は手順1・2で「追加」しているだけなので、消していなければそのまま両対応の状態を維持できる)。
+
+## デプロイフローとDB migration
+
+### 新しいデプロイフロー(round 15で変更)
+
+`workflow_dispatch` → `cdk deploy --all` → **DbMigrate Lambda呼び出し(新規)** → **post-deploy smoke test(新規)**。migrationとsmoke testはどちらも失敗時に`exit 1`でジョブ全体を失敗扱いにする(「prodではmigration failure時に明確にdeploy失敗にする」の実装)。
+
+- migrationステップは`aws cloudformation describe-stacks`でLambdaStackの`DbMigrateFunctionName`出力を引き、`aws lambda invoke`で直接呼び出す。レスポンスの`FunctionError`フィールドで成否判定(Lambda呼び出し自体のexit codeは関数内部のエラーでは非0にならないため)。
+- drizzleの migrator は適用済みmigrationを自分のテーブルで管理するため、**何度実行しても安全**(新しいmigrationがなければ単に何もしない)。
+- smoke testは`GET /webhooks/ebay/notifications`(challenge_codeなし)を叩き、HTTP 400が返ることだけを確認する認証不要・副作用なしの疎通確認。DBを実際に触る確認はmigrationステップ自体がすでに兼ねている。
+
+**この変更を有効にする前に必須の作業**: `deployRole`(GitHub Actionsが引き受けるIAMロール)に`lambda:InvokeFunction`/`cloudformation:DescribeStacks`権限を追加した(`infra/lib/github-oidc-stack.ts`)。この`GithubOidcStack`は**人手による一度きりのブートストラップ**(README上部の手順参照)であり、`deploy.yml`が自動デプロイする対象では**ない**。そのため、この変更をコード上マージしただけでは本番のIAMロールには反映されない — 以下を一度だけ手動実行すること:
+
+```bash
+cd infra && npx cdk deploy AiEcPlatform-<env>-GithubOidc \
+  --context bootstrapOidc=true \
+  --context githubRepo=<owner>/<repo>
+```
+
+これを実行しないまま次回`deploy.yml`を回すと、新しい"Run DB migration"/"Post-deploy smoke test"ステップがAccessDeniedで失敗する。
+
+### migration failureの挙動とロールバック方針
+
+- migration自体が失敗(SQL構文エラー、既存データとの制約違反等)した場合、deployジョブは赤字で失敗し、**CDKによるLambdaコード自体のデプロイはすでに完了している**状態になり得る(新Lambda + 未適用schemaの共存)。この場合の復旧は、(a) 問題のmigration SQLを修正した新しいmigrationファイルを追加して再デプロイするか、(b) 直前の(migrationを含まない)コミットへLambdaコードだけを再デプロイして手動でDBを復旧するか、状況に応じて判断する。
+- 本番運用としては、破壊的な変更(列削除・型変更・NOT NULL化)は**expand/contract方式**(まず新しい列/形を追加 → コードを新形式に対応させてデプロイ → 十分な期間後に旧列を削除する別のmigrationを出す)を採用し、「新Lambda + 旧schema」の組み合わせでも新Lambdaが動き続けられる状態を常に保つ。このセッションのこれまでのmigration(0013〜0015)はすべてこの原則に従っており(nullable列の追加のみ、既存列の削除・変更なし)、今後もこの方針を維持すること。
+
+### 確認コマンド
+
+```bash
+# DbMigrate Lambdaの実際の関数名を確認
+aws cloudformation describe-stacks --stack-name AiEcPlatform-<env>-Lambdas \
+  --query "Stacks[0].Outputs[?OutputKey=='DbMigrateFunctionName'].OutputValue" --output text
+
+# 手動でmigrationを再実行(deploy.ymlと同じ呼び出し)
+aws lambda invoke --function-name <上記の関数名> --payload '{}' response.json && cat response.json
+
+# CloudFrontのURLを確認
+aws cloudformation describe-stacks --stack-name AiEcPlatform-<env>-CloudFrontApi \
+  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" --output text
+```
 
 ## モノレポ構成
 

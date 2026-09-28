@@ -19,6 +19,7 @@ const enqueueMock = vi.fn().mockResolvedValue(undefined);
 const tryClaimMock = vi.fn().mockResolvedValue(null); // null = fresh claim won, matches IdempotencyStore's own convention
 const getIdempotencyStoreMock = vi.fn((_tenantId: string) => ({ tryClaim: tryClaimMock, complete: vi.fn(), fail: vi.fn() }));
 const verifyWebhookDestinationTokenMock = vi.fn();
+const requireCloudFrontOriginMock = vi.fn((_event: unknown) => null as { statusCode: number; body?: string } | null);
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
@@ -32,6 +33,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   verifyWebhookDestinationToken: (...args: unknown[]) => verifyWebhookDestinationTokenMock(...args),
+  requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
 }));
 
 const computeChallengeResponseMock = vi.fn((..._args: unknown[]) => "computed-hash");
@@ -69,6 +71,16 @@ describe("ebay-webhook handler", () => {
     verifyNotificationSignatureMock.mockReturnValue(true);
     tryClaimMock.mockResolvedValue(null); // fresh claim by default -- most tests want the poll to actually dispatch
     verifyWebhookDestinationTokenMock.mockReturnValue("tenant-x");
+    requireCloudFrontOriginMock.mockReturnValue(null); // allowed by default -- apiEntrypoint "direct" in most tests
+  });
+
+  it("rejects a request requireCloudFrontOrigin flags, before doing anything else", async () => {
+    requireCloudFrontOriginMock.mockReturnValue({ statusCode: 403, body: "Direct access to this API is not permitted" });
+
+    const res = (await handler(makeEvent({ queryStringParameters: { challenge_code: "abc123" } }))) as { statusCode: number };
+
+    expect(res.statusCode).toBe(403);
+    expect(computeChallengeResponseMock).not.toHaveBeenCalled();
   });
 
   it("GET answers the challenge_code with the computed hash", async () => {

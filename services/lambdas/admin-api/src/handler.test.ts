@@ -121,6 +121,7 @@ const getQueueUrlsMock = vi.fn(() => ({
 let fakeDb: unknown;
 const getDbMock = vi.fn(() => fakeDb);
 const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid" });
+const requireCloudFrontOriginMock = vi.fn((_event: unknown) => null as { statusCode: number; body?: string } | null);
 const billingPortalSessionsCreateMock = vi.fn().mockResolvedValue({ url: "https://billing.stripe.example/session" });
 const customersRetrieveMock = vi.fn().mockResolvedValue({ deleted: false, invoice_settings: { default_payment_method: null } });
 const invoicesListMock = vi.fn().mockResolvedValue({ data: [] });
@@ -193,6 +194,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
   signState: (...args: unknown[]) => signStateMock(...args),
   signWebhookDestinationToken: (...args: unknown[]) => signWebhookDestinationTokenMock(...args),
+  requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
 }));
@@ -268,6 +270,15 @@ describe("admin-api handler", () => {
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
+    requireCloudFrontOriginMock.mockReturnValue(null);
+  });
+
+  it("rejects any request requireCloudFrontOrigin flags, before doing anything else (touching the DB, routing, etc.)", async () => {
+    requireCloudFrontOriginMock.mockReturnValue({ statusCode: 403, body: "Direct access to this API is not permitted" });
+
+    const res = await callHandler(makeEvent("GET", "/admin/products"));
+
+    expect(res.statusCode).toBe(403);
   });
 
   it("GET /admin/products returns the product list", async () => {

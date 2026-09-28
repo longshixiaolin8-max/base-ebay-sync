@@ -16,6 +16,7 @@ import {
   pollChannelSales,
   recordAuditLog,
   recordSyncError,
+  requireCloudFrontOrigin,
   verifyWebhookDestinationToken,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
@@ -271,6 +272,9 @@ export const dispatchPoll: SQSHandler = async (event: SQSEvent) => {
 };
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   if (event.rawPath.startsWith(`${PLATFORM_NOTIFICATION_PATH}/`) && event.requestContext.http.method === "POST") {
     return handlePlatformNotification(event);
   }

@@ -1,5 +1,13 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { getAppCredentials, getDb, recordAuditLog, requireEnv, saveOAuthToken, verifyState } from "@ai-ec/lambda-shared";
+import {
+  getAppCredentials,
+  getDb,
+  recordAuditLog,
+  requireCloudFrontOrigin,
+  requireEnv,
+  saveOAuthToken,
+  verifyState,
+} from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 interface BaseAppCredentials {
@@ -13,6 +21,9 @@ function redirectUri(): string {
 
 /** GET /oauth/base/callback?code=...&state=... — exchanges the code and stores the token. */
 export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   const code = event.queryStringParameters?.code;
   const state = event.queryStringParameters?.state;
   if (!code || !state) {

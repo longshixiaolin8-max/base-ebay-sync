@@ -61,6 +61,7 @@ import {
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
+  requireCloudFrontOrigin,
   requireEnv,
   signState,
   signWebhookDestinationToken,
@@ -118,6 +119,9 @@ function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
 }
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const cloudFrontRejection = requireCloudFrontOrigin(event);
+  if (cloudFrontRejection) return cloudFrontRejection;
+
   const db = getDb();
   const method = event.requestContext.http.method;
   const path = event.rawPath;

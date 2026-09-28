@@ -58,5 +58,29 @@ export class GithubOidcStack extends cdk.Stack {
         resources: [`arn:aws:iam::${this.account}:role/cdk-*`],
       }),
     );
+
+    // Round 15 hardening ("DB migrationをdeployに統合"): deploy.yml's own post-deploy
+    // steps (invoking DbMigrate, then the smoke test) call these two APIs directly with
+    // this role's own credentials -- `cdk deploy` above never needed them itself, since it
+    // only ever assumes the cdk-* bootstrap roles for that. Scoped to this app's own
+    // stacks/functions (every environment's, via the shared "AiEcPlatform-" prefix), not a
+    // blanket lambda:*/cloudformation:* grant.
+    //
+    // IMPORTANT: this stack is the one-time, human-run bootstrap (see this file's own top
+    // comment) -- adding this policy in source does NOT reach the live IAM role by itself.
+    // Re-run the same one-time command (`cdk deploy <stackPrefix>-GithubOidc --context
+    // bootstrapOidc=true --context githubRepo=...`) once, locally, with your own AWS
+    // credentials, or every deploy.yml run's new "Run DB migration"/"Post-deploy smoke
+    // test" steps will fail with AccessDenied.
+    this.deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "InvokeDbMigrateAndDescribeStacks",
+        actions: ["lambda:InvokeFunction", "cloudformation:DescribeStacks"],
+        resources: [
+          `arn:aws:lambda:*:${this.account}:function:AiEcPlatform-*`,
+          `arn:aws:cloudformation:*:${this.account}:stack/AiEcPlatform-*/*`,
+        ],
+      }),
+    );
   }
 }

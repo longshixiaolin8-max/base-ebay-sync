@@ -54,3 +54,67 @@ jobs:
             --context alarmEmail=${{ vars.ALARM_EMAIL }} \
             --context githubRepo=${{ github.repository }} \
             --require-approval never
+
+      # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
+      # easy-to-forget post-deploy step (see README's old bootstrap notes) -- a new Lambda
+      # deployed against an un-migrated schema is exactly the "新Lambda + 旧schema共存"
+      # risk this closes. drizzle's own migrator only ever applies pending migrations and
+      # tracks what's already run in its own table, so this is safe to run on every deploy,
+      # including ones with no new migration at all (a no-op that exits cleanly).
+      #
+      # A migration failure here MUST fail this job (`exit 1`, no continue-on-error) --
+      # this is the actual guarantee behind "prodではmigration failure時に明確にdeploy失敗
+      # 扱いにする": CDK's own deploy step above can succeed (new Lambda code + infra is
+      # live) while the schema it expects never actually lands, silently leaving new code
+      # running against an old schema until someone happens to notice.
+      - name: Run DB migration
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          FN_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Lambdas" \
+            --query "Stacks[0].Outputs[?OutputKey=='DbMigrateFunctionName'].OutputValue" \
+            --output text)
+          if [ -z "$FN_NAME" ] || [ "$FN_NAME" = "None" ]; then
+            echo "::error::Could not resolve the DbMigrate Lambda's name from stack outputs."
+            exit 1
+          fi
+          echo "Invoking DbMigrate ($FN_NAME)..."
+          INVOKE_RESULT=$(aws lambda invoke \
+            --function-name "$FN_NAME" \
+            --cli-read-timeout 300 \
+            --payload '{}' \
+            /tmp/db-migrate-response.json)
+          echo "$INVOKE_RESULT"
+          echo "--- DbMigrate response payload ---"
+          cat /tmp/db-migrate-response.json
+          echo ""
+          FUNCTION_ERROR=$(echo "$INVOKE_RESULT" | jq -r '.FunctionError // empty')
+          if [ -n "$FUNCTION_ERROR" ]; then
+            echo "::error::DB migration failed (FunctionError=$FUNCTION_ERROR) -- see response payload above. Failing the deploy."
+            exit 1
+          fi
+          echo "DB migration applied successfully."
+
+      # Confirms the API Gateway route -> Lambda integration this deploy just updated is
+      # actually live end-to-end, not just that CloudFormation reported success. Uses the
+      # eBay webhook's own challenge endpoint (public, side-effect-free, no auth required)
+      # purely as a reachability check -- a 400 (missing challenge_code) proves the request
+      # made it through routing into a warm, responding Lambda; anything else (5xx, a
+      # connection failure) means something is broken post-deploy that CDK's own success
+      # exit code didn't catch.
+      - name: Post-deploy smoke test
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${API_URL}/webhooks/ebay/notifications")
+          echo "GET /webhooks/ebay/notifications (no challenge_code) -> HTTP $STATUS"
+          if [ "$STATUS" != "400" ]; then
+            echo "::error::Smoke test failed: expected HTTP 400, got $STATUS. The API may not be responding correctly post-deploy."
+            exit 1
+          fi
+          echo "Smoke test passed: API is responding."
