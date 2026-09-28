@@ -51,10 +51,28 @@ export const tenants = pgTable("tenants", {
  * -- unlike `idempotency_keys`, this must work before any tenant has been resolved from the
  * event payload.
  */
+/**
+ * Inbox pattern (commercial-features hardening round, item #6): "received a webhook
+ * delivery" and "the business mutation it describes actually completed" are deliberately
+ * NOT the same event here -- status tracks which of those has actually happened, so a
+ * crash between claiming a delivery and finishing its mutation leaves a row this platform
+ * can still retry, rather than one that's silently mistaken for done.
+ *
+ * status: "processing" (claimed, mutation in flight -- also this row's very first state;
+ * there is no separately-persisted "received but not yet processing" state, since nothing
+ * useful happens between claiming a delivery and starting on it) | "completed" (mutation
+ * committed) | "failed" (mutation threw; reclaimable). "received" is reserved for a future
+ * caller that genuinely needs to persist that lighter pre-processing state -- not written
+ * by anything today.
+ */
 export const processedWebhookEvents = pgTable("processed_webhook_events", {
   id: text("id").primaryKey(),
   source: text("source").notNull(),
+  status: text("status").notNull().default("processing"),
+  attempts: integer("attempts").notNull().default(1),
+  lastError: text("last_error"),
   processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 /**

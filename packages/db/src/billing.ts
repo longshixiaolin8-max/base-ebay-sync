@@ -4,6 +4,15 @@ import { tenants } from "./schema.js";
 
 export type TenantStatus = "pending_payment" | "active" | "past_due" | "canceled_grace" | "canceled";
 
+/** Structural subset of Database (mirrors @ai-ec/db's inventory.ts InventoryWriteDb) that a
+ *  Drizzle transaction callback's `tx` handle also satisfies -- lets stripe-webhook run
+ *  these mutations inside its own db.transaction() alongside marking the webhook delivery
+ *  completed, so both commit or roll back together. */
+interface BillingWriteDb {
+  select: Database["select"];
+  update: Database["update"];
+}
+
 interface BillingStatusRow {
   plan: string;
   status: TenantStatus;
@@ -50,13 +59,13 @@ export async function getTenantBillingStatus(db: Database, tenantId: string): Pr
  * tenant already applied is acknowledged (so Stripe stops retrying it) but never allowed to
  * overwrite newer state. Returns whether the update was actually applied.
  */
-async function isStale(db: Database, tenantId: string, eventCreatedAt: Date): Promise<boolean> {
+async function isStale(db: BillingWriteDb, tenantId: string, eventCreatedAt: Date): Promise<boolean> {
   const [row] = await db.select({ lastBillingEventAt: tenants.lastBillingEventAt }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
   return !!row?.lastBillingEventAt && row.lastBillingEventAt.getTime() > eventCreatedAt.getTime();
 }
 
 export async function markTenantActive(
-  db: Database,
+  db: BillingWriteDb,
   tenantId: string,
   stripe: { stripeCustomerId: string; stripeSubscriptionId: string },
   eventCreatedAt: Date,
@@ -75,7 +84,7 @@ export async function markTenantActive(
   return true;
 }
 
-export async function markTenantPastDue(db: Database, tenantId: string, eventCreatedAt: Date): Promise<boolean> {
+export async function markTenantPastDue(db: BillingWriteDb, tenantId: string, eventCreatedAt: Date): Promise<boolean> {
   if (await isStale(db, tenantId, eventCreatedAt)) return false;
   await db.update(tenants).set({ status: "past_due", lastBillingEventAt: eventCreatedAt }).where(eq(tenants.id, tenantId));
   return true;
@@ -88,7 +97,7 @@ export async function markTenantPastDue(db: Database, tenantId: string, eventCre
  * instant, the admin-api billing gate treats it identically to a plain 'canceled' tenant.
  */
 export async function markTenantCanceledWithGrace(
-  db: Database,
+  db: BillingWriteDb,
   tenantId: string,
   eventCreatedAt: Date,
   gracePeriodDays = 30,
@@ -109,7 +118,7 @@ export async function markTenantCanceledWithGrace(
  * platform's own tenant id -- this is the reverse lookup that connects the two.
  */
 export async function findTenantByStripeCustomerId(
-  db: Database,
+  db: BillingWriteDb,
   stripeCustomerId: string,
 ): Promise<{ id: string } | undefined> {
   const [row] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.stripeCustomerId, stripeCustomerId)).limit(1);
