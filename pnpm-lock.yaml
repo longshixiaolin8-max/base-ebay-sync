@@ -320,6 +320,9 @@ importers:
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../../packages/core
       '@ai-ec/db':
         specifier: workspace:*
         version: link:../../../packages/db

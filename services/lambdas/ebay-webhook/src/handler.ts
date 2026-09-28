@@ -3,27 +3,63 @@ import {
   parseSignatureHeader,
   verifyNotificationSignature,
 } from "@ai-ec/adapter-ebay";
+import { buildIdempotencyKey, type ChannelType } from "@ai-ec/core";
 import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import {
   createEbayAdapter,
   deleteOAuthConnectionsByExternalAccount,
+  enqueue,
   getAppCredentials,
   getDb,
+  getIdempotencyStore,
   getQueueUrls,
   pollChannelSales,
   recordAuditLog,
   recordSyncError,
+  verifyWebhookDestinationToken,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
-import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
+import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2, SQSEvent, SQSHandler } from "aws-lambda";
 
 const NOTIFICATION_LOOKBACK_MS = 20 * 60 * 1000;
 const MARKETPLACE_ACCOUNT_DELETION_TOPIC = "MARKETPLACE_ACCOUNT_DELETION";
 const PLATFORM_NOTIFICATION_PATH = "/webhooks/ebay/platform-notifications";
+// A flood of legitimate-looking notifications for the same tenant/channel within this
+// window collapses into at most one actual eBay poll -- the debounce half of round 14's
+// "eBay Platform Notification abuse対策". Reuses the idempotency_keys store as a pure
+// rate-limit mutex: tryClaim never gets complete()'d here, so a claim simply blocks any
+// further claim until it goes stale past this TTL and becomes reclaimable again (see
+// idempotency-store.ts's own fix for exactly this reclaim condition).
+const POLL_DEBOUNCE_SECONDS = 20;
 
 interface EbayNotificationPayload {
   metadata?: { topic?: string };
   notification?: { data?: { username?: string; userId?: string } };
+}
+
+interface PollRequestMessage {
+  tenantId: string;
+  channel: ChannelType;
+}
+
+/**
+ * Debounces and dispatches a "poll this tenant/channel now" request onto
+ * ebayPlatformNotificationPoll rather than calling pollChannelSales inline -- the actual
+ * fix for "HTTP request 1回 = eBay poll 1回" this round targets. A flood of requests within
+ * POLL_DEBOUNCE_SECONDS all lose the claim after the first and are simply dropped (this
+ * function still returns normally -- the caller still acks the notification either way);
+ * only the winner's single enqueue ever reaches SQS, and dispatchPoll below is the only
+ * thing that ever actually calls pollChannelSales.
+ */
+async function triggerCoalescedPoll(tenantId: string, channel: ChannelType): Promise<void> {
+  const idempotencyStore = getIdempotencyStore(tenantId);
+  const key = buildIdempotencyKey(tenantId, ["ebay_notification_poll", channel]);
+  const claim = await idempotencyStore.tryClaim(key, POLL_DEBOUNCE_SECONDS);
+  if (claim) return; // another notification already triggered a poll within the debounce window
+
+  const queues = getQueueUrls();
+  const message: PollRequestMessage = { tenantId, channel };
+  await enqueue(queues.ebayPlatformNotificationPoll, message);
 }
 
 /**
@@ -160,40 +196,83 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
     return handleAccountDeletion(payload);
   }
 
-  const db = getDb();
-  const queues = getQueueUrls();
   // eBay's notification delivery carries no tenant hint at all -- unlike the other pollers,
   // there's no way to derive which tenant this webhook belongs to without a per-tenant
-  // webhook-registration redesign (tracked as a deferred follow-up to the multi-tenant
-  // retrofit). Hardcoded to the one bootstrap tenant, matching the one real registered
-  // eBay webhook destination that exists today.
-  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  // webhook-registration redesign (this is the same limitation round 14's
+  // platform-notifications fix below solves via a per-tenant signed destination token, but
+  // this REST path is a different, already X-EBAY-SIGNATURE-verified delivery mechanism --
+  // extending the same per-tenant redesign here is out of this round's scope). Hardcoded to
+  // the one bootstrap tenant, matching the one real registered eBay webhook destination
+  // that exists today. Routed through triggerCoalescedPoll (not a direct pollChannelSales
+  // call) so a burst of otherwise-legitimate, signature-verified notifications still can't
+  // amplify 1:1 into eBay API calls.
+  await triggerCoalescedPoll(BOOTSTRAP_TENANT_ID, "ebay");
 
   return { statusCode: 204 };
 }
 
 /**
- * POST /webhooks/ebay/platform-notifications — delivery target for the legacy Trading API's
- * Platform Notifications (SetNotificationPreferences), used for the FixedPriceTransaction
- * event. This is a wholly different delivery mechanism from the REST Notification API above
- * (XML/SOAP-flavored body, no X-EBAY-SIGNATURE, no challenge_code) -- but the same "never
- * treat the body as authoritative" stance applies: receipt at this dedicated, unguessable
- * path is itself enough signal to trigger an immediate poll, the same way the REST path's
- * unverified fallback already does. A forged POST here can, at worst, cause one harmless
- * extra poll; the real sale facts still only ever come from listRecentSales().
+ * POST /webhooks/ebay/platform-notifications/{token} — delivery target for the legacy
+ * Trading API's Platform Notifications (SetNotificationPreferences), used for the
+ * FixedPriceTransaction event. This is a wholly different delivery mechanism from the REST
+ * Notification API above (XML/SOAP-flavored body, no X-EBAY-SIGNATURE, no challenge_code) --
+ * so unlike that path, this one has no per-request crypto verification available at all.
+ *
+ * The {token} path segment is this route's own authenticity + tenant-dispatch mechanism
+ * (round 14 hardening): a per-tenant, HMAC-signed token minted once at subscription time
+ * (see admin-api's POST /admin/ebay/platform-notification-setup) and verified here. Still
+ * never treats the body as authoritative sale data -- receipt of a validly-tokened request
+ * is only ever a "go poll this tenant now" signal, debounced and dispatched via
+ * triggerCoalescedPoll so a flood of requests (forged or not) can't amplify into repeated
+ * synchronous eBay API calls; the real sale facts still only ever come from
+ * listRecentSales() via dispatchPoll below.
  */
-async function handlePlatformNotification(): Promise<APIGatewayProxyResultV2> {
+async function handlePlatformNotification(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const token = event.pathParameters?.token;
+  if (!token) return { statusCode: 404 };
+
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapter = createEbayAdapter(creds);
-  const db = getDb();
-  const queues = getQueueUrls();
-  await pollChannelSales(BOOTSTRAP_TENANT_ID, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+  let tenantId: string;
+  try {
+    tenantId = verifyWebhookDestinationToken(creds.clientSecret, token);
+  } catch (err) {
+    console.warn("ebay-webhook: platform-notifications token invalid, ignoring delivery", (err as Error).message);
+    return { statusCode: 403 };
+  }
+
+  await triggerCoalescedPoll(tenantId, "ebay");
   return { statusCode: 200 };
 }
 
+/**
+ * SQS consumer for ebayPlatformNotificationPoll -- the only thing that actually calls
+ * pollChannelSales for a webhook-triggered poll. Deployed as its own Lambda
+ * (EbayPlatformNotificationDispatcher in infra/lib/lambda-stack.ts) from this same file,
+ * off the public webhook's own request path entirely.
+ */
+export const dispatchPoll: SQSHandler = async (event: SQSEvent) => {
+  const db = getDb();
+  const queues = getQueueUrls();
+  const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+  const adapter = createEbayAdapter(creds);
+  const failures: { itemIdentifier: string }[] = [];
+
+  for (const record of event.Records) {
+    try {
+      const { tenantId } = JSON.parse(record.body) as PollRequestMessage;
+      await pollChannelSales(tenantId, adapter, new Date(Date.now() - NOTIFICATION_LOOKBACK_MS), db, queues.inventorySync);
+    } catch (err) {
+      console.error("ebay-webhook dispatchPoll: poll failed, will retry via SQS redelivery", (err as Error).message);
+      failures.push({ itemIdentifier: record.messageId });
+    }
+  }
+
+  return { batchItemFailures: failures };
+};
+
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
-  if (event.rawPath === PLATFORM_NOTIFICATION_PATH && event.requestContext.http.method === "POST") {
-    return handlePlatformNotification();
+  if (event.rawPath.startsWith(`${PLATFORM_NOTIFICATION_PATH}/`) && event.requestContext.http.method === "POST") {
+    return handlePlatformNotification(event);
   }
   if (event.requestContext.http.method === "GET") {
     return handleChallenge(event);

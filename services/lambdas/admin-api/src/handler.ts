@@ -63,6 +63,7 @@ import {
   recordAuditLog,
   requireEnv,
   signState,
+  signWebhookDestinationToken,
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
@@ -674,8 +675,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const body = JSON.parse(event.body ?? "{}") as { alertEmail?: string };
       if (!body.alertEmail) return json(400, { error: "alertEmail_required" });
 
-      const endpoint = process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL;
-      if (!endpoint) return json(500, { error: "EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL_not_configured" });
+      const endpointBase = process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL;
+      if (!endpointBase) return json(500, { error: "EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL_not_configured" });
 
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
@@ -684,6 +685,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
       const userAccessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+
+      // Round 14 hardening ("eBay Platform Notification abuse対策" + "BOOTSTRAP_TENANT_ID
+      //固定もマルチテナント設計上見直してください"): this delivery mechanism has no
+      // per-request signature scheme at all, and its payload carries no tenant hint --
+      // registering a per-tenant signed token in the destination URL itself is what fixes
+      // both. eBay will faithfully re-POST to this exact URL (path segment and all) on
+      // every future notification, so this mints it once here and the token verifies
+      // (never expires -- there's no round trip to bound the age of) for the life of the
+      // subscription.
+      const token = signWebhookDestinationToken(creds.clientSecret, tenantId);
+      const endpoint = `${endpointBase}/${token}`;
 
       await adapter.subscribeToFixedPriceTransactionNotifications(userAccessToken, endpoint, body.alertEmail);
 

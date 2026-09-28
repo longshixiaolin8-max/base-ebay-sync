@@ -78,8 +78,18 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   adminAppUrl: adminHosting.url,
   userPoolArn: auth.userPool.userPoolArn,
   userPoolId: auth.userPool.userPoolId,
-  queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
-  dlqs: { aiGenerate: queues.aiGenerate.dlq, ebaySync: queues.ebaySync.dlq, inventorySync: queues.inventorySync.dlq },
+  queues: {
+    aiGenerate: queues.aiGenerate.queue,
+    ebaySync: queues.ebaySync.queue,
+    inventorySync: queues.inventorySync.queue,
+    ebayPlatformNotificationPoll: queues.ebayPlatformNotificationPoll.queue,
+  },
+  dlqs: {
+    aiGenerate: queues.aiGenerate.dlq,
+    ebaySync: queues.ebaySync.dlq,
+    inventorySync: queues.inventorySync.dlq,
+    ebayPlatformNotificationPoll: queues.ebayPlatformNotificationPoll.dlq,
+  },
   productImagesBucket: storage.productImagesBucket,
 });
 lambdas.addStackDependency(database);
@@ -132,7 +142,7 @@ new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,
   tags,
   config,
-  dlqs: [queues.aiGenerate.dlq, queues.ebaySync.dlq, queues.inventorySync.dlq],
+  dlqs: [queues.aiGenerate.dlq, queues.ebaySync.dlq, queues.inventorySync.dlq, queues.ebayPlatformNotificationPoll.dlq],
   workerFns: [
     lambdas.adminApiFn,
     lambdas.productFetchFn,
@@ -141,5 +151,7 @@ new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
     lambdas.salesPollerFn,
     lambdas.inventorySyncWorkerFn,
     lambdas.inventoryDiffCheckFn,
+    lambdas.tenantOffboardingFn,
+    lambdas.ebayPlatformNotificationDispatcherFn,
   ],
 });

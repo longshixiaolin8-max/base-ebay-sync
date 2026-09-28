@@ -60,6 +60,17 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - `listWorkerEligibleTenants()`(旧`listActiveTenants` — 名前が実装(全テナント返却)と一致していなかったため改名)が`product-fetch`/`sales-poller`/`inventory-diff-check`共通のテナント一覧を返す。除外されるのは`pending_payment`と、offboarding確認済みの`canceled`のみ。
 - **offboarding**: 新設の`tenant-offboarding` Lambda(EventBridge、1時間毎)が`canceled_grace`/`canceled`かつ`marketplaceOffboardedAt`未設定のテナントを対象に、公開中の`channel_listings`を`ChannelAdapter.delistProduct()`で実際にmarketplaceからdelistし、`status: "delisted"`に更新する。**全リスティングのdelistが確認できてから初めて**OAuth接続(`oauth_connections`+Secrets Managerのトークン)を削除し、`tenants.marketplaceOffboardedAt`を設定する。1つでもdelistに失敗したテナントはOAuth revoke/offboarded確定を行わず、次回実行で再試行される(在庫が生きたまま放置されない設計)。
 
+### eBay Platform Notification abuse対策(`POST /webhooks/ebay/platform-notifications`)
+
+このエンドポイントはeBayの旧Trading API向け配信先で、X-EBAY-SIGNATURE等の署名検証手段が一切ない(REST Notification API側の`/webhooks/ebay/notifications`とは別物)。以前は「HTTP POST 1回 = eBay poll 1回」だったため、第三者が大量POSTするとeBay API呼び出し・Lambda・DB・SQSを増幅できた。
+
+- **エンドポイント自体に秘密トークンを埋め込む**: `POST /admin/ebay/platform-notification-setup`が登録時に`signWebhookDestinationToken`(HMAC、このアプリのeBay client secret、有効期限なし)でテナントごとのトークンを発行し、`/webhooks/ebay/platform-notifications/{token}`という形でeBayに登録する。これにより(1)完全に推測可能だった静的パスがなくなり、(2)eBayの通知ペイロード自体にはテナント情報が一切ないという問題も同時に解決する(トークンからtenantIdを復元)。
+- **debounce/coalescing**: `triggerCoalescedPoll`が`idempotency_keys`テーブルを純粋なrate-limitミューテックスとして再利用(`complete()`を呼ばず`tryClaim`のTTLだけを使う)し、同一tenant/channelへの通知は20秒間に1回しか実際のpollを起動しない。実際のpollは`ebayPlatformNotificationPoll` SQSキュー経由で別Lambda(`dispatchPoll`)が行うため、webhook自体のリクエストパス上では同期的なeBay API呼び出しが一切発生しない。
+- **API Gateway throttling**: このルートだけ`5 req/s, burst 10`に制限(他ルートの既定は`50 req/s, burst 100`)。
+- **WAF**: 現時点ではCloudFrontにのみ付与されており、直接のAPI Gatewayエンドポイントには適用されていない(Prompt 15で対応予定)。
+- **既存のeBay Platform Notification購読への影響**: ルートが`{token}`必須になったため、**このデプロイ前に登録された(トークンなしの)購読はeBayからの配信が404になる**。該当テナントで`POST /admin/ebay/platform-notification-setup`を再実行し、新しいトークン付きURLで再登録すること。
+- REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)は今回スコープ外 — 既にBOOTSTRAP_TENANT_ID固定だが、署名検証があるため悪用リスクは低い。debounceのみ同じ仕組みを適用した。
+
 ## モノレポ構成
 
 ```text

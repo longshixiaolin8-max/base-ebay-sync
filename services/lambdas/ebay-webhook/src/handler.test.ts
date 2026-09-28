@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getAppCredentialsMock = vi.fn();
 const pollChannelSalesMock = vi.fn().mockResolvedValue(undefined);
 const getDbMock = vi.fn(() => ({}));
-const getQueueUrlsMock = vi.fn(() => ({ inventorySync: "inventory-sync-url" }));
+const getQueueUrlsMock = vi.fn(() => ({ inventorySync: "inventory-sync-url", ebayPlatformNotificationPoll: "poll-queue-url" }));
 const getApplicationAccessTokenMock = vi.fn().mockResolvedValue("app-token");
 const getNotificationPublicKeyMock = vi.fn();
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
@@ -15,16 +15,23 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
 const deleteOAuthConnectionsByExternalAccountMock = vi.fn().mockResolvedValue([]);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
+const enqueueMock = vi.fn().mockResolvedValue(undefined);
+const tryClaimMock = vi.fn().mockResolvedValue(null); // null = fresh claim won, matches IdempotencyStore's own convention
+const getIdempotencyStoreMock = vi.fn((_tenantId: string) => ({ tryClaim: tryClaimMock, complete: vi.fn(), fail: vi.fn() }));
+const verifyWebhookDestinationTokenMock = vi.fn();
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
+  getIdempotencyStore: (tenantId: string) => getIdempotencyStoreMock(tenantId),
   pollChannelSales: (...args: unknown[]) => pollChannelSalesMock(...args),
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
   deleteOAuthConnectionsByExternalAccount: (...args: unknown[]) => deleteOAuthConnectionsByExternalAccountMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
+  enqueue: (...args: unknown[]) => enqueueMock(...args),
+  verifyWebhookDestinationToken: (...args: unknown[]) => verifyWebhookDestinationTokenMock(...args),
 }));
 
 const computeChallengeResponseMock = vi.fn((..._args: unknown[]) => "computed-hash");
@@ -37,7 +44,7 @@ vi.mock("@ai-ec/adapter-ebay", () => ({
   verifyNotificationSignature: (...args: unknown[]) => verifyNotificationSignatureMock(...args),
 }));
 
-const { handler } = await import("./handler.js");
+const { handler, dispatchPoll } = await import("./handler.js");
 
 function makeEvent(overrides: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
   return {
@@ -54,12 +61,14 @@ describe("ebay-webhook handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     computeChallengeResponseMock.mockReturnValue("computed-hash");
-    getAppCredentialsMock.mockResolvedValue({ webhookVerificationToken: "verify-me" });
+    getAppCredentialsMock.mockResolvedValue({ webhookVerificationToken: "verify-me", clientSecret: "app-client-secret" });
     process.env.EBAY_WEBHOOK_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/notifications";
     deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([]);
     parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
     getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
     verifyNotificationSignatureMock.mockReturnValue(true);
+    tryClaimMock.mockResolvedValue(null); // fresh claim by default -- most tests want the poll to actually dispatch
+    verifyWebhookDestinationTokenMock.mockReturnValue("tenant-x");
   });
 
   it("GET answers the challenge_code with the computed hash", async () => {
@@ -81,7 +90,7 @@ describe("ebay-webhook handler", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("POST with a valid signature triggers a scoped eBay sales poll and returns 204", async () => {
+  it("POST with a valid signature debounces/dispatches a coalesced poll (via SQS, not a direct call) and returns 204", async () => {
     parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
     getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
     verifyNotificationSignatureMock.mockReturnValue(true);
@@ -95,7 +104,10 @@ describe("ebay-webhook handler", () => {
     )) as { statusCode: number };
 
     expect(res.statusCode).toBe(204);
-    expect(pollChannelSalesMock).toHaveBeenCalledTimes(1);
+    // The actual eBay poll no longer happens inline on this request -- only
+    // dispatchPoll (a separate Lambda, tested below) ever calls pollChannelSales.
+    expect(pollChannelSalesMock).not.toHaveBeenCalled();
+    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: expect.any(String), channel: "ebay" });
   });
 
   it("POST with an invalid signature is rejected and does not trigger a poll", async () => {
@@ -173,10 +185,13 @@ describe("ebay-webhook handler", () => {
     expect(deleteOAuthConnectionsByExternalAccountMock).toHaveBeenCalledWith(expect.anything(), "ebay", "u-2");
   });
 
-  it("POST to the platform-notifications path triggers a sales poll and returns 200, regardless of body/signature", async () => {
+  it("POST to the platform-notifications path with a valid per-tenant token dispatches a coalesced poll for that tenant and returns 200, regardless of body", async () => {
+    verifyWebhookDestinationTokenMock.mockReturnValue("tenant-real");
+
     const res = (await handler(
       makeEvent({
-        rawPath: "/webhooks/ebay/platform-notifications",
+        rawPath: "/webhooks/ebay/platform-notifications/signed-token-abc",
+        pathParameters: { token: "signed-token-abc" },
         requestContext: { http: { method: "POST" } } as never,
         headers: {},
         body: "<FixedPriceTransaction>...</FixedPriceTransaction>",
@@ -184,7 +199,105 @@ describe("ebay-webhook handler", () => {
     )) as { statusCode: number };
 
     expect(res.statusCode).toBe(200);
-    expect(pollChannelSalesMock).toHaveBeenCalledTimes(1);
+    expect(verifyWebhookDestinationTokenMock).toHaveBeenCalledWith("app-client-secret", "signed-token-abc");
+    // 正規notificationは迅速にsale pollを起動: the poll is dispatched (enqueued) immediately,
+    // not deferred by anything besides the debounce claim itself.
+    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: "tenant-real", channel: "ebay" });
+    // 偽bodyからinventoryを直接変更しない: the body is never even read for this path -- a
+    // forged/garbage body changes nothing about what happens (still just enqueues a poll
+    // request; pollChannelSales, the only thing that can ever touch inventory, is not
+    // called on this request at all).
+    expect(pollChannelSalesMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 and never dispatches a poll when the platform-notifications token is invalid/forged", async () => {
+    verifyWebhookDestinationTokenMock.mockImplementation(() => {
+      throw new Error("Webhook destination token signature mismatch (possible forged/tampered URL)");
+    });
+
+    const res = (await handler(
+      makeEvent({
+        rawPath: "/webhooks/ebay/platform-notifications/tampered-token",
+        pathParameters: { token: "tampered-token" },
+        requestContext: { http: { method: "POST" } } as never,
+        headers: {},
+        body: "<FixedPriceTransaction>...</FixedPriceTransaction>",
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(403);
+    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(pollChannelSalesMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for the platform-notifications path with no token segment at all", async () => {
+    const res = (await handler(
+      makeEvent({
+        rawPath: "/webhooks/ebay/platform-notifications/",
+        pathParameters: {},
+        requestContext: { http: { method: "POST" } } as never,
+        headers: {},
+        body: "",
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(404);
+    expect(enqueueMock).not.toHaveBeenCalled();
+  });
+
+  it("大量notificationが来てもpollがcoalesceされる: a burst of notifications for the same tenant only enqueues one poll", async () => {
+    verifyWebhookDestinationTokenMock.mockReturnValue("tenant-burst");
+    // First request wins the debounce claim (tryClaim -> null); every subsequent one within
+    // the window finds an existing, still-live claim and is simply dropped.
+    tryClaimMock.mockResolvedValueOnce(null).mockResolvedValue({ key: "k", status: "in_progress", result: null });
+
+    const event = makeEvent({
+      rawPath: "/webhooks/ebay/platform-notifications/tok",
+      pathParameters: { token: "tok" },
+      requestContext: { http: { method: "POST" } } as never,
+      headers: {},
+      body: "<FixedPriceTransaction>...</FixedPriceTransaction>",
+    });
+
+    const responses = await Promise.all(Array.from({ length: 20 }, () => handler(event)));
+
+    // Every one of the 20 requests still gets acked promptly -- coalescing debounces the
+    // *poll*, never the HTTP response eBay is waiting on.
+    for (const res of responses) {
+      expect((res as { statusCode: number }).statusCode).toBe(200);
+    }
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(pollChannelSalesMock).not.toHaveBeenCalled(); // still never called inline, regardless of volume
+  });
+
+  describe("dispatchPoll (the SQS consumer that actually calls pollChannelSales)", () => {
+    function sqsEvent(bodies: unknown[]) {
+      return {
+        Records: bodies.map((body, i) => ({ messageId: `msg-${i}`, body: JSON.stringify(body) })),
+      } as never;
+    }
+
+    it("polls exactly the tenant/channel named in the message", async () => {
+      const result = await dispatchPoll(sqsEvent([{ tenantId: "tenant-a", channel: "ebay" }]), {} as never, {} as never);
+
+      expect(pollChannelSalesMock).toHaveBeenCalledTimes(1);
+      const [tenantIdArg] = pollChannelSalesMock.mock.calls[0]!;
+      expect(tenantIdArg).toBe("tenant-a");
+      expect(result).toEqual({ batchItemFailures: [] });
+    });
+
+    it("processes every message in the batch independently -- one failure doesn't block the rest", async () => {
+      pollChannelSalesMock.mockRejectedValueOnce(new Error("eBay API 500")).mockResolvedValueOnce(undefined);
+
+      const result = await dispatchPoll(
+        sqsEvent([{ tenantId: "tenant-fail", channel: "ebay" }, { tenantId: "tenant-ok", channel: "ebay" }]),
+        {} as never,
+        {} as never,
+      );
+
+      expect(pollChannelSalesMock).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: "msg-0" }] });
+    });
   });
 
   it("acknowledges a MARKETPLACE_ACCOUNT_DELETION notification with no userId without purging anything", async () => {

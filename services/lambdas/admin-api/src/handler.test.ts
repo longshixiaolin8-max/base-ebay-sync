@@ -177,6 +177,7 @@ const getDlqUrlsMock = vi.fn(() => {
 });
 const getApproximateMessageCountMock = vi.fn().mockResolvedValue(0);
 const signStateMock = vi.fn().mockReturnValue("signed-state");
+const signWebhookDestinationTokenMock = vi.fn().mockReturnValue("webhook-token");
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
@@ -191,6 +192,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getDlqUrls: () => getDlqUrlsMock(),
   getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
   signState: (...args: unknown[]) => signStateMock(...args),
+  signWebhookDestinationToken: (...args: unknown[]) => signWebhookDestinationTokenMock(...args),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
 }));
@@ -463,18 +465,42 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(409);
   });
 
-  it("POST /admin/ebay/platform-notification-setup subscribes to FixedPriceTransaction", async () => {
+  it("POST /admin/ebay/platform-notification-setup subscribes to FixedPriceTransaction at a per-tenant, signed-token endpoint URL", async () => {
     process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/platform-notifications";
+    signWebhookDestinationTokenMock.mockClear().mockReturnValue("webhook-token");
+    getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", clientSecret: "ebay-csecret", ruName: "ru" });
     fakeDb = createFakeDb([]);
     const res = await callHandler(
       makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "ops@example.com" }),
     );
     expect(res.statusCode).toBe(201);
+    // 大量notification abuse対策 (round 14): the registered destination is no longer the
+    // bare, fully-guessable static path -- a per-tenant HMAC token is appended, minted from
+    // this tenant's own authenticated session, never from client input.
+    expect(signWebhookDestinationTokenMock).toHaveBeenCalledWith("ebay-csecret", TENANT_A);
     expect(subscribeToFixedPriceTransactionNotificationsMock).toHaveBeenCalledWith(
       "token",
-      "https://api.example.com/webhooks/ebay/platform-notifications",
+      "https://api.example.com/webhooks/ebay/platform-notifications/webhook-token",
       "ops@example.com",
     );
+  });
+
+  it("POST /admin/ebay/platform-notification-setup mints a different token for a different tenant", async () => {
+    process.env.EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/platform-notifications";
+    subscribeToFixedPriceTransactionNotificationsMock.mockClear();
+    signWebhookDestinationTokenMock.mockClear();
+    signWebhookDestinationTokenMock.mockReturnValueOnce("token-for-a").mockReturnValueOnce("token-for-b");
+    fakeDb = createFakeDb([]);
+
+    await callHandler(makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "a@example.com" }));
+    await callHandler(
+      makeEvent("POST", "/admin/ebay/platform-notification-setup", {}, { alertEmail: "b@example.com" }, { email: "b@example.com", "custom:tenant_id": "tenant-b" }),
+    );
+
+    const urls = subscribeToFixedPriceTransactionNotificationsMock.mock.calls.map((c) => c[1] as string);
+    expect(urls[0]).toContain("token-for-a");
+    expect(urls[1]).toContain("token-for-b");
+    expect(urls[0]).not.toBe(urls[1]);
   });
 
   it("POST /admin/ebay/platform-notification-setup returns 400 without an alertEmail", async () => {

@@ -25,7 +25,12 @@ vi.mock("@ai-ec/lambda-shared", () => ({
 
 const { upsertProduct, dispatchPendingOutboxJobs } = await import("./handler.js");
 
-const queues = { aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" };
+const queues = {
+  aiGenerate: "ai-generate-url",
+  ebaySync: "ebay-sync-url",
+  inventorySync: "inv-url",
+  ebayPlatformNotificationPoll: "poll-url",
+};
 const TENANT_ID = "tenant-a";
 
 const item: ExternalProduct = {

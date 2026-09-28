@@ -96,15 +96,41 @@ export class ApiStack extends cdk.Stack {
     addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     // Delivery target for the legacy Trading API's Platform Notifications (FixedPriceTransaction),
-    // a wholly different mechanism from the REST Notification API routes above -- see
-    // ebay-webhook's handlePlatformNotification for why no signature scheme applies here.
+    // a wholly different mechanism from the REST Notification API routes above -- no
+    // X-EBAY-SIGNATURE or other per-request crypto verification exists for this delivery
+    // mechanism. Round 14 hardening ("eBay Platform Notification abuse対策"): the {token}
+    // path segment is this route's own authenticity check instead -- a per-tenant, signed
+    // (HMAC, this app's eBay client secret) token minted once at subscription time (see
+    // admin-api's POST /admin/ebay/platform-notification-setup), verified inside
+    // handlePlatformNotification. A guess against the old fully-static path could reach a
+    // real tenant's poll; a guess against this one can't forge a valid signature.
     addRoute(
       "EbayPlatformNotify",
       apigwv2.HttpMethod.POST,
-      "/webhooks/ebay/platform-notifications",
+      "/webhooks/ebay/platform-notifications/{token}",
       ebayWebhookIntegration,
       false,
     );
+    // Tighter than ApiCoreStack's blanket default-route throttle (50 rps/100 burst, sized
+    // for this whole small internal API): legitimate traffic here is one eBay notification
+    // per real sale event on one connected account, nowhere near this. A real abuse flood
+    // still amplifies into this route's own SQS queue depth rather than synchronous eBay
+    // API calls (see triggerCoalescedPoll), but capping requests/sec here too means a flood
+    // can't even burn through this API's shared default-route budget and start 429-ing
+    // every other tenant's legitimate traffic on unrelated routes.
+    // Reaches into ApiCoreStack's CfnStage construct (the same one whose
+    // defaultRouteSettings ApiCoreStack itself sets) -- this property actually lands in
+    // ApiCoreStack's own synthesized template regardless of which stack's file the mutation
+    // is written in, same as any other cross-stack construct reference. Safe here because
+    // ApiStack already depends on ApiCoreStack (see infra/bin/infra.ts's
+    // api.addStackDependency(apiCore)).
+    const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
+    if (cfnStage) {
+      cfnStage.routeSettings = {
+        ...cfnStage.routeSettings,
+        "POST /webhooks/ebay/platform-notifications/{token}": { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
+      };
+    }
 
     // Public: this is what creates a Cognito session in the first place, so no session can
     // exist yet. Gated instead by a shared invite code checked inside the handler.

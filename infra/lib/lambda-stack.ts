@@ -41,11 +41,13 @@ export interface LambdaStackProps extends cdk.StackProps {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
     inventorySync: sqs.Queue;
+    ebayPlatformNotificationPoll: sqs.Queue;
   };
   dlqs: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
     inventorySync: sqs.Queue;
+    ebayPlatformNotificationPoll: sqs.Queue;
   };
   productImagesBucket: s3.Bucket;
 }
@@ -63,6 +65,7 @@ export class LambdaStack extends cdk.Stack {
   readonly oauthBaseCallbackFn: nodejs.NodejsFunction;
   readonly oauthEbayCallbackFn: nodejs.NodejsFunction;
   readonly ebayWebhookFn: nodejs.NodejsFunction;
+  readonly ebayPlatformNotificationDispatcherFn: nodejs.NodejsFunction;
   readonly productFetchFn: nodejs.NodejsFunction;
   readonly aiGenerateWorkerFn: nodejs.NodejsFunction;
   readonly ebaySyncWorkerFn: nodejs.NodejsFunction;
@@ -85,6 +88,7 @@ export class LambdaStack extends cdk.Stack {
       AI_GENERATE_QUEUE_URL: props.queues.aiGenerate.queueUrl,
       EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
       INVENTORY_SYNC_QUEUE_URL: props.queues.inventorySync.queueUrl,
+      EBAY_PLATFORM_NOTIFICATION_POLL_QUEUE_URL: props.queues.ebayPlatformNotificationPoll.queueUrl,
       AI_PROVIDER: props.config.aiProvider,
       // Read by @ai-ec/lambda-shared's secrets.ts to build env-scoped Secrets Manager
       // names (see secrets-stack.ts) so dev and prod, run side by side in the same
@@ -162,6 +166,27 @@ export class LambdaStack extends cdk.Stack {
     );
     props.appCredentialSecrets.ebay.grantRead(this.ebayWebhookFn);
     props.queues.inventorySync.grantSendMessages(this.ebayWebhookFn);
+    props.queues.ebayPlatformNotificationPoll.grantSendMessages(this.ebayWebhookFn);
+
+    // Round 14 hardening ("eBay Platform Notification abuse対策"): the actual eBay poll a
+    // platform-notification triggers now runs here, off the public webhook's own request
+    // path -- see ebay-webhook's own handlePlatformNotification/triggerCoalescedPoll
+    // comments for why (a flood of HTTP requests can amplify at most into this queue's
+    // depth, never into synchronous eBay API calls). Deployed from the same handler.ts as
+    // EbayWebhook above, just a different exported entrypoint -- same pattern as
+    // oauth-{base,ebay}'s authorize/callback split before it.
+    this.ebayPlatformNotificationDispatcherFn = makeFn(
+      "EbayPlatformNotificationDispatcher",
+      "services/lambdas/ebay-webhook/src/handler.ts",
+      "dispatchPoll",
+      {},
+      cdk.Duration.minutes(2),
+    );
+    props.appCredentialSecrets.ebay.grantRead(this.ebayPlatformNotificationDispatcherFn);
+    props.queues.inventorySync.grantSendMessages(this.ebayPlatformNotificationDispatcherFn);
+    this.ebayPlatformNotificationDispatcherFn.addEventSource(
+      new SqsEventSource(props.queues.ebayPlatformNotificationPoll, { batchSize: 5, reportBatchItemFailures: true }),
+    );
 
     // --- Product / AI / eBay sync pipeline ---
     this.productFetchFn = makeFn(

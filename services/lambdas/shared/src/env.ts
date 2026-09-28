@@ -18,6 +18,7 @@ export function getQueueUrls() {
     aiGenerate: requireEnv("AI_GENERATE_QUEUE_URL"),
     ebaySync: requireEnv("EBAY_SYNC_QUEUE_URL"),
     inventorySync: requireEnv("INVENTORY_SYNC_QUEUE_URL"),
+    ebayPlatformNotificationPoll: requireEnv("EBAY_PLATFORM_NOTIFICATION_POLL_QUEUE_URL"),
   };
 }
 
