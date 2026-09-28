@@ -126,9 +126,20 @@ export class ApiStack extends cdk.Stack {
     // api.addStackDependency(apiCore)).
     const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
     if (cfnStage) {
+      // Confirmed live (a failed prod deploy): unlike defaultRouteSettings (a plain typed
+      // property CDK's own mapper translates camelCase -> PascalCase for), routeSettings is
+      // a free-form { [routeKey]: RouteSettingsProperty } map that CDK passes through to
+      // CloudFormation without translating each value's keys -- the real API Gateway
+      // resource handler only accepts the PascalCase CloudFormation property names here
+      // ("Unrecognized field \"throttlingBurstLimit\"... 5 known properties:
+      // \"ThrottlingBurstLimit\", \"ThrottlingRateLimit\", ..."). Cast past the (misleadingly
+      // camelCase-typed) interface to use the names CloudFormation actually expects.
       cfnStage.routeSettings = {
         ...cfnStage.routeSettings,
-        "POST /webhooks/ebay/platform-notifications/{token}": { throttlingRateLimit: 5, throttlingBurstLimit: 10 },
+        "POST /webhooks/ebay/platform-notifications/{token}": {
+          ThrottlingRateLimit: 5,
+          ThrottlingBurstLimit: 10,
+        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
       };
     }
 
