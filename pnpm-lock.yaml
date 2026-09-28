@@ -583,6 +583,37 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@20.19.43)
 
+  services/lambdas/tenant-offboarding:
+    dependencies:
+      '@ai-ec/adapter-base':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/base
+      '@ai-ec/adapter-ebay':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/ebay
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../../packages/core
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.36.1
+        version: 0.36.4(@aws-sdk/client-rds-data@3.1120.0)(@types/react@18.3.31)(react@18.3.1)
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
 packages:
 
   '@aws-amplify/analytics@7.1.0':

@@ -151,6 +151,19 @@ export interface DeletedOAuthConnection {
   secretArn: string;
 }
 
+/** Shared by both delete-connections functions below: best-effort removes each row's
+ *  Secrets Manager secret, tolerating one that's already gone (a retried offboarding pass,
+ *  or a connection whose secret was somehow already cleaned up). */
+async function deleteSecretsFor(rows: { secretArn: string }[]): Promise<void> {
+  for (const row of rows) {
+    try {
+      await secretsClient.send(new DeleteSecretCommand({ SecretId: row.secretArn, ForceDeleteWithoutRecovery: true }));
+    } catch (err) {
+      if (!(err instanceof ResourceNotFoundException)) throw err;
+    }
+  }
+}
+
 /**
  * Marketplace Account Deletion compliance (eBay's Platform Notifications requirement for
  * every production keyset): permanently removes every oauth_connections row for a given
@@ -169,14 +182,26 @@ export async function deleteOAuthConnectionsByExternalAccount(
     .where(and(eq(oauthConnections.channel, channel), eq(oauthConnections.externalAccountId, externalAccountId)))
     .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
 
-  for (const row of rows) {
-    try {
-      await secretsClient.send(new DeleteSecretCommand({ SecretId: row.secretArn, ForceDeleteWithoutRecovery: true }));
-    } catch (err) {
-      if (!(err instanceof ResourceNotFoundException)) throw err;
-    }
-  }
+  await deleteSecretsFor(rows);
+  return rows;
+}
 
+/**
+ * Tenant-initiated OAuth revoke (tenant-offboarding's final step, once every one of that
+ * tenant's published listings on `channel` has been confirmed delisted): removes this
+ * tenant's own oauth_connections row(s) for `channel` and their Secrets Manager secrets.
+ * Deliberately scoped by tenantId, unlike deleteOAuthConnectionsByExternalAccount above --
+ * that function's whole point is reacting to an external party naming an account with no
+ * tenant context at all, which would be the wrong (too broad) tool for revoking one
+ * specific tenant's own connection.
+ */
+export async function deleteOAuthConnectionsForTenant(db: Database, tenantId: string, channel: string): Promise<DeletedOAuthConnection[]> {
+  const rows = await db
+    .delete(oauthConnections)
+    .where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)))
+    .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
+
+  await deleteSecretsFor(rows);
   return rows;
 }
 

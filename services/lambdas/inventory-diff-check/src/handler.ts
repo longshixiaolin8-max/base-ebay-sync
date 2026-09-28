@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { ChannelAdapter, ChannelType } from "@ai-ec/core";
-import { calculateChannelAvailableQuantity, channelListings, inventoryMaster, listActiveTenants, productMaster } from "@ai-ec/db";
+import { calculateChannelAvailableQuantity, channelListings, inventoryMaster, listWorkerEligibleTenants, productMaster } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -21,7 +21,7 @@ import { and, eq } from "drizzle-orm";
  */
 export async function handler(): Promise<void> {
   const db = getDb();
-  const tenants = await listActiveTenants(db);
+  const tenants = await listWorkerEligibleTenants(db);
 
   const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
   const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");

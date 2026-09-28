@@ -26,13 +26,23 @@ vi.mock("@aws-sdk/client-secrets-manager", () => ({
   ResourceNotFoundException: class ResourceNotFoundException extends Error {},
 }));
 
-const { saveOAuthToken } = await import("./secrets.js");
+const { deleteOAuthConnectionsByExternalAccount, deleteOAuthConnectionsForTenant, saveOAuthToken } = await import("./secrets.js");
 
 function fakeDb() {
   return {
     insert: () => ({
       values: () => ({
         onConflictDoUpdate: async () => undefined,
+      }),
+    }),
+  } as never;
+}
+
+function fakeDeleteDb(returningRows: Array<{ tenantId: string; secretArn: string }>) {
+  return {
+    delete: () => ({
+      where: () => ({
+        returning: async () => returningRows,
       }),
     }),
   } as never;
@@ -106,5 +116,67 @@ describe("saveOAuthToken's secret naming", () => {
     expect(sendMock).toHaveBeenCalledTimes(2);
     const createCommand = sendMock.mock.calls[1]![0] as FakeCommand;
     expect(createCommand.input.Name).toBe("ai-ec-platform/prod/oauth/tenant-a/ebay/12345");
+  });
+});
+
+describe("deleteOAuthConnectionsForTenant", () => {
+  beforeEach(() => {
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({});
+  });
+
+  it("deletes the Secrets Manager secret for each deleted connection row and returns them", async () => {
+    const rows = [{ tenantId: "tenant-a", secretArn: "arn:aws:secretsmanager:us-east-2:123456789012:secret:s1" }];
+    const db = fakeDeleteDb(rows);
+
+    const result = await deleteOAuthConnectionsForTenant(db, "tenant-a", "ebay");
+
+    expect(result).toEqual(rows);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const command = sendMock.mock.calls[0]![0] as FakeCommand;
+    expect(command.input.SecretId).toBe(rows[0]!.secretArn);
+    expect(command.input.ForceDeleteWithoutRecovery).toBe(true);
+  });
+
+  it("tolerates a secret that's already gone (a retried offboarding pass) instead of throwing", async () => {
+    const { ResourceNotFoundException } = await import("@aws-sdk/client-secrets-manager");
+    const MockedResourceNotFoundException = ResourceNotFoundException as unknown as new (message: string) => Error;
+    sendMock.mockImplementationOnce(async () => {
+      throw new MockedResourceNotFoundException("not found");
+    });
+    const db = fakeDeleteDb([{ tenantId: "tenant-a", secretArn: "arn:...:s1" }]);
+
+    await expect(deleteOAuthConnectionsForTenant(db, "tenant-a", "ebay")).resolves.toEqual([
+      { tenantId: "tenant-a", secretArn: "arn:...:s1" },
+    ]);
+  });
+
+  it("is a no-op when the tenant has no connection for that channel", async () => {
+    const db = fakeDeleteDb([]);
+
+    const result = await deleteOAuthConnectionsForTenant(db, "tenant-a", "ebay");
+
+    expect(result).toEqual([]);
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("deleteOAuthConnectionsByExternalAccount (regression: shared secret-deletion helper still applies here too)", () => {
+  beforeEach(() => {
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({});
+  });
+
+  it("deletes every connected tenant's secret for the given external account", async () => {
+    const rows = [
+      { tenantId: "tenant-a", secretArn: "arn:...:a" },
+      { tenantId: "tenant-b", secretArn: "arn:...:b" },
+    ];
+    const db = fakeDeleteDb(rows);
+
+    const result = await deleteOAuthConnectionsByExternalAccount(db, "ebay", "ebay-user-123");
+
+    expect(result).toEqual(rows);
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,5 +1,5 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { isChannelIsolated, listActiveTenants } from "@ai-ec/db";
+import { isChannelIsolated, listWorkerEligibleTenants } from "@ai-ec/db";
 import {
   createEbayAdapter,
   emitChannelIsolatedMetric,
@@ -47,7 +47,7 @@ export async function handler(): Promise<void> {
 
   for (;;) {
     const since = new Date(Date.now() - 5 * 60 * 1000); // 5 min lookback vs. a ~15s pass interval
-    const tenants = await listActiveTenants(db);
+    const tenants = await listWorkerEligibleTenants(db);
 
     for (const tenant of tenants) {
       await pollChannelIfHealthy(db, tenant.id, "base", async () => {

@@ -48,6 +48,18 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - **冪等性/二重販売対策**: `packages/core/src/idempotency.ts`(DB上の一意キーによるクレーム)+ `packages/db/src/inventory.ts` の`applySale`(在庫テーブルの`version`列によるCompare-And-Swap)の二重の仕組み。
 - **OAuthトークン**: DBには平文保存せず、Secrets Managerのシークレットへのポインタ(ARN)のみを保存(`oauth_connections`テーブル)。
 
+### テナントライフサイクルとscheduled worker(解約済みテナントの扱い)
+
+`tenants.status`(`pending_payment` / `active` / `past_due` / `canceled_grace` / `canceled`)は課金状態そのものであり、「scheduled workerが何をしてよいか」とは別の軸として扱う。理由: 支払いが止まった瞬間に同期を止めると、まだ生きているeBay/BASEの出品在庫が更新されなくなり、在庫切れなのに売れ続ける(oversell)実害が起きるため。
+
+- `packages/db/src/tenants.ts`の`tenantSyncCapabilities(status, marketplaceOffboardedAt)`が実際の権限を決める:
+  - `active` → 通常同期 + 新規商品のonboarding(AI生成含む)を許可。
+  - `past_due` / `canceled_grace` → **既存**の出品の在庫同期は継続(oversell防止)、新規onboardingのみ禁止。
+  - `canceled` → `marketplaceOffboardedAt`が未設定の間は`past_due`と同じ(offboarding完了を待つ)。設定済みなら何もしない。
+  - `pending_payment` → 何もしない(一度も課金が有効になっていない)。
+- `listWorkerEligibleTenants()`(旧`listActiveTenants` — 名前が実装(全テナント返却)と一致していなかったため改名)が`product-fetch`/`sales-poller`/`inventory-diff-check`共通のテナント一覧を返す。除外されるのは`pending_payment`と、offboarding確認済みの`canceled`のみ。
+- **offboarding**: 新設の`tenant-offboarding` Lambda(EventBridge、1時間毎)が`canceled_grace`/`canceled`かつ`marketplaceOffboardedAt`未設定のテナントを対象に、公開中の`channel_listings`を`ChannelAdapter.delistProduct()`で実際にmarketplaceからdelistし、`status: "delisted"`に更新する。**全リスティングのdelistが確認できてから初めて**OAuth接続(`oauth_connections`+Secrets Managerのトークン)を削除し、`tenants.marketplaceOffboardedAt`を設定する。1つでもdelistに失敗したテナントはOAuth revoke/offboarded確定を行わず、次回実行で再試行される(在庫が生きたまま放置されない設計)。
+
 ## モノレポ構成
 
 ```text
@@ -67,6 +79,7 @@ services/lambdas/
   sales-poller/     BASE/eBay売却検知(EventBridge)
   inventory-sync-worker/ 在庫同期・二重販売対策(SQS)
   inventory-diff-check/  在庫差分チェック(EventBridge、日次)
+  tenant-offboarding/    解約テナントのmarketplace delist + OAuth revoke(EventBridge、1時間毎)
   admin-api/        管理画面向けAPI(API Gateway)
 infra/              AWS CDK(TypeScript)。全AWSリソース定義
 apps/admin/         Next.js管理画面(Amplify Hosting)

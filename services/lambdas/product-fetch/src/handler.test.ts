@@ -215,7 +215,7 @@ describe("upsertProduct", () => {
     const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash } });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, TENANT_ID, "existing-id", item.quantity, item.updatedAt);
   });
@@ -223,7 +223,7 @@ describe("upsertProduct", () => {
   it("does not attempt stock reconciliation for a brand-new product (nothing to reconcile against yet)", async () => {
     const db = createFakeDb({ existingProduct: null });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(applyBaseStockReportMock).not.toHaveBeenCalled();
   });
@@ -232,7 +232,7 @@ describe("upsertProduct", () => {
     const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     // The product-fetch DB write and the SQS enqueue are no longer the same operation --
     // upsertProduct only ever commits the outbox row; dispatchPendingOutboxJobs is what
@@ -257,7 +257,7 @@ describe("upsertProduct", () => {
     const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash }, jobsStore });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(0);
   });
@@ -266,7 +266,7 @@ describe("upsertProduct", () => {
     const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: null, jobsStore });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(0);
   });
@@ -279,7 +279,7 @@ describe("upsertProduct", () => {
       jobsStore,
     });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(0);
   });
@@ -292,7 +292,7 @@ describe("upsertProduct", () => {
       jobsStore,
     });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(enqueueMock).not.toHaveBeenCalled();
     expect((db as unknown as { getProductUpdateCalls: () => unknown[] }).getProductUpdateCalls()).toHaveLength(1);
@@ -311,8 +311,8 @@ describe("upsertProduct", () => {
     const dbA = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: { status: "published" }, jobsStore });
     const dbB = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: { status: "published" }, jobsStore });
 
-    await upsertProduct(dbA, TENANT_ID, item);
-    await upsertProduct(dbB, TENANT_ID, item);
+    await upsertProduct(dbA, TENANT_ID, item, true);
+    await upsertProduct(dbB, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(1); // the second insert's idempotencyKey conflicts with the first's
   });
@@ -326,7 +326,7 @@ describe("upsertProduct", () => {
       throwAfterOutboxInsert: true,
     });
 
-    await expect(upsertProduct(db, TENANT_ID, item)).rejects.toThrow("simulated mid-transaction failure");
+    await expect(upsertProduct(db, TENANT_ID, item, true)).rejects.toThrow("simulated mid-transaction failure");
 
     expect(jobsStore).toHaveLength(0); // never committed
     expect((db as unknown as { getProductRow: () => FakeProductRow | null }).getProductRow()).toMatchObject({ contentHash: "stale-hash" }); // update rolled back
@@ -337,7 +337,7 @@ describe("upsertProduct", () => {
     const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(0);
     expect(recordSyncErrorMock).toHaveBeenCalledWith(
@@ -351,7 +351,7 @@ describe("upsertProduct", () => {
     const jobsStore: FakeJobRow[] = [];
     const db = createFakeDb({ existingProduct: null, jobsStore });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(1);
     expect(recordSyncErrorMock).not.toHaveBeenCalled();
@@ -362,11 +362,35 @@ describe("upsertProduct", () => {
     const db = createFakeDb({ existingProduct: null });
     const transactionSpy = vi.spyOn(db as unknown as { transaction: (...a: unknown[]) => unknown }, "transaction");
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
 
     expect(transactionSpy).toHaveBeenCalledTimes(1);
     const [txArg] = countProductsMock.mock.calls.at(-1)!;
     expect(txArg).not.toBe(db);
+  });
+
+  it("canceledで新規syncなし: does not onboard a brand-new product when the tenant isn't allowed to (past_due/canceled_grace/canceled-not-yet-offboarded)", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
+    const transactionSpy = vi.spyOn(db as unknown as { transaction: (...a: unknown[]) => unknown }, "transaction");
+
+    await upsertProduct(db, TENANT_ID, item, false);
+
+    expect(jobsStore).toHaveLength(0);
+    expect(transactionSpy).not.toHaveBeenCalled(); // never even attempts the quota-check/insert
+    expect(countProductsMock).not.toHaveBeenCalled();
+    expect(recordSyncErrorMock).not.toHaveBeenCalled(); // silently skipped, not treated as an error
+  });
+
+  it("still reconciles stock and syncs an existing product's changes to eBay even when the tenant may not onboard NEW products", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({ existingProduct: { id: "existing-id", contentHash: "stale-hash" }, ebayListing: { status: "published" }, jobsStore });
+
+    await upsertProduct(db, TENANT_ID, item, false);
+
+    expect(applyBaseStockReportMock).toHaveBeenCalledWith(db, TENANT_ID, "existing-id", item.quantity, item.updatedAt);
+    expect(jobsStore).toHaveLength(1);
+    expect(jobsStore[0]).toMatchObject({ type: "ebay_update", status: "pending" });
   });
 });
 
@@ -449,7 +473,7 @@ describe("dispatchPendingOutboxJobs", () => {
       jobsStore,
     });
 
-    await upsertProduct(db, TENANT_ID, item);
+    await upsertProduct(db, TENANT_ID, item, true);
     expect(jobsStore).toHaveLength(1);
     const productRowAfterCommit = { ...(db as unknown as { getProductRow: () => FakeProductRow | null }).getProductRow() };
 

@@ -71,6 +71,7 @@ export class LambdaStack extends cdk.Stack {
   readonly salesPollerFn: nodejs.NodejsFunction;
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
+  readonly tenantOffboardingFn: nodejs.NodejsFunction;
   readonly dlqRedriveFn: nodejs.NodejsFunction;
   readonly signupHandlerFn: nodejs.NodejsFunction;
   readonly stripeWebhookFn: nodejs.NodejsFunction;
@@ -94,7 +95,20 @@ export class LambdaStack extends cdk.Stack {
     };
 
     const oauthTokenSecretsPolicy = new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret"],
+      // DeleteSecret is needed by tenant-offboarding's own OAuth-revoke step (see
+      // deleteOAuthConnectionsForTenant) and by ebay-webhook's Marketplace Account
+      // Deletion handler (deleteOAuthConnectionsByExternalAccount) -- both call
+      // DeleteSecretCommand against a token secret under this same prefix. Granted on the
+      // same shared, already-broad (every makeFn'd lambda gets read+write on every tenant's
+      // OAuth token secret) statement rather than a narrower per-lambda one, matching this
+      // policy's existing precedent rather than introducing a new grant shape for it.
+      actions: [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:DeleteSecret",
+      ],
       resources: [props.oauthTokenSecretArnPattern],
     });
 
@@ -252,6 +266,26 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
+    });
+
+    // Tenant lifecycle (round 11 hardening, "解約済みテナントのworker動作を修正"): delists a
+    // canceled/canceling tenant's still-published listings on both marketplaces, then
+    // revokes this platform's own OAuth connections for it once every one is confirmed
+    // delisted. Runs independently of, and less often than, the routine sync workers above
+    // -- offboarding has no latency requirement, and listWorkerEligibleTenants already keeps
+    // a canceling tenant's *existing* listings safely synced in the meantime.
+    this.tenantOffboardingFn = makeFn(
+      "TenantOffboarding",
+      "services/lambdas/tenant-offboarding/src/handler.ts",
+      "handler",
+      {},
+      cdk.Duration.minutes(5),
+    );
+    props.appCredentialSecrets.base.grantRead(this.tenantOffboardingFn);
+    props.appCredentialSecrets.ebay.grantRead(this.tenantOffboardingFn);
+    new events.Rule(this, "TenantOffboardingSchedule", {
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
     });
 
     // --- Automatic recovery after API failures (item #4) ---

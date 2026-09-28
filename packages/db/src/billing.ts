@@ -114,6 +114,17 @@ export async function markTenantCanceledWithGrace(
 }
 
 /**
+ * Records that tenant-offboarding has confirmed this tenant's marketplace presence is
+ * safely wound down (every published channel_listing delisted, OAuth connections revoked).
+ * Never sets or checks `status` itself -- a tenant can stay 'canceled' or 'canceled_grace'
+ * forever; this only ever moves listWorkerEligibleTenants' judgment of whether it's finally
+ * safe to stop scheduling any worker for it.
+ */
+export async function markTenantMarketplaceOffboarded(db: Database, tenantId: string, offboardedAt = new Date()): Promise<void> {
+  await db.update(tenants).set({ marketplaceOffboardedAt: offboardedAt }).where(eq(tenants.id, tenantId));
+}
+
+/**
  * The Stripe webhook only ever carries a Stripe customer/subscription id, never this
  * platform's own tenant id -- this is the reverse lookup that connects the two.
  */

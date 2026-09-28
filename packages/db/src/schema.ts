@@ -28,6 +28,15 @@ export const tenants = pgTable("tenants", {
    *  acknowledged but never applied, so a stale event replayed after a newer one can't
    *  wrongly overwrite the tenant's real current state. Null until the first event lands. */
   lastBillingEventAt: timestamp("last_billing_event_at", { withTimezone: true }),
+  /** Set once tenant-offboarding has confirmed every one of this tenant's published
+   *  channel_listings has actually been delisted on its marketplace and this platform's own
+   *  OAuth connections/tokens for it have been revoked. Null for every status except
+   *  'canceled_grace'/'canceled' still winding down -- listWorkerEligibleTenants uses this
+   *  (not status alone) to know when it's finally safe to stop scheduling any worker for a
+   *  canceled tenant: stopping earlier, before its marketplace listings are confirmed
+   *  delisted, would leave a stale live listing that could still oversell with nothing left
+   *  syncing its inventory. */
+  marketplaceOffboardedAt: timestamp("marketplace_offboarded_at", { withTimezone: true }),
   /**
    * eBay business-policy ids (fulfillment/payment/return) created via
    * POST /admin/ebay/policies during onboarding. All null until that step is run once.

@@ -7,9 +7,10 @@ import {
   getTenantBillingStatus,
   inventoryMaster,
   isChannelIsolated,
-  listActiveTenants,
+  listWorkerEligibleTenants,
   productMaster,
   syncJobs,
+  tenantSyncCapabilities,
   type Database,
 } from "@ai-ec/db";
 import {
@@ -140,14 +141,20 @@ export async function dispatchPendingOutboxJobs(
 export async function handler(): Promise<void> {
   const db = getDb();
   const queues = getQueueUrls();
-  const tenants = await listActiveTenants(db);
+  const tenants = await listWorkerEligibleTenants(db);
 
   for (const tenant of tenants) {
-    await pollTenant(db, queues, tenant.id);
+    const { onboardNewProducts } = tenantSyncCapabilities(tenant);
+    await pollTenant(db, queues, tenant.id, onboardNewProducts);
   }
 }
 
-async function pollTenant(db: Database, queues: ReturnType<typeof getQueueUrls>, tenantId: string): Promise<void> {
+async function pollTenant(
+  db: Database,
+  queues: ReturnType<typeof getQueueUrls>,
+  tenantId: string,
+  canOnboardNewProducts: boolean,
+): Promise<void> {
   // Item A of the third hardening round ("チャネル障害時の隔離モード"), superseding item #4
   // of the second round ("チャネル別レート制御") -- isChannelIsolated() composes that same
   // 429/5xx signal and also reacts to a real authentication failure (an expired token with
@@ -187,7 +194,7 @@ async function pollTenant(db: Database, queues: ReturnType<typeof getQueueUrls>,
           // photos would silently lose the rest if we trusted the list response's images,
           // so re-fetch the authoritative per-item detail before upserting.
           const detail = await adapter.getProduct(accessToken, item.externalId);
-          await upsertProduct(db, tenantId, detail ?? item);
+          await upsertProduct(db, tenantId, detail ?? item, canOnboardNewProducts);
         }
         cursor = nextCursor;
       } while (cursor);
@@ -212,7 +219,12 @@ async function pollTenant(db: Database, queues: ReturnType<typeof getQueueUrls>,
   }
 }
 
-export async function upsertProduct(db: Database, tenantId: string, item: ExternalProduct): Promise<void> {
+export async function upsertProduct(
+  db: Database,
+  tenantId: string,
+  item: ExternalProduct,
+  canOnboardNewProducts: boolean,
+): Promise<void> {
   const sku = `base-${item.externalId}`;
   const hash = contentHash({
     title: item.title,
@@ -276,6 +288,14 @@ export async function upsertProduct(db: Database, tenantId: string, item: Extern
     });
     return;
   }
+
+  // Tenant lifecycle (past_due/canceled_grace/canceled-not-yet-offboarded): this platform
+  // must not keep growing a lapsed or canceling tenant's footprint on either marketplace,
+  // even though its *existing* listings above still get their stock reconciled to avoid an
+  // oversell. A brand-new BASE product simply isn't onboarded while this is false -- it's
+  // re-evaluated fresh on every poll, so it picks up automatically the moment the tenant is
+  // active again, with no separate backfill/reconciliation step needed.
+  if (!canOnboardNewProducts) return;
 
   // Phase 3 of the SaaS conversion ("plan quota enforcement"). Only gates *new*
   // product creation -- a tenant already over quota keeps full visibility into (and
