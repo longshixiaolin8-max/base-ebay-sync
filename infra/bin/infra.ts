@@ -26,8 +26,23 @@ const monthlyBudgetUsd = app.node.tryGetContext("monthlyBudgetUsd") as string | 
 // "direct" (default, unchanged) or "cloudfront" -- see PlatformConfig.apiEntrypoint's own
 // doc comment and README's runbook before ever passing --context apiEntrypoint=cloudfront.
 const apiEntrypoint = app.node.tryGetContext("apiEntrypoint") as string | undefined;
+// See PlatformConfig.ebayPlatformNotificationThrottleEnabled's own doc comment: leave this
+// false on the first deploy that ever introduces the platform-notifications route in a given
+// environment (it fails otherwise -- the Route doesn't exist yet for the Stage to reference),
+// then pass `--context ebayPlatformNotificationThrottleEnabled=true` on a later deploy once
+// that first one has succeeded.
+const ebayPlatformNotificationThrottleEnabled = app.node.tryGetContext("ebayPlatformNotificationThrottleEnabled") as
+  | string
+  | undefined;
 
-const config = loadConfig(envName, alarmEmail, aiProvider, monthlyBudgetUsd, apiEntrypoint);
+const config = loadConfig(
+  envName,
+  alarmEmail,
+  aiProvider,
+  monthlyBudgetUsd,
+  apiEntrypoint,
+  ebayPlatformNotificationThrottleEnabled,
+);
 
 // Region is read from CDK context (`--context region=...`), not from
 // CDK_DEFAULT_REGION/AWS_REGION — the CDK CLI recomputes those env vars from the
@@ -142,6 +157,7 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   ebayWebhookFn: lambdas.ebayWebhookFn,
   signupHandlerFn: lambdas.signupHandlerFn,
   stripeWebhookFn: lambdas.stripeWebhookFn,
+  enableEbayPlatformNotificationThrottle: config.ebayPlatformNotificationThrottleEnabled,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);

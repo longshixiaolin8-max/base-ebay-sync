@@ -16,6 +16,9 @@ export interface ApiStackProps extends cdk.StackProps {
   ebayWebhookFn: nodejs.NodejsFunction;
   signupHandlerFn: nodejs.NodejsFunction;
   stripeWebhookFn: nodejs.NodejsFunction;
+  /** See PlatformConfig.ebayPlatformNotificationThrottleEnabled's doc comment: must stay
+   *  false on an environment's first-ever deploy of the platform-notifications route. */
+  enableEbayPlatformNotificationThrottle: boolean;
 }
 
 /**
@@ -118,22 +121,33 @@ export class ApiStack extends cdk.Stack {
     // API calls (see triggerCoalescedPoll), but capping requests/sec here too means a flood
     // can't even burn through this API's shared default-route budget and start 429-ing
     // every other tenant's legitimate traffic on unrelated routes.
-    // Reaches into ApiCoreStack's CfnStage construct (the same one whose
-    // defaultRouteSettings ApiCoreStack itself sets) -- this property actually lands in
-    // ApiCoreStack's own synthesized template regardless of which stack's file the mutation
-    // is written in, same as any other cross-stack construct reference. Safe here because
-    // ApiStack already depends on ApiCoreStack (see infra/bin/infra.ts's
-    // api.addStackDependency(apiCore)).
+    //
+    // Confirmed live (a failed prod deploy, twice): this reaches into ApiCoreStack's own
+    // CfnStage construct, so the property lands in ApiCoreStack's synthesized template
+    // regardless of which stack's file the mutation is written in -- but ApiCoreStack always
+    // deploys BEFORE this stack (LambdaStack, and therefore this Route, needs ApiCoreStack's
+    // api.apiEndpoint first; see infra/bin/infra.ts). AWS::ApiGatewayV2::Stage validates
+    // RouteSettings against routes that already exist on the live API, and the route key here
+    // is a plain string CloudFormation can't turn into a Ref/GetAtt dependency, so on an
+    // environment's first-ever deploy of this route, ApiCoreStack's Stage update runs before
+    // this stack has ever created the Route -- and fails with "Unable to find Route by key
+    // ... within the provided RouteSettings". There is no way to flip the stack order instead
+    // (this stack already depends on ApiCoreStack for the api object itself; CloudFormation
+    // stacks can't depend on each other both ways), so PlatformConfig.
+    // ebayPlatformNotificationThrottleEnabled (default false) gates this entirely: leave it
+    // off for the deploy that creates the Route, then turn it on for a later one, once that
+    // Route already exists in AWS and the Stage update can reference it successfully. See
+    // README's "eBay Platform Notification abuse対策" section for the exact steps.
     const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
-    if (cfnStage) {
-      // Confirmed live (a failed prod deploy): unlike defaultRouteSettings (a plain typed
-      // property CDK's own mapper translates camelCase -> PascalCase for), routeSettings is
-      // a free-form { [routeKey]: RouteSettingsProperty } map that CDK passes through to
-      // CloudFormation without translating each value's keys -- the real API Gateway
-      // resource handler only accepts the PascalCase CloudFormation property names here
-      // ("Unrecognized field \"throttlingBurstLimit\"... 5 known properties:
-      // \"ThrottlingBurstLimit\", \"ThrottlingRateLimit\", ..."). Cast past the (misleadingly
-      // camelCase-typed) interface to use the names CloudFormation actually expects.
+    if (cfnStage && props.enableEbayPlatformNotificationThrottle) {
+      // Unlike defaultRouteSettings (a plain typed property CDK's own mapper translates
+      // camelCase -> PascalCase for), routeSettings is a free-form
+      // { [routeKey]: RouteSettingsProperty } map that CDK passes through to CloudFormation
+      // without translating each value's keys -- the real API Gateway resource handler only
+      // accepts the PascalCase CloudFormation property names here ("Unrecognized field
+      // \"throttlingBurstLimit\"... 5 known properties: \"ThrottlingBurstLimit\",
+      // \"ThrottlingRateLimit\", ..."). Cast past the (misleadingly camelCase-typed)
+      // interface to use the names CloudFormation actually expects.
       cfnStage.routeSettings = {
         ...cfnStage.routeSettings,
         "POST /webhooks/ebay/platform-notifications/{token}": {

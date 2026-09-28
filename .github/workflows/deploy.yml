@@ -9,6 +9,16 @@ on:
         type: choice
         options: [dev, prod]
         default: dev
+      enableEbayPlatformNotificationThrottle:
+        description: >-
+          Enable the per-route API Gateway throttle on the eBay platform-notifications
+          webhook. Leave unchecked (default) on an environment's first-ever deploy of this
+          route -- it fails otherwise, since the route doesn't exist yet for the throttle to
+          reference. Check it only on a LATER deploy, once that first one has already
+          succeeded. See README's "eBay Platform Notification abuse対策" section.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write # required for OIDC — no static AWS keys are ever stored in GitHub
@@ -53,6 +63,7 @@ jobs:
             --context region=${{ vars.AWS_REGION }} \
             --context alarmEmail=${{ vars.ALARM_EMAIL }} \
             --context githubRepo=${{ github.repository }} \
+            --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
             --require-approval never
 
       # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
