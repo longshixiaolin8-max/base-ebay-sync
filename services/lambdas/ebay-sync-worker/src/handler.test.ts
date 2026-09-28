@@ -547,6 +547,27 @@ describe("update", () => {
     );
   });
 
+  it("restores status to 'published' on a successful update, recovering a listing stuck at 'error' from an earlier failed attempt", async () => {
+    // Regression: a prior failed update sets channel_listings.status to "error" (see the SQS
+    // handler's catch block). Before this fix, a *successful* update only ever cleared
+    // lastError, never restored status -- so a transient failure followed by a successful
+    // retry left the listing permanently reading "error" even though it was fully in sync,
+    // and product-fetch/inventory-sync-worker both gate further automatic sync on
+    // status === "published", silently stopping all future syncing for it.
+    const inventory = { quantity: 8, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
+    const db = createFakeDb([[product], [draft], [listing], [inventory]]);
+
+    await update(db, TENANT_ID, adapter, "token", "p1", "base-1");
+
+    expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ status: "published", lastError: null }));
+  });
+
   it("withholds one extra unit on top of the dynamic buffer for a product predicted to sell out soon", async () => {
     predictStockoutRiskMock.mockResolvedValue({
       productId: "p1",

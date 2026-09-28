@@ -489,6 +489,15 @@ export async function update(
   await db
     .update(channelListings)
     .set({
+      // A prior failed update on this same listing (see the SQS handler's catch block
+      // above) sets status to "error" -- left uncorrected here, a listing that failed once
+      // and then succeeded on retry would stay stuck at "error" forever even with lastError
+      // now cleared, since nothing else ever sets it back to "published". product-fetch and
+      // inventory-sync-worker both gate further automatic sync on status === "published", so
+      // a stuck "error" silently stops all future syncing for this listing, not just the one
+      // that actually failed. A successful update always means the listing is live and
+      // current, so "published" is always the correct status here.
+      status: "published",
       lastSyncedAt: new Date(),
       lastError: null,
       lastSyncedPriceJpy: product.priceJpy,
