@@ -19,6 +19,18 @@ on:
         required: false
         type: boolean
         default: false
+      targetStacks:
+        description: >-
+          Advanced/one-off use only: space-separated stack names to deploy with
+          --exclusively instead of the normal --all (e.g. "AiEcPlatform-prod-Api"). Needed
+          when CloudFormation refuses to remove a cross-stack export because a downstream
+          stack still imports it ("Cannot delete export ... as it is in use by ...") -- the
+          fix is deploying the downstream stack (which drops the import) on its own first,
+          which --all can't do since it always deploys stacks in dependency order. Leave
+          blank for a normal deploy.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write # required for OIDC — no static AWS keys are ever stored in GitHub
@@ -57,14 +69,34 @@ jobs:
 
       - name: CDK deploy
         working-directory: infra
+        env:
+          TARGET_STACKS: ${{ inputs.targetStacks }}
         run: |
-          npx cdk deploy --all \
-            --context env=${{ inputs.environment }} \
-            --context region=${{ vars.AWS_REGION }} \
-            --context alarmEmail=${{ vars.ALARM_EMAIL }} \
-            --context githubRepo=${{ github.repository }} \
-            --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
-            --require-approval never
+          set -euo pipefail
+          # See targetStacks' own doc comment above: only set for the one-off case of
+          # unsticking a cross-stack export/import removal conflict. --exclusively skips
+          # deploying (or even checking) any stack this one depends on, so it must only be
+          # used once the operator has confirmed those dependency stacks are already up to
+          # date -- an ordinary run always leaves this blank and deploys --all as before.
+          if [ -n "$TARGET_STACKS" ]; then
+            echo "::notice::Targeted deploy (--exclusively): $TARGET_STACKS"
+            # shellcheck disable=SC2086
+            npx cdk deploy $TARGET_STACKS --exclusively \
+              --context env=${{ inputs.environment }} \
+              --context region=${{ vars.AWS_REGION }} \
+              --context alarmEmail=${{ vars.ALARM_EMAIL }} \
+              --context githubRepo=${{ github.repository }} \
+              --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --require-approval never
+          else
+            npx cdk deploy --all \
+              --context env=${{ inputs.environment }} \
+              --context region=${{ vars.AWS_REGION }} \
+              --context alarmEmail=${{ vars.ALARM_EMAIL }} \
+              --context githubRepo=${{ github.repository }} \
+              --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --require-approval never
+          fi
 
       # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
       # easy-to-forget post-deploy step (see README's old bootstrap notes) -- a new Lambda

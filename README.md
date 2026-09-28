@@ -103,6 +103,17 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - drizzleの migrator は適用済みmigrationを自分のテーブルで管理するため、**何度実行しても安全**(新しいmigrationがなければ単に何もしない)。
 - smoke testは`GET /webhooks/ebay/notifications`(challenge_codeなし)を叩き、HTTP 400が返ることだけを確認する認証不要・副作用なしの疎通確認。DBを実際に触る確認はmigrationステップ自体がすでに兼ねている。
 
+### リソース削除時のスタック間export/import順序問題(`targetStacks`入力)
+
+Lambda関数やその他のリソースを削除するコード変更(例: round 12でのOAuth authorizeルート廃止)を、その関数のARNを別スタックが`Fn::ImportValue`で参照したままの状態から初めて本番にデプロイすると、CloudFormationは`Cannot delete export ... as it is in use by ...`で失敗する。`cdk deploy --all`は常に依存関係順(例: `Lambdas`→`Api`)でスタックを処理するため、「先にimport側(`Api`)だけを更新してexport(`Lambdas`)を未使用にしてから、export側を更新する」という2段階デプロイが`--all`では実現できない。
+
+対処として、`deploy.yml`の`workflow_dispatch`に`targetStacks`(既定は空 = 通常通り`--all`)を追加した。この現象に遭遇したら:
+
+1. `targetStacks`に、importしている側のスタック名(例: `AiEcPlatform-prod-Api`)を指定してデプロイ実行 → `cdk deploy <指定スタック> --exclusively`が走り、依存スタック(`Lambdas`など)は一切触らずそのスタックだけを更新する。importが外れる。
+2. それが成功したら、`targetStacks`を空に戻して通常通り`--all`で再デプロイ → 今度はexport側のスタックが安全に該当リソースを削除できる。
+
+普段は`targetStacks`は空のままにしておくこと。
+
 **この変更を有効にする前に必須の作業**: `deployRole`(GitHub Actionsが引き受けるIAMロール)に`lambda:InvokeFunction`/`cloudformation:DescribeStacks`権限を追加した(`infra/lib/github-oidc-stack.ts`)。この`GithubOidcStack`は**人手による一度きりのブートストラップ**(README上部の手順参照)であり、`deploy.yml`が自動デプロイする対象では**ない**。そのため、この変更をコード上マージしただけでは本番のIAMロールには反映されない — 以下を一度だけ手動実行すること:
 
 ```bash
