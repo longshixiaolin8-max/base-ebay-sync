@@ -1,6 +1,6 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { ChannelAdapter, ChannelType } from "@ai-ec/core";
-import { channelListings, inventoryMaster, listActiveTenants } from "@ai-ec/db";
+import { calculateChannelAvailableQuantity, channelListings, inventoryMaster, listActiveTenants, productMaster } from "@ai-ec/db";
 import {
   createEbayAdapter,
   getAppCredentials,
@@ -35,7 +35,7 @@ export async function handler(): Promise<void> {
   }
 }
 
-async function checkTenant(
+export async function checkTenant(
   db: ReturnType<typeof getDb>,
   tenantId: string,
   adapters: Partial<Record<ChannelType, ChannelAdapter>>,
@@ -71,14 +71,43 @@ async function checkTenant(
         .limit(1);
       if (!master) continue;
 
-      if (liveQuantity !== master.quantity) {
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(eq(productMaster.id, listing.productId))
+        .limit(1);
+      if (!product) continue;
+
+      // eBay (or any secondary channel) deliberately publishes central quantity minus the
+      // safety stock buffer, not the raw central quantity -- comparing liveQuantity straight
+      // against master.quantity flagged every buffered secondary-channel listing as drifted
+      // even when it was exactly the intended, correctly-synced value. The source channel
+      // itself has no buffer withheld (calculateChannelAvailableQuantity returns the true
+      // quantity unbuffered when channel === sourceChannel), matching what
+      // ebay-sync-worker/inventory-sync-worker actually push to each channel.
+      const expectedQuantity = calculateChannelAvailableQuantity(
+        master.quantity,
+        master.safetyStockBuffer,
+        listing.channel,
+        product.sourceChannel,
+      );
+
+      if (liveQuantity !== expectedQuantity) {
         await recordSyncError(db, {
           tenantId,
           channel: listing.channel,
           productId: listing.productId,
           errorCode: "inventory_drift",
-          errorMessage: `${listing.channel} reports quantity=${liveQuantity} but inventory_master has quantity=${master.quantity}`,
-          payload: { externalId: listing.externalId, liveQuantity, masterQuantity: master.quantity },
+          errorMessage: `${listing.channel} reports quantity=${liveQuantity} but expected ${expectedQuantity} (central=${master.quantity}, buffer=${master.safetyStockBuffer})`,
+          payload: {
+            liveQuantity,
+            expectedQuantity,
+            centralQuantity: master.quantity,
+            safetyStockBuffer: master.safetyStockBuffer,
+            sourceChannel: product.sourceChannel,
+            channel: listing.channel,
+            externalId: listing.externalId,
+          },
         });
       }
     } catch (err) {
