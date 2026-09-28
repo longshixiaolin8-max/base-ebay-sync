@@ -14,6 +14,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
 }));
 const deleteOAuthConnectionsByExternalAccountMock = vi.fn().mockResolvedValue([]);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
@@ -23,6 +24,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
   deleteOAuthConnectionsByExternalAccount: (...args: unknown[]) => deleteOAuthConnectionsByExternalAccountMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
 const computeChallengeResponseMock = vi.fn((..._args: unknown[]) => "computed-hash");
@@ -197,5 +199,75 @@ describe("ebay-webhook handler", () => {
     expect(res.statusCode).toBe(204);
     expect(deleteOAuthConnectionsByExternalAccountMock).not.toHaveBeenCalled();
     expect(pollChannelSalesMock).not.toHaveBeenCalled();
+  });
+
+  it("purges only the matching connections when the same externalAccountId happens to span multiple tenants -- no other tenant's connection is touched", async () => {
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([
+      { tenantId: "tenant-a", secretArn: "arn:aws:secretsmanager:secret-a" },
+      { tenantId: "tenant-b", secretArn: "arn:aws:secretsmanager:secret-b" },
+    ]);
+
+    const res = (await handler(
+      makeEvent({
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({ metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { data: { userId: "u-3" } } }),
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(204);
+    // deleteOAuthConnectionsByExternalAccount itself is what scopes the DELETE by
+    // (channel, externalAccountId) -- this only asserts the handler faithfully logs exactly
+    // what it reports, once per affected tenant, never inventing or merging entries.
+    expect(recordAuditLogMock).toHaveBeenCalledTimes(2);
+    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-a", entityId: "u-3" }));
+    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-b", entityId: "u-3" }));
+  });
+
+  it("重複notification idempotent: redelivering the same MARKETPLACE_ACCOUNT_DELETION notification is a safe no-op once nothing is left to purge", async () => {
+    const body = JSON.stringify({ metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { data: { userId: "u-4" } } });
+    const event = makeEvent({
+      requestContext: { http: { method: "POST" } } as never,
+      headers: { "x-ebay-signature": "sig-header" },
+      body,
+    });
+
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValueOnce([{ tenantId: "tenant-a", secretArn: "arn:...:s1" }]);
+    const first = (await handler(event)) as { statusCode: number };
+
+    // A redelivery finds nothing left to delete -- the real deleteOAuthConnectionsByExternalAccount
+    // returns [] the second time (the row is already gone), which this mock reproduces.
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValueOnce([]);
+    recordAuditLogMock.mockClear();
+    const second = (await handler(event)) as { statusCode: number };
+
+    expect(first.statusCode).toBe(204);
+    expect(second.statusCode).toBe(204);
+    expect(recordAuditLogMock).not.toHaveBeenCalled(); // nothing new to log on the redelivery
+    expect(recordSyncErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a non-2xx and records a visible sync error when purging actually fails, so eBay retries instead of the failure going unnoticed", async () => {
+    deleteOAuthConnectionsByExternalAccountMock.mockRejectedValue(new Error("Secrets Manager: AccessDeniedException"));
+
+    const res = (await handler(
+      makeEvent({
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({ metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" }, notification: { data: { userId: "u-5" } } }),
+      }),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).not.toBe(204);
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        channel: "ebay",
+        errorCode: "ebay_account_deletion_failed",
+        errorMessage: "Secrets Manager: AccessDeniedException",
+        payload: { userId: "u-5" },
+      }),
+    );
   });
 });

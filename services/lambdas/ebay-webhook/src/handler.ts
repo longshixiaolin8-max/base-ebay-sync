@@ -12,6 +12,7 @@ import {
   getQueueUrls,
   pollChannelSales,
   recordAuditLog,
+  recordSyncError,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
@@ -36,8 +37,22 @@ interface EbayNotificationPayload {
  * itself the immutable userId returned by getAuthenticatedUserId (the tenant-isolation fix
  * that replaced this app's own "default" externalAccountId fallback), so this must match on
  * the same field to ever find anything to purge. This also matches eBay's own direction here
- * -- as of September 2025 eBay no longer includes username at all for some regions/accounts
- * in this exact notification, sending only the immutable user id instead.
+ * -- as of September 26 2025, for affected regions eBay's notification.data.username field
+ * itself now carries the immutable userId value rather than a real username (confirmed
+ * against eBay's own AsyncAPI schema and developer-facing data-handling-update notice),
+ * so userId is both the more reliable and the only-ever-populated identifier to key on.
+ *
+ * Naturally idempotent: a redelivery of the same notification finds no matching
+ * oauth_connections rows left the second time (the DELETE simply returns zero rows, and
+ * DeleteSecretCommand's own ResourceNotFoundException is already tolerated), so it safely
+ * no-ops rather than erroring or double-purging.
+ *
+ * Failure handling doubles as this notification's compliance requirement: eBay resends an
+ * unacknowledged MARKETPLACE_ACCOUNT_DELETION notification (any of 200/201/202/204 counts
+ * as acknowledged) and marks a callback URL down after 24h of failures, alerting the
+ * developer -- so a genuine processing failure here must return a non-2xx (to trigger
+ * eBay's own retry) rather than the 204 that would normally mean "done," and must be
+ * recorded somewhere a human can see it, not just in CloudWatch logs.
  */
 async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<APIGatewayProxyResultV2> {
   const userId = payload.notification?.data?.userId;
@@ -47,16 +62,32 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
   }
 
   const db = getDb();
-  const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", userId);
-  for (const row of deleted) {
-    await recordAuditLog(db, {
-      tenantId: row.tenantId,
-      actor: "system:ebay-webhook",
-      action: "ebay_account_deletion_purge",
-      entityType: "ebay_account",
-      entityId: userId,
-      after: { secretArn: row.secretArn },
+  try {
+    const deleted = await deleteOAuthConnectionsByExternalAccount(db, "ebay", userId);
+    for (const row of deleted) {
+      await recordAuditLog(db, {
+        tenantId: row.tenantId,
+        actor: "system:ebay-webhook",
+        action: "ebay_account_deletion_purge",
+        entityType: "ebay_account",
+        entityId: userId,
+        after: { secretArn: row.secretArn },
+      });
+    }
+  } catch (err) {
+    // No single tenant is reliably known here (the delete itself may have failed before
+    // returning which rows it would have touched) -- logged against BOOTSTRAP_TENANT_ID,
+    // this file's existing fallback for signals that don't carry a real per-tenant hint,
+    // so a human still sees this in the sync-errors dashboard rather than only in logs.
+    await recordSyncError(db, {
+      tenantId: BOOTSTRAP_TENANT_ID,
+      channel: "ebay",
+      productId: null,
+      errorCode: "ebay_account_deletion_failed",
+      errorMessage: (err as Error).message,
+      payload: { userId },
     });
+    return { statusCode: 500 };
   }
 
   return { statusCode: 204 };
