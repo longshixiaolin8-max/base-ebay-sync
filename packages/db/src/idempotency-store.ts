@@ -1,5 +1,5 @@
 import type { IdempotencyRecord, IdempotencyStatus, IdempotencyStore } from "@ai-ec/core";
-import { eq } from "drizzle-orm";
+import { and, eq, lt, or } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { idempotencyKeys } from "./schema.js";
 
@@ -23,9 +23,16 @@ export function createDbIdempotencyStore(db: Database, tenantId: string): Idempo
       .onConflictDoUpdate({
         target: idempotencyKeys.key,
         set: { status: "in_progress", result: null, createdAt: now, expiresAt },
-        // Only re-claim a row that previously failed; a completed/in-progress row is
-        // left untouched — this WHERE is what makes the upsert conditional.
-        where: eq(idempotencyKeys.status, "failed"),
+        // Reclaim a row that previously failed, OR one still marked "in_progress" whose
+        // expiresAt has already passed -- the latter means the worker that claimed it
+        // (Lambda timeout, crash, killed container) never called complete()/fail(), so
+        // without this the key would stay locked forever with no way to ever retry it.
+        // Deliberately scoped to status = "in_progress" (not just expiresAt < now): a
+        // "completed" row must never be reclaimed just because its TTL elapsed, or a
+        // duplicate delivery arriving after that TTL would silently redo already-done work
+        // instead of replaying the cached result -- expiry only ever frees a stuck claim,
+        // never a finished one.
+        where: or(eq(idempotencyKeys.status, "failed"), and(eq(idempotencyKeys.status, "in_progress"), lt(idempotencyKeys.expiresAt, now))),
       })
       .returning();
 
