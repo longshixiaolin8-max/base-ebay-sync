@@ -13,3 +13,4 @@ export * from "./profit.js";
 export * from "./stale.js";
 export * from "./sync-state.js";
 export * from "./plan-limits.js";
+export * from "./inventory-status.js";

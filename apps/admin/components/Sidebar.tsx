@@ -11,7 +11,7 @@ import { planLabel } from "@/lib/format";
 import { useSignOut } from "@/lib/use-sign-out";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SparkleIcon, SyncIcon } from "@/components/icons";
+import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, ShieldIcon, SparkleIcon, SyncIcon } from "@/components/icons";
 import { PlanUsageWidget } from "@/components/dashboard/PlanUsageWidget";
 
 const LINKS = [
@@ -20,6 +20,7 @@ const LINKS = [
   { href: "/products", label: "商品マスター", icon: BoxIcon },
   { href: "/drafts", label: "AI出品下書き", icon: SparkleIcon },
   { href: "/channel-sync", label: "チャネル同期", icon: SyncIcon },
+  { href: "/inventory", label: "在庫監視", icon: ShieldIcon },
   { href: "/commerce", label: "コマース統合", icon: SyncIcon },
   { href: "/orders", label: "注文管理", icon: CartIcon },
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },

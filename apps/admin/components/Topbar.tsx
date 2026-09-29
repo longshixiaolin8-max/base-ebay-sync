@@ -18,6 +18,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/products": "商品マスター",
   "/drafts": "AI出品下書き",
   "/channel-sync": "チャネル同期",
+  "/inventory": "在庫監視",
   "/commerce": "コマース統合",
   "/orders": "注文管理",
   "/sync-errors": "同期エラー",

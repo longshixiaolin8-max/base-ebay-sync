@@ -306,7 +306,7 @@ describe("admin-api handler", () => {
 
   describe("GET /admin/products/list", () => {
     it("is not swallowed by the /admin/products/{id} route (the literal path segment 'list' must not be treated as a product id)", async () => {
-      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      fakeDb = createFakeDb([[], [], [], [], [{ count: 0 }], []]);
       const res = await callHandler(makeEvent("GET", "/admin/products/list"));
       expect(res.statusCode).toBe(200);
       const parsed = JSON.parse(res.body!);
@@ -317,14 +317,19 @@ describe("admin-api handler", () => {
     it("returns paginated rows joined with their eBay listing status, real inventory, and AI draft counts, plus catalog-wide KPI counts", async () => {
       const updatedAt = new Date("2024-04-30T13:47:00.000Z");
       fakeDb = createFakeDb([
+        [], // unresolvedDrift
+        [], // unresolvedDoubleSale
+        [], // safetyStockBySourceChannel
         [
           {
             product: { id: "p1", sku: "SKU-TP-002", title: "スウェットパーカー", sourceChannel: "base", status: "active", images: [], priceJpy: 6980, costJpy: 2500, updatedAt },
-            ebayListing: { channel: "ebay", status: "published" },
+            ebayListing: { channel: "ebay", status: "published", lastSyncedAt: null },
+            inventoryRow: { safetyStockBuffer: 10, soldOut: false },
           },
         ], // rows
         [{ count: 1245 }], // totalRows (matches the current filter, independent of kpi.total)
         [{ productId: "p1", count: 3 }], // draftCountRows
+        [], // trendRows
       ]);
       getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 120, reserved: 0, available: 120, safetyBuffer: 10, sellableByChannel: {} });
       countChannelListingsByStatusMock.mockResolvedValueOnce(892).mockResolvedValueOnce(79); // published, needsAttention
@@ -351,7 +356,7 @@ describe("admin-api handler", () => {
     });
 
     it("reports ebayListingStatus null and aiDraftCount 0 for a product with neither, and skips the draft-count query entirely when the page is empty", async () => {
-      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      fakeDb = createFakeDb([[], [], [], [], [{ count: 0 }], []]);
       const res = await callHandler(makeEvent("GET", "/admin/products/list"));
       const parsed = JSON.parse(res.body!);
       expect(parsed.products).toEqual([]);
@@ -359,9 +364,50 @@ describe("admin-api handler", () => {
     });
 
     it("clamps limit to at most 100 and offset to at least 0, rather than trusting client-supplied values directly", async () => {
-      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      fakeDb = createFakeDb([[], [], [], [], [{ count: 0 }], []]);
       const res = await callHandler(makeEvent("GET", "/admin/products/list", { limit: "99999", offset: "-5" }));
       expect(res.statusCode).toBe(200);
+    });
+
+    it("classifies a product's diff status from unresolved sync_errors and computes catalog-wide inventory health aggregates", async () => {
+      const updatedAt = new Date();
+      fakeDb = createFakeDb([
+        [{ productId: "p1", channel: "ebay", payload: { liveQuantity: 8, expectedQuantity: 3 } }], // unresolvedDrift (diff=5 -> attention)
+        [{ productId: "p2", channel: "base" }], // unresolvedDoubleSale
+        [{ sourceChannel: "base", count: 4 }], // safetyStockBySourceChannel -- applies to ebay (non-source channel)
+        [
+          {
+            product: { id: "p1", sku: "SKU-1", title: "T1", sourceChannel: "base", status: "active", images: [], priceJpy: 1000, costJpy: 500, updatedAt },
+            ebayListing: { channel: "ebay", status: "published", lastSyncedAt: updatedAt },
+            inventoryRow: { safetyStockBuffer: 0, soldOut: false },
+          },
+          {
+            product: { id: "p2", sku: "SKU-2", title: "T2", sourceChannel: "base", status: "active", images: [], priceJpy: 1000, costJpy: 500, updatedAt },
+            ebayListing: null,
+            inventoryRow: { safetyStockBuffer: 0, soldOut: false },
+          },
+        ], // rows
+        [{ count: 2 }], // totalRows
+        [], // draftCountRows
+        [], // trendRows
+      ]);
+      countProductsMock.mockResolvedValueOnce(2); // catalog-wide total (used by the health-bucket "normal" remainder)
+
+      const res = await callHandler(makeEvent("GET", "/admin/products/list"));
+      const parsed = JSON.parse(res.body!);
+      const byId = Object.fromEntries(parsed.products.map((p: { id: string }) => [p.id, p]));
+      expect(byId.p1.diffStatus).toEqual({ code: "attention", diff: 5 });
+      expect(byId.p2.diffStatus).toEqual({ code: "possible_double_sale", diff: null });
+      expect(parsed.inventoryKpi).toMatchObject({
+        diffCount: 2, // p1 (drift) + p2 (double-sale), distinct products
+        possibleDoubleSaleCount: 1,
+        reconstructPendingCount: 1,
+        safetyStockAppliedCount: 4,
+      });
+      expect(parsed.inventoryHealthByChannel.ebay.possibleDoubleSale).toBe(0); // p2's double-sale error was recorded on channel "base"
+      expect(parsed.inventoryHealthByChannel.base.possibleDoubleSale).toBe(1);
+      expect(parsed.inventoryHealthByChannel.central.drift).toBe(1);
+      expect(parsed.inventoryTrend).toHaveLength(7);
     });
   });
 

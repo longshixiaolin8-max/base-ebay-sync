@@ -4,6 +4,7 @@ import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement 
 import {
   applyStandardAspectFallbacks,
   ChannelType,
+  classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
@@ -343,6 +344,59 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const syncStatusRaw = event.queryStringParameters?.syncStatus;
       const syncStatus = (["pending", "published", "update_pending", "error", "delisted"] as const).find((s) => s === syncStatusRaw);
       const q = event.queryStringParameters?.q?.trim();
+      // 在庫監視 page's filter dimension -- distinct from `status` (product lifecycle) above.
+      // possible_double_sale/inventory_drift are never a persisted column (see the sets built
+      // below), so this can't be a plain `eq()` -- it narrows to a precomputed id list instead.
+      const diffStatusRaw = event.queryStringParameters?.diffStatus;
+      const diffStatus = (["attention", "possible_double_sale", "sold_out"] as const).find((s) => s === diffStatusRaw);
+
+      // Whole-tenant, independent of the current page/filter -- feeds both the diffStatus
+      // filter above and the inventoryKpi/inventoryHealthByChannel aggregates below, same
+      // "KPI never scoped to the currently-filtered page" convention as every other list KPI
+      // in this file. Cheap: these are rare, unresolved-only rows, never the full catalog.
+      const [unresolvedDrift, unresolvedDoubleSale, safetyStockBySourceChannel] = await Promise.all([
+        db
+          .select({ productId: syncErrors.productId, channel: syncErrors.channel, payload: syncErrors.payload })
+          .from(syncErrors)
+          .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.errorCode, "inventory_drift"), eq(syncErrors.resolved, false))),
+        db
+          .select({ productId: syncErrors.productId, channel: syncErrors.channel })
+          .from(syncErrors)
+          .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.errorCode, "possible_double_sale"), eq(syncErrors.resolved, false))),
+        db
+          .select({ sourceChannel: productMaster.sourceChannel, count: sql<number>`count(*)::int` })
+          .from(productMaster)
+          .leftJoin(inventoryMaster, eq(inventoryMaster.productId, productMaster.id))
+          .where(and(eq(productMaster.tenantId, tenantId), sql`${inventoryMaster.safetyStockBuffer} > 0`))
+          .groupBy(productMaster.sourceChannel),
+      ]);
+
+      const driftByProduct = new Map<string, { channel: string | null; diff: number | null }>();
+      const driftProductIdsByChannel: Record<string, Set<string>> = { base: new Set(), ebay: new Set() };
+      for (const row of unresolvedDrift) {
+        if (!row.productId) continue;
+        const payload = row.payload as { liveQuantity?: number; expectedQuantity?: number } | null;
+        const diff =
+          payload && typeof payload.liveQuantity === "number" && typeof payload.expectedQuantity === "number"
+            ? payload.liveQuantity - payload.expectedQuantity
+            : null;
+        if (!driftByProduct.has(row.productId)) driftByProduct.set(row.productId, { channel: row.channel, diff });
+        if (row.channel === "base" || row.channel === "ebay") driftProductIdsByChannel[row.channel]!.add(row.productId);
+      }
+      const doubleSaleProductIds = new Set(unresolvedDoubleSale.map((r) => r.productId).filter((id): id is string => Boolean(id)));
+      const doubleSaleProductIdsByChannel: Record<string, Set<string>> = { base: new Set(), ebay: new Set() };
+      for (const row of unresolvedDoubleSale) {
+        if (row.productId && (row.channel === "base" || row.channel === "ebay")) doubleSaleProductIdsByChannel[row.channel]!.add(row.productId);
+      }
+      const safetyStockCountByChannel: Record<string, number> = { base: 0, ebay: 0 };
+      let safetyStockCountCentral = 0;
+      for (const row of safetyStockBySourceChannel) {
+        safetyStockCountCentral += row.count;
+        // A source channel never has safety stock withheld from it (calculateChannelAvailableQuantity)
+        // -- only the *other* channel does.
+        if (row.sourceChannel === "base") safetyStockCountByChannel.ebay! += row.count;
+        else if (row.sourceChannel === "ebay") safetyStockCountByChannel.base! += row.count;
+      }
 
       const conditions = [eq(productMaster.tenantId, tenantId)];
       if (statusParsed.success) conditions.push(eq(productMaster.status, statusParsed.data));
@@ -353,16 +407,26 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       // A left join, not inner -- a product with no eBay listing yet must still appear.
       // Safe against row fan-out: channel_listings has a unique (product_id, channel) index,
-      // so this join can add at most one row per product.
+      // so this join can add at most one row per product. Same reasoning for inventoryMaster
+      // (product_id is its own primary key -- a strict 1:1 with product_master).
       const ebayJoin = and(eq(channelListings.productId, productMaster.id), eq(channelListings.channel, "ebay"));
       if (syncStatus) conditions.push(eq(channelListings.status, syncStatus));
+      if (diffStatus === "possible_double_sale") {
+        conditions.push(doubleSaleProductIds.size > 0 ? inArray(productMaster.id, [...doubleSaleProductIds]) : sql`false`);
+      } else if (diffStatus === "attention") {
+        const ids = [...driftByProduct.keys()].filter((id) => !doubleSaleProductIds.has(id));
+        conditions.push(ids.length > 0 ? inArray(productMaster.id, ids) : sql`false`);
+      } else if (diffStatus === "sold_out") {
+        conditions.push(eq(inventoryMaster.soldOut, true));
+      }
       const whereClause = and(...conditions);
 
-      const [rows, totalRows, published, draft, soldOut, needsAttention, catalogTotal] = await Promise.all([
+      const [rows, totalRows, published, draft, soldOut, needsAttention, catalogTotal, baseConfidence, ebayConfidence] = await Promise.all([
         db
-          .select({ product: productMaster, ebayListing: channelListings })
+          .select({ product: productMaster, ebayListing: channelListings, inventoryRow: inventoryMaster })
           .from(productMaster)
           .leftJoin(channelListings, ebayJoin)
+          .leftJoin(inventoryMaster, eq(inventoryMaster.productId, productMaster.id))
           .where(whereClause)
           .orderBy(desc(productMaster.updatedAt))
           .limit(limit)
@@ -371,12 +435,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           .select({ count: sql<number>`count(*)::int` })
           .from(productMaster)
           .leftJoin(channelListings, ebayJoin)
+          .leftJoin(inventoryMaster, eq(inventoryMaster.productId, productMaster.id))
           .where(whereClause),
         countChannelListingsByStatus(db, tenantId, "ebay", "published"),
         countProductsByStatus(db, tenantId, "ai_generated"),
         countProductsByStatus(db, tenantId, "sold_out"),
         countChannelListingsByStatus(db, tenantId, "ebay", "error"),
         countProducts(db, tenantId),
+        computeSyncConfidence(db, tenantId, "base"),
+        computeSyncConfidence(db, tenantId, "ebay"),
       ]);
 
       const productIds = rows.map((r) => r.product.id);
@@ -392,6 +459,58 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       ]);
       const draftCountByProduct = Object.fromEntries(draftCountRows.map((d) => [d.productId, d.count]));
 
+      function diffStatusForProduct(productId: string): { code: string; diff: number | null } {
+        if (doubleSaleProductIds.has(productId)) return { code: "possible_double_sale", diff: null };
+        const drift = driftByProduct.get(productId);
+        if (drift) return { code: classifyInventoryDiffMagnitude(drift.diff ?? 0), diff: drift.diff };
+        return { code: "normal", diff: 0 };
+      }
+
+      const doubleSaleCentralCount = doubleSaleProductIds.size;
+      const driftCentralCount = driftByProduct.size;
+      const diffCentralCount = new Set([...driftByProduct.keys(), ...doubleSaleProductIds]).size;
+
+      function healthBucket(channel: "base" | "ebay" | "central") {
+        const doubleSale = channel === "central" ? doubleSaleCentralCount : doubleSaleProductIdsByChannel[channel]!.size;
+        const drift =
+          channel === "central"
+            ? driftCentralCount
+            : [...driftProductIdsByChannel[channel]!].filter((id) => !doubleSaleProductIdsByChannel[channel]!.has(id)).length;
+        const safetyStock = channel === "central" ? safetyStockCountCentral : safetyStockCountByChannel[channel]!;
+        // soldOut is reused as-is across all three rows (a product out of central stock is out
+        // of stock everywhere) -- not independently tracked per channel anywhere in this schema.
+        // normal is a non-negative remainder, not an independently-fetched set, so an unlikely
+        // overlap (e.g. a product both drift-flagged AND sold out) is undercounted here rather
+        // than double-subtracted -- documented approximation, not a fabricated number.
+        const normal = Math.max(0, catalogTotal - doubleSale - drift - soldOut - safetyStock);
+        return { normal, safetyStock, drift, possibleDoubleSale: doubleSale, soldOut, total: catalogTotal };
+      }
+
+      const trendSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const trendRows = await db
+        .select({ errorCode: syncErrors.errorCode, createdAt: syncErrors.createdAt })
+        .from(syncErrors)
+        .where(
+          and(
+            eq(syncErrors.tenantId, tenantId),
+            inArray(syncErrors.errorCode, ["inventory_drift", "possible_double_sale"]),
+            gte(syncErrors.createdAt, trendSince),
+          ),
+        );
+      const trendByDay = new Map<string, { diffCount: number; possibleDoubleSaleCount: number }>();
+      for (const row of trendRows) {
+        const day = row.createdAt.toISOString().slice(0, 10);
+        const bucket = trendByDay.get(day) ?? { diffCount: 0, possibleDoubleSaleCount: 0 };
+        if (row.errorCode === "possible_double_sale") bucket.possibleDoubleSaleCount += 1;
+        else bucket.diffCount += 1;
+        trendByDay.set(day, bucket);
+      }
+      const inventoryTrend = Array.from({ length: 7 }, (_, i) => {
+        const date = new Date(Date.now() - (6 - i) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const bucket = trendByDay.get(date) ?? { diffCount: 0, possibleDoubleSaleCount: 0 };
+        return { date, ...bucket };
+      });
+
       return json(200, {
         products: rows.map((r, i) => ({
           id: r.product.id,
@@ -404,11 +523,26 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           costJpy: r.product.costJpy,
           ebayListingStatus: r.ebayListing?.status ?? null,
           inventory: inventories[i],
+          safetyStockBuffer: r.inventoryRow?.safetyStockBuffer ?? 0,
+          diffStatus: diffStatusForProduct(r.product.id),
+          lastSyncedAt: r.ebayListing?.lastSyncedAt?.toISOString() ?? null,
           aiDraftCount: draftCountByProduct[r.product.id] ?? 0,
           updatedAt: r.product.updatedAt.toISOString(),
         })),
         total: totalRows[0]?.count ?? 0,
         kpi: { total: catalogTotal, published, draft, soldOut, needsAttention },
+        // Additive, 在庫監視-page-specific aggregates -- independent of `kpi` above, which the
+        // existing /products page already relies on and must keep meaning exactly what it did.
+        inventoryKpi: {
+          monitored: catalogTotal,
+          diffCount: diffCentralCount,
+          safetyStockAppliedCount: safetyStockCountCentral,
+          possibleDoubleSaleCount: doubleSaleCentralCount,
+          reconstructPendingCount: driftCentralCount,
+          syncedRate: Math.round((baseConfidence.score + ebayConfidence.score) / 2),
+        },
+        inventoryHealthByChannel: { base: healthBucket("base"), ebay: healthBucket("ebay"), central: healthBucket("central") },
+        inventoryTrend,
       });
     }
 
