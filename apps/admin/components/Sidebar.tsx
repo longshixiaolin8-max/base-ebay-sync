@@ -11,13 +11,14 @@ import { planLabel } from "@/lib/format";
 import { useSignOut } from "@/lib/use-sign-out";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SyncIcon } from "@/components/icons";
+import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SparkleIcon, SyncIcon } from "@/components/icons";
 import { PlanUsageWidget } from "@/components/dashboard/PlanUsageWidget";
 
 const LINKS = [
   { href: "/dashboard", label: "ダッシュボード", icon: DashboardIcon },
   { href: "/onboarding", label: "導入設定", icon: PlugIcon },
   { href: "/products", label: "商品マスター", icon: BoxIcon },
+  { href: "/drafts", label: "AI出品下書き", icon: SparkleIcon },
   { href: "/commerce", label: "コマース統合", icon: SyncIcon },
   { href: "/orders", label: "注文管理", icon: CartIcon },
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },
@@ -42,6 +43,7 @@ export function Sidebar() {
   const { signingOut, handleSignOut } = useSignOut();
   const [email, setEmail] = useState<string | null>(null);
   const [errorCount, setErrorCount] = useState(0);
+  const [reviewPendingCount, setReviewPendingCount] = useState(0);
   const [baseState, setBaseState] = useState<ChannelState | null>(null);
   const [ebayState, setEbayState] = useState<ChannelState | null>(null);
   const [usage, setUsage] = useState<{ products: { used: number; limit: number } } | null>(null);
@@ -73,6 +75,9 @@ export function Sidebar() {
       .catch(() => setEmail(null));
     apiGet<{ syncErrors: SyncError[] }>("/admin/sync-errors?resolved=false")
       .then((res) => setErrorCount(res.syncErrors.length))
+      .catch(() => {});
+    apiGet<{ kpi: { reviewPending: number } }>("/admin/drafts")
+      .then((res) => setReviewPendingCount(res.kpi.reviewPending))
       .catch(() => {});
     apiGet<ChannelState>("/admin/sync/state?channel=base")
       .then(setBaseState)
@@ -117,11 +122,12 @@ export function Sidebar() {
         {LINKS.map((link) => {
           const Icon = link.icon;
           const active = pathname?.startsWith(link.href) || undefined;
+          const badge = link.href === "/sync-errors" ? errorCount : link.href === "/drafts" ? reviewPendingCount : 0;
           return (
             <Link key={link.href} href={link.href} data-active={active}>
               <Icon />
               {link.label}
-              {link.href === "/sync-errors" && errorCount > 0 && <span className="sidebar-nav-badge">{errorCount}</span>}
+              {badge > 0 && <span className="sidebar-nav-badge">{badge}</span>}
             </Link>
           );
         })}

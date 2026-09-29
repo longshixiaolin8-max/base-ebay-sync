@@ -177,6 +177,10 @@ export const aiListingDraft = pgTable("ai_listing_draft", {
    *  admin draft-edit endpoint -- the "人間修正値" this item asks to retain. Null until a
    *  human actually edits this specific draft. */
   humanCorrectedFields: jsonb("human_corrected_fields").$type<Record<string, unknown> | null>(),
+  /** Free-text internal collaboration note ("作業メモ"), e.g. "追加撮影を依頼済み" -- never
+   *  shown to a buyer or sent to eBay, purely for the admin team reviewing this draft.
+   *  Nullable: most drafts never get one. */
+  internalNotes: text("internal_notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

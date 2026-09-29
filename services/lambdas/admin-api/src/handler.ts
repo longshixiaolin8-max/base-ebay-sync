@@ -8,6 +8,7 @@ import {
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
+  draftConfidenceScore,
   findMissingRequiredAspects,
   getPlanLimits,
   ItemCondition,
@@ -558,6 +559,203 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
 
       return json(200, { productId: id, itemSpecifics: merged });
+    }
+
+    // --- AI出品下書き画面: the review queue's own list + KPI row. Scoped to products still
+    // in "ai_generated" status (not yet approved) -- once approved, a product moves on to
+    // active/sold_out and drops out of this queue, matching the page's own purpose ("レビュ
+    // ー待ちの下書きを確認・承認する"), not a general history of every draft ever generated
+    // (that's what 監査ログ is for). ---
+    if (method === "GET" && path === "/admin/drafts") {
+      const needsReviewOnly = event.queryStringParameters?.status === "needs_review";
+      const sortAsc = event.queryStringParameters?.sort === "created_asc";
+      const fromRaw = event.queryStringParameters?.from;
+      const toRaw = event.queryStringParameters?.to;
+      const from = fromRaw ? new Date(fromRaw) : null;
+      const to = toRaw ? new Date(toRaw) : null;
+      const q = event.queryStringParameters?.q?.trim().toLowerCase();
+
+      // Bounded the same way /admin/products is (limit 200, no pagination) -- a review
+      // queue of pending AI drafts is expected to stay small; this is the size a normal
+      // catalog's ai_generated backlog looks like, not the full product catalog.
+      const pendingProducts = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.status, "ai_generated")))
+        .orderBy(desc(productMaster.updatedAt))
+        .limit(200);
+      const productById = new Map(pendingProducts.map((p) => [p.id, p]));
+
+      // One row per product -- the most recent draft, in case a product has been
+      // regenerated more than once. selectDistinctOn requires its own ORDER BY to start
+      // with the DISTINCT ON column(s) (a Postgres requirement, not a drizzle quirk).
+      const latestDrafts = pendingProducts.length
+        ? await db
+            .selectDistinctOn([aiListingDraft.productId])
+            .from(aiListingDraft)
+            .where(and(eq(aiListingDraft.tenantId, tenantId), inArray(aiListingDraft.productId, [...productById.keys()])))
+            .orderBy(aiListingDraft.productId, desc(aiListingDraft.createdAt))
+        : [];
+
+      let rows = latestDrafts
+        .map((draft) => {
+          const product = productById.get(draft.productId);
+          if (!product) return null;
+          return { draft, product };
+        })
+        .filter((r): r is { draft: (typeof latestDrafts)[number]; product: (typeof pendingProducts)[number] } => r !== null);
+
+      if (needsReviewOnly) rows = rows.filter((r) => r.draft.needsHumanReview);
+      if (from) rows = rows.filter((r) => r.draft.createdAt >= from);
+      if (to) rows = rows.filter((r) => r.draft.createdAt <= to);
+      if (q) rows = rows.filter((r) => r.product.title.toLowerCase().includes(q) || r.product.sku.toLowerCase().includes(q));
+      rows.sort((a, b) => (sortAsc ? 1 : -1) * (a.draft.createdAt.getTime() - b.draft.createdAt.getTime()));
+
+      // KPI row: independent of the filters above, same "stays constant while the list
+      // below is filtered" design as the products page's KPI row.
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+      const [reviewPending, needsFixRows, publishedTodayRow] = await Promise.all([
+        countProductsByStatus(db, tenantId, "ai_generated"),
+        Promise.resolve(latestDrafts.filter((d) => d.needsHumanReview).length),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(channelListings)
+          .where(
+            and(
+              eq(channelListings.tenantId, tenantId),
+              eq(channelListings.channel, "ebay"),
+              eq(channelListings.status, "published"),
+              gte(channelListings.lastSyncedAt, todayStart),
+            ),
+          ),
+      ]);
+      const avgConfidence =
+        latestDrafts.length > 0
+          ? Math.round(
+              (latestDrafts.reduce((sum, d) => sum + draftConfidenceScore(d.confidenceFlags), 0) / latestDrafts.length) * 10,
+            ) / 10
+          : 0;
+
+      return json(200, {
+        drafts: rows.map(({ draft, product }) => ({
+          id: draft.id,
+          productId: product.id,
+          title: product.title,
+          sku: product.sku,
+          images: product.images,
+          categoryLabel: draft.categoryCandidates[0]?.label ?? null,
+          confidenceScore: draftConfidenceScore(draft.confidenceFlags),
+          needsHumanReview: draft.needsHumanReview,
+          sourceMismatch: draft.sourceContentHash !== product.contentHash,
+          createdAt: draft.createdAt.toISOString(),
+        })),
+        kpi: {
+          reviewPending,
+          needsFix: needsFixRows,
+          publishedToday: publishedTodayRow[0]?.count ?? 0,
+          avgConfidence,
+        },
+      });
+    }
+
+    // AI出品下書き画面 (item request): lets a human correct the AI's suggested USD price
+    // before approval -- mirrors draft-condition's shape exactly. Stored in cents like the
+    // column itself (suggested_price_usd_cents); the request body is dollars, matching what
+    // every other USD-cents field in this API already accepts from the frontend.
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-price$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { suggestedPriceUsd?: number };
+      if (typeof body.suggestedPriceUsd !== "number" || !Number.isFinite(body.suggestedPriceUsd) || body.suggestedPriceUsd <= 0) {
+        return json(400, { error: "invalid_price" });
+      }
+      const priceUsdCents = Math.round(body.suggestedPriceUsd * 100);
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: priceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "ai_draft_price_corrected",
+        entityType: "ai_listing_draft",
+        entityId: draft.id,
+        before: { suggestedPriceUsdCents: draft.suggestedPriceUsd },
+        after: { suggestedPriceUsdCents: priceUsdCents },
+      });
+
+      // Cents, like every other read of this same column (e.g. GET /admin/products/{id}'s
+      // raw draft.suggestedPriceUsd) -- the request body above is dollars (a human-facing
+      // input field), but every value this API returns over the wire for this column stays
+      // in the column's real unit so the frontend divides by 100 in exactly one place.
+      return json(200, { productId: id, suggestedPriceUsdCents: priceUsdCents });
+    }
+
+    // AI出品下書き画面: the SEO keyword chips are fully replaced by whatever list the
+    // operator saves (unlike draft-item-specifics' merge-by-key semantics) -- there's no
+    // stable "key" to merge keyword entries by, and the frontend always sends its own
+    // current, complete chip list back.
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-seo-keywords$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { seoKeywords?: unknown };
+      if (!Array.isArray(body.seoKeywords) || !body.seoKeywords.every((k) => typeof k === "string")) {
+        return json(400, { error: "seoKeywords_required" });
+      }
+      const seoKeywords = [...new Set(body.seoKeywords.map((k) => k.trim()).filter(Boolean))];
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      await db.update(aiListingDraft).set({ seoKeywords }).where(eq(aiListingDraft.id, draft.id));
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "ai_draft_seo_keywords_corrected",
+        entityType: "ai_listing_draft",
+        entityId: draft.id,
+        before: { seoKeywords: draft.seoKeywords },
+        after: { seoKeywords },
+      });
+
+      return json(200, { productId: id, seoKeywords });
+    }
+
+    // AI出品下書き画面: free-text internal note ("作業メモ") -- never sent to eBay, purely
+    // for the admin team. No before/after diff worth recording in the audit log (unlike the
+    // other draft-* routes' structured fields, an arbitrary text note isn't meaningfully
+    // diffable there), so this just updates the row.
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/draft-notes$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const body = JSON.parse(event.body ?? "{}") as { internalNotes?: string | null };
+      if (body.internalNotes !== null && typeof body.internalNotes !== "string") {
+        return json(400, { error: "internalNotes_required" });
+      }
+
+      const [draft] = await db
+        .select()
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+      if (!draft) return json(404, { error: "no_draft_for_product" });
+
+      const internalNotes = body.internalNotes?.trim() || null;
+      await db.update(aiListingDraft).set({ internalNotes }).where(eq(aiListingDraft.id, draft.id));
+
+      return json(200, { productId: id, internalNotes });
     }
 
     if (method === "GET" && path === "/admin/sync-errors") {

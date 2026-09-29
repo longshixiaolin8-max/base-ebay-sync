@@ -229,6 +229,9 @@ function createFakeDb(selectResults: unknown[]) {
   let i = 0;
   return {
     select: () => chain(selectResults[i++]),
+    // Same sequential slot counter as select() -- GET /admin/drafts calls selectDistinctOn
+    // interleaved with plain select() calls, and both consume this same ordered list.
+    selectDistinctOn: () => chain(selectResults[i++]),
     update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
     insert: vi.fn(() => ({ values: async () => undefined })),
   };
@@ -358,6 +361,101 @@ describe("admin-api handler", () => {
     });
   });
 
+  describe("GET /admin/drafts", () => {
+    it("returns an empty queue without ever calling selectDistinctOn when there are no ai_generated products", async () => {
+      fakeDb = createFakeDb([[], [{ count: 0 }]]); // pendingProducts, publishedTodayRow
+      const res = await callHandler(makeEvent("GET", "/admin/drafts"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.drafts).toEqual([]);
+      expect(parsed.kpi).toEqual({ reviewPending: 0, needsFix: 0, publishedToday: 0, avgConfidence: 0 });
+    });
+
+    it("joins each ai_generated product with its latest draft and computes a real per-draft confidence score", async () => {
+      const createdAt = new Date("2024-04-30T14:25:00.000Z");
+      fakeDb = createFakeDb([
+        [
+          { id: "p1", title: "スタッキングマグカップ", sku: "MUG-GR-001", images: [], contentHash: "hash-A", status: "ai_generated", updatedAt: createdAt },
+        ], // pendingProducts
+        [
+          {
+            id: "d1",
+            productId: "p1",
+            createdAt,
+            categoryCandidates: [{ ebayCategoryId: "1", label: "Home & Garden > Kitchen" }],
+            confidenceFlags: { brand: "confirmed", material: "confirmed", size: "uncertain", authenticity: "unknown", condition: "confirmed" },
+            needsHumanReview: true,
+            sourceContentHash: "hash-A",
+          },
+        ], // latestDrafts
+        [{ count: 8 }], // publishedTodayRow
+      ]);
+      countProductsByStatusMock.mockResolvedValueOnce(1);
+
+      const res = await callHandler(makeEvent("GET", "/admin/drafts"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.drafts).toEqual([
+        expect.objectContaining({
+          id: "d1",
+          productId: "p1",
+          title: "スタッキングマグカップ",
+          sku: "MUG-GR-001",
+          categoryLabel: "Home & Garden > Kitchen",
+          confidenceScore: 60,
+          needsHumanReview: true,
+          sourceMismatch: false,
+        }),
+      ]);
+      expect(parsed.kpi).toEqual({ reviewPending: 1, needsFix: 1, publishedToday: 8, avgConfidence: 60 });
+    });
+
+    it("flags sourceMismatch when the draft's sourceContentHash no longer matches the product's current contentHash", async () => {
+      const createdAt = new Date();
+      fakeDb = createFakeDb([
+        [{ id: "p1", title: "T1", sku: "SKU-1", images: [], contentHash: "hash-NEW", status: "ai_generated", updatedAt: createdAt }],
+        [
+          {
+            id: "d1",
+            productId: "p1",
+            createdAt,
+            categoryCandidates: [],
+            confidenceFlags: {},
+            needsHumanReview: false,
+            sourceContentHash: "hash-OLD",
+          },
+        ],
+        [{ count: 0 }],
+      ]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/drafts"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.drafts[0]).toMatchObject({ sourceMismatch: true, confidenceScore: 100 });
+    });
+
+    it("status=needs_review filters out drafts that don't need human review", async () => {
+      const createdAt = new Date();
+      fakeDb = createFakeDb([
+        [
+          { id: "p1", title: "T1", sku: "SKU-1", images: [], contentHash: "h", status: "ai_generated", updatedAt: createdAt },
+          { id: "p2", title: "T2", sku: "SKU-2", images: [], contentHash: "h", status: "ai_generated", updatedAt: createdAt },
+        ],
+        [
+          { id: "d1", productId: "p1", createdAt, categoryCandidates: [], confidenceFlags: {}, needsHumanReview: true, sourceContentHash: "h" },
+          { id: "d2", productId: "p2", createdAt, categoryCandidates: [], confidenceFlags: {}, needsHumanReview: false, sourceContentHash: "h" },
+        ],
+        [{ count: 0 }],
+      ]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/drafts", { status: "needs_review" }));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.drafts).toHaveLength(1);
+      expect(parsed.drafts[0].id).toBe("d1");
+      // The KPI row stays scoped to the full queue, independent of the list filter above.
+      expect(parsed.kpi.reviewPending).toBe(0); // countProductsByStatusMock defaults to 0 in this test
+    });
+  });
+
   it("GET /admin/products/{id} returns 404 when the product doesn't exist", async () => {
     fakeDb = createFakeDb([[]]);
     const res = await callHandler(makeEvent("GET", "/admin/products/missing-id"));
@@ -459,6 +557,65 @@ describe("admin-api handler", () => {
       fakeDb,
       expect.objectContaining({ action: "ai_draft_item_specifics_corrected", entityId: "draft-1" }),
     );
+  });
+
+  it("POST /admin/products/{id}/draft-price returns 400 for a non-positive or non-numeric price", async () => {
+    const res1 = await callHandler(makeEvent("POST", "/admin/products/p1/draft-price", {}, { suggestedPriceUsd: -5 }));
+    expect(res1.statusCode).toBe(400);
+    const res2 = await callHandler(makeEvent("POST", "/admin/products/p1/draft-price", {}, {}));
+    expect(res2.statusCode).toBe(400);
+  });
+
+  it("POST /admin/products/{id}/draft-price returns 404 when no draft exists", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-price", {}, { suggestedPriceUsd: 24.99 }));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/draft-price stores the price in cents and records an audit log entry", async () => {
+    fakeDb = createFakeDb([[{ id: "draft-1", suggestedPriceUsd: 1999 }]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-price", {}, { suggestedPriceUsd: 24.99 }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ productId: "p1", suggestedPriceUsdCents: 2499 });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "ai_draft_price_corrected", entityId: "draft-1", after: { suggestedPriceUsdCents: 2499 } }),
+    );
+  });
+
+  it("POST /admin/products/{id}/draft-seo-keywords returns 400 when seoKeywords isn't a string array", async () => {
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-seo-keywords", {}, { seoKeywords: "not-an-array" }));
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("POST /admin/products/{id}/draft-seo-keywords replaces the keyword list, trimming and de-duplicating", async () => {
+    fakeDb = createFakeDb([[{ id: "draft-1", seoKeywords: ["old"] }]]);
+    const res = await callHandler(
+      makeEvent("POST", "/admin/products/p1/draft-seo-keywords", {}, { seoKeywords: [" mug ", "mug", "ceramic", ""] }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ productId: "p1", seoKeywords: ["mug", "ceramic"] });
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ action: "ai_draft_seo_keywords_corrected", entityId: "draft-1" }),
+    );
+  });
+
+  it("POST /admin/products/{id}/draft-notes returns 404 when no draft exists", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-notes", {}, { internalNotes: "追加撮影を依頼済み" }));
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("POST /admin/products/{id}/draft-notes saves a trimmed note, and null clears it", async () => {
+    fakeDb = createFakeDb([[{ id: "draft-1" }]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/draft-notes", {}, { internalNotes: "  追加撮影を依頼済み  " }));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ productId: "p1", internalNotes: "追加撮影を依頼済み" });
+
+    fakeDb = createFakeDb([[{ id: "draft-1" }]]);
+    const res2 = await callHandler(makeEvent("POST", "/admin/products/p1/draft-notes", {}, { internalNotes: "" }));
+    expect(JSON.parse(res2.body!)).toEqual({ productId: "p1", internalNotes: null });
   });
 
   it("GET /admin/sync-errors filters by productId when provided", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyStandardAspectFallbacks, findMissingRequiredAspects } from "./ai.js";
+import { applyStandardAspectFallbacks, draftConfidenceScore, findMissingRequiredAspects } from "./ai.js";
 
 describe("findMissingRequiredAspects", () => {
   it("returns nothing when every required aspect has a real value", () => {
@@ -55,5 +55,23 @@ describe("applyStandardAspectFallbacks", () => {
   it("does not add Brand when it is not actually required for this category", () => {
     const itemSpecifics = { Type: "Bracelet" };
     expect(applyStandardAspectFallbacks(itemSpecifics, ["Type"])).toEqual({ Type: "Bracelet" });
+  });
+});
+
+describe("draftConfidenceScore", () => {
+  it("returns 100 when every tracked field is confirmed", () => {
+    expect(draftConfidenceScore({ brand: "confirmed", material: "confirmed" })).toBe(100);
+  });
+
+  it("returns the confirmed fraction as a 0-100 score", () => {
+    expect(draftConfidenceScore({ brand: "confirmed", material: "uncertain", size: "unknown", condition: "confirmed" })).toBe(50);
+  });
+
+  it("returns 0 when nothing is confirmed", () => {
+    expect(draftConfidenceScore({ brand: "uncertain", material: "unknown" })).toBe(0);
+  });
+
+  it("returns 100 for an empty confidenceFlags object -- nothing to be unconfident about", () => {
+    expect(draftConfidenceScore({})).toBe(100);
   });
 });

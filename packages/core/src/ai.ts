@@ -149,3 +149,19 @@ export const StaleProductSuggestion = z.object({
   suggestedActions: z.array(z.string()).default([]),
 });
 export type StaleProductSuggestion = z.infer<typeof StaleProductSuggestion>;
+
+/**
+ * A per-draft confidence score (0-100) derived from confidenceFlags -- the fraction of
+ * tracked fields (brand/material/size/authenticity/condition, see the prompt above) the AI
+ * marked "confirmed". Not a value stored anywhere; a real, honest summary of real categorical
+ * data, computed the same way by both admin-api (AI出品下書き画面's KPI row) and the admin
+ * frontend (the drafts list, products/detail's diagnostics panel), rather than each
+ * reimplementing this one formula. Returns 100 when there are no tracked fields at all
+ * (nothing to be unconfident about).
+ */
+export function draftConfidenceScore(confidenceFlags: Record<string, string>): number {
+  const values = Object.values(confidenceFlags);
+  if (values.length === 0) return 100;
+  const confirmed = values.filter((v) => v === "confirmed").length;
+  return Math.round((confirmed / values.length) * 100);
+}

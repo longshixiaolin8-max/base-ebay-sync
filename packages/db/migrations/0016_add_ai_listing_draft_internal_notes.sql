@@ -1,0 +1,1 @@
+ALTER TABLE "ai_listing_draft" ADD COLUMN "internal_notes" text;

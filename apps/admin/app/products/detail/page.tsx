@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
+import { CONFIDENCE_LABEL, FIELD_LABEL_JA } from "@/lib/ai-draft-copy";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
@@ -97,15 +98,6 @@ interface DynamicPrice {
   costMarkupRatio: number;
   fxRateUsdPerJpy: number;
 }
-
-const CONFIDENCE_LABEL: Record<string, string> = { confirmed: "確認済み", uncertain: "未確認", unknown: "不明" };
-const FIELD_LABEL_JA: Record<string, string> = {
-  brand: "ブランド",
-  material: "素材",
-  size: "サイズ",
-  authenticity: "真贋",
-  condition: "状態",
-};
 
 function ProductDetailInner() {
   const { ready } = useRequireAuth();

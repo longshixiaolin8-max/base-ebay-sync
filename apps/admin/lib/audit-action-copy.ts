@@ -8,6 +8,8 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   ai_listing_generated: "AIが出品ドラフトを生成しました",
   ai_draft_condition_corrected: "AI下書きのコンディションを修正しました",
   ai_draft_item_specifics_corrected: "AI下書きのItem Specificsを修正しました",
+  ai_draft_price_corrected: "AI下書きの価格を修正しました",
+  ai_draft_seo_keywords_corrected: "AI下書きのSEOキーワードを修正しました",
   ai_draft_stale_regeneration_triggered: "滞留商品のAI下書き再生成を実行しました",
   ebay_listing_publish_approved: "eBay出品を承認しました",
   ebay_listing_published: "eBayへ出品しました",
