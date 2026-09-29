@@ -120,6 +120,13 @@
       "when": 1790670474642,
       "tag": "0016_add_ai_listing_draft_internal_notes",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790703361427,
+      "tag": "0017_add_tenant_settings_columns",
+      "breakpoints": true
     }
   ]
 }

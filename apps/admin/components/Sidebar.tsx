@@ -27,7 +27,7 @@ const LINKS = [
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },
   { href: "/system-health", label: "システム状態", icon: ActivityIcon },
   { href: "/audit-log", label: "監査ログ", icon: FileIcon },
-  { href: "/billing", label: "請求", icon: CoinIcon },
+  { href: "/billing", label: "請求・設定", icon: CoinIcon },
 ];
 
 interface ChannelState {

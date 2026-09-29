@@ -233,8 +233,20 @@ function createFakeDb(selectResults: unknown[]) {
     // Same sequential slot counter as select() -- GET /admin/drafts calls selectDistinctOn
     // interleaved with plain select() calls, and both consume this same ordered list.
     selectDistinctOn: () => chain(selectResults[i++]),
-    update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
+    // .where() resolves to undefined when simply awaited (the vast majority of existing
+    // update() call sites), but also exposes .returning() -- consumed by the handful of newer
+    // routes (e.g. PATCH /admin/tenant) that need the updated row back -- drawing from this
+    // same shared sequential slot list as select()/selectDistinctOn() above.
+    update: vi.fn(() => ({
+      set: () => ({
+        where: () => ({
+          returning: async () => selectResults[i++],
+          then: (resolve: (v: unknown) => void) => resolve(undefined),
+        }),
+      }),
+    })),
     insert: vi.fn(() => ({ values: async () => undefined })),
+    delete: vi.fn(() => ({ where: async () => undefined })),
   };
 }
 
@@ -1205,7 +1217,10 @@ describe("admin-api handler", () => {
   });
 
   it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
-    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+    fakeDb = createFakeDb([
+      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+      [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set
+    ]);
 
     const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
 
@@ -1216,7 +1231,10 @@ describe("admin-api handler", () => {
   });
 
   it("GET /admin/products/{id}/dynamic-price uses this product's saved shipping/margin overrides", async () => {
-    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }]]);
+    fakeDb = createFakeDb([
+      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }],
+      [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
+    ]);
 
     const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
 
@@ -1225,7 +1243,10 @@ describe("admin-api handler", () => {
   });
 
   it("GET /admin/products/{id}/dynamic-price lets query params override the saved config for a hypothetical preview", async () => {
-    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+    fakeDb = createFakeDb([
+      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+      [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
+    ]);
 
     const res = await callHandler(
       makeEvent("GET", "/admin/products/product-1/dynamic-price", { shippingUsd: "15", targetMarginRatio: "0.5" }),
@@ -1269,6 +1290,7 @@ describe("admin-api handler", () => {
         [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
         [{ status: "published", externalId: "ext-1" }],
         [{ id: "draft-1", suggestedPriceUsd: null }],
+        [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set
       ]);
 
       const res = await callHandler(makeEvent("POST", "/admin/products/product-1/apply-dynamic-price"));
@@ -2247,6 +2269,7 @@ describe("admin-api handler", () => {
       getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123" });
       customersRetrieveMock.mockResolvedValueOnce({
         deleted: false,
+        email: "demo@example.com",
         invoice_settings: {
           default_payment_method: { card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2028 } },
         },
@@ -2255,6 +2278,7 @@ describe("admin-api handler", () => {
         data: [
           {
             id: "in_1",
+            number: "INV-202404",
             amount_paid: 980000,
             created: 1735689600,
             status: "paid",
@@ -2283,6 +2307,7 @@ describe("admin-api handler", () => {
         invoices: [
           {
             id: "in_1",
+            number: "INV-202404",
             amountUsdCents: 980000,
             createdAt: new Date(1735689600 * 1000).toISOString(),
             status: "paid",
@@ -2297,6 +2322,7 @@ describe("admin-api handler", () => {
           priceInterval: "month",
           trialEnd: null,
         },
+        billingEmail: "demo@example.com",
       });
     });
 
@@ -2365,13 +2391,91 @@ describe("admin-api handler", () => {
       );
     });
 
-    it("GET /admin/tenant returns the tenant's real registered name", async () => {
-      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", name: "Acme Inc" });
+    it("GET /admin/tenant returns the tenant's real registered name and settings fields", async () => {
+      fakeDb = createFakeDb([
+        [{ id: TENANT_A, name: "Acme Inc", address: null, timezone: "Asia/Tokyo", language: "ja", contactEmail: null }],
+      ]);
 
       const res = await callHandler(makeEvent("GET", "/admin/tenant"));
 
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ name: "Acme Inc" });
+      expect(JSON.parse(res.body!)).toEqual({ id: TENANT_A, name: "Acme Inc", address: null, timezone: "Asia/Tokyo", language: "ja", contactEmail: null });
+    });
+
+    it("PATCH /admin/tenant updates the tenant info card fields and records an audit log entry", async () => {
+      fakeDb = createFakeDb([
+        [{ id: TENANT_A, name: "New Name", address: "東京都渋谷区神宮前1-2-3", timezone: "Asia/Tokyo", language: "ja", contactEmail: "demo@example.com" }],
+      ]);
+
+      const res = await callHandler(
+        makeEvent("PATCH", "/admin/tenant", {}, { name: "New Name", address: "東京都渋谷区神宮前1-2-3", contactEmail: "demo@example.com" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        id: TENANT_A,
+        name: "New Name",
+        address: "東京都渋谷区神宮前1-2-3",
+        timezone: "Asia/Tokyo",
+        language: "ja",
+        contactEmail: "demo@example.com",
+      });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(fakeDb, expect.objectContaining({ action: "tenant_settings_updated", entityType: "tenant" }));
+    });
+
+    it("GET /admin/tenant/notification-preferences defaults every toggle to true when nothing has been saved yet", async () => {
+      fakeDb = createFakeDb([[{ notificationPreferences: null }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/tenant/notification-preferences"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        inventoryDiffAlert: true,
+        aiDraftCompleted: true,
+        billingNotice: true,
+        oauthExpiryNotice: true,
+        importantNotice: true,
+      });
+    });
+
+    it("PATCH /admin/tenant/notification-preferences merges a partial update onto the existing saved preferences", async () => {
+      fakeDb = createFakeDb([[{ notificationPreferences: { inventoryDiffAlert: false } }]]);
+      const res = await callHandler(makeEvent("PATCH", "/admin/tenant/notification-preferences", {}, { aiDraftCompleted: false }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        inventoryDiffAlert: false,
+        aiDraftCompleted: false,
+        billingNotice: true,
+        oauthExpiryNotice: true,
+        importantNotice: true,
+      });
+    });
+
+    it("GET /admin/tenant/pricing-defaults returns the tenant's stored defaults", async () => {
+      fakeDb = createFakeDb([[{ defaultShippingCostJpyDomestic: 800, defaultShippingCostJpyIntl: 2000, defaultTargetMarginBasisPoints: 2000 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/tenant/pricing-defaults"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ defaultShippingCostJpyDomestic: 800, defaultShippingCostJpyIntl: 2000, defaultTargetMarginBasisPoints: 2000 });
+    });
+
+    it("PATCH /admin/tenant/pricing-defaults converts a percent input into stored basis points", async () => {
+      fakeDb = createFakeDb([[{ defaultShippingCostJpyDomestic: 800, defaultShippingCostJpyIntl: 2000, defaultTargetMarginBasisPoints: 2000 }]]);
+      const res = await callHandler(
+        makeEvent("PATCH", "/admin/tenant/pricing-defaults", {}, { defaultShippingCostJpyDomestic: 800, defaultShippingCostJpyIntl: 2000, defaultTargetMarginPercent: 20 }),
+      );
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ defaultShippingCostJpyDomestic: 800, defaultShippingCostJpyIntl: 2000, defaultTargetMarginBasisPoints: 2000 });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(fakeDb, expect.objectContaining({ action: "pricing_defaults_updated", entityType: "tenant" }));
+    });
+
+    it("POST /admin/oauth/{channel}/disconnect deletes the connection row and records an audit log entry", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("POST", "/admin/oauth/ebay/disconnect"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", disconnected: true });
+      expect((fakeDb as { delete: ReturnType<typeof vi.fn> }).delete).toHaveBeenCalledWith(expect.anything());
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ actor: "admin@example.com", action: "oauth_disconnected", entityType: "oauth_connection", entityId: "ebay" }),
+      );
     });
 
     it("POST /admin/billing/portal-session is reachable even when the tenant is inactive, and returns the Stripe portal URL", async () => {

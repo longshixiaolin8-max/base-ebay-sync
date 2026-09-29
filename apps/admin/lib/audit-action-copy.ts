@@ -35,5 +35,8 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   sns_status_updated: "SNS状況を更新しました",
   subscription_cancel_scheduled: "契約解約を予約しました",
   oauth_connected: "外部アカウントを接続しました",
+  oauth_disconnected: "外部アカウントの接続を解除しました",
+  tenant_settings_updated: "テナント情報を更新しました",
+  pricing_defaults_updated: "価格設定のデフォルト値を更新しました",
   dlq_redrive_started: "失敗ジョブの再処理を開始しました",
 };

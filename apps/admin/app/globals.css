@@ -4695,3 +4695,89 @@ tr[data-active="true"] {
   min-width: 48px;
   text-align: right;
 }
+
+/* ---------- Settings page (請求・設定) ---------- */
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+  margin-bottom: 0.9rem;
+}
+
+.settings-field input,
+.settings-field select,
+.settings-field textarea {
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.settings-field input:disabled,
+.settings-field select:disabled,
+.settings-field textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-text strong {
+  display: block;
+  font-size: 0.88rem;
+}
+
+.settings-row-text span {
+  font-size: 0.78rem;
+  color: var(--fg-subtle);
+}
+
+.settings-disabled-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--fg-subtle);
+  background: var(--surface-hover);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.75rem;
+  margin-top: 0.5rem;
+  line-height: 1.6;
+}
+
+.settings-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}

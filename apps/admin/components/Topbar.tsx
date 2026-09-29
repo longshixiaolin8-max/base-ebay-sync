@@ -25,7 +25,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/sync-errors": "同期エラー",
   "/system-health": "システム状態",
   "/audit-log": "監査ログ",
-  "/billing": "請求・プラン",
+  "/billing": "請求・設定",
 };
 
 interface TopbarProps {

@@ -48,6 +48,47 @@ export const tenants = pgTable("tenants", {
   ebayFulfillmentPolicyId: text("ebay_fulfillment_policy_id"),
   ebayPaymentPolicyId: text("ebay_payment_policy_id"),
   ebayReturnPolicyId: text("ebay_return_policy_id"),
+
+  /**
+   * 請求・設定 page's テナント情報 card (item added for that redesign). All nullable and
+   * purely informational today -- nothing in the sync/pricing/notification pipelines reads
+   * timezone/language yet, so setting them has no side effect beyond what the settings page
+   * itself displays. contactEmail is shared between "請求先メール" and the notification
+   * settings tab's destination address, since this platform has exactly one contact per
+   * tenant, not separate billing/ops contacts.
+   */
+  address: text("address"),
+  timezone: text("timezone").default("Asia/Tokyo"),
+  language: text("language").default("ja"),
+  contactEmail: text("contact_email"),
+
+  /**
+   * Tenant-wide pricing defaults (価格設定 tab). Null means "use this platform's own
+   * hardcoded fallback" (packages/core/src/pricing.ts's DEFAULT_SHIPPING_USD/
+   * DEFAULT_TARGET_MARGIN_RATIO) -- these columns exist to let a tenant override that global
+   * default, not to replace product_master's own per-product shippingCostUsdCents/
+   * targetMarginBasisPoints override, which still takes precedence over both when set.
+   */
+  defaultShippingCostJpyDomestic: integer("default_shipping_cost_jpy_domestic"),
+  defaultShippingCostJpyIntl: integer("default_shipping_cost_jpy_intl"),
+  defaultTargetMarginBasisPoints: integer("default_target_margin_basis_points"),
+
+  /**
+   * 通知設定 tab. Each key defaults to true (matching the design's toggles-on-by-default) via
+   * the application layer, not a DB default, since a JSONB column's "default" can't express
+   * per-key defaults cleanly. IMPORTANT: this platform sends no email today (grepped the
+   * whole repo for SES/nodemailer/any outbound-email client -- none exists) -- these toggles
+   * are genuinely persisted, but flipping one currently changes no actual delivery behavior.
+   * The settings page must disclose this, not imply working email delivery.
+   */
+  notificationPreferences: jsonb("notification_preferences").$type<{
+    inventoryDiffAlert?: boolean;
+    aiDraftCompleted?: boolean;
+    billingNotice?: boolean;
+    oauthExpiryNotice?: boolean;
+    importantNotice?: boolean;
+  }>(),
+
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

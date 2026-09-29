@@ -52,6 +52,7 @@ import {
   tenants,
   traceSyncHistory,
   transitionOrderStatus,
+  type Database,
   tryReserveMonthlyAiGeneration,
   upsertSnsScript,
 } from "@ai-ec/db";
@@ -86,6 +87,26 @@ async function currentFxRate(): Promise<number> {
   } catch {
     return USD_PER_JPY_FALLBACK;
   }
+}
+
+/**
+ * 価格設定タブのテナント全体デフォルト(defaultShippingCostJpyIntl/defaultTargetMarginBasisPoints)
+ * を、この基盤自体のハードコード済みフォールバック(DEFAULT_SHIPPING_USD/DEFAULT_TARGET_
+ * MARGIN_RATIO)より優先する。商品ごとの上書き(product_master)はこの関数を呼ぶ側で既に
+ * 最優先されており、ここは「商品側に値がない場合の次点」を解決するだけ。海外(intl)配送
+ * デフォルトのみ使う -- eBay向けの価格計算(USD建て)にのみ関係するため、国内(domestic)
+ * 送料は無関係。
+ */
+async function resolveTenantPricingDefaults(db: Database, tenantId: string, usdPerJpy: number): Promise<{ shippingUsd: number; targetMarginRatio: number }> {
+  const [row] = await db
+    .select({ defaultShippingCostJpyIntl: tenants.defaultShippingCostJpyIntl, defaultTargetMarginBasisPoints: tenants.defaultTargetMarginBasisPoints })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
+  return {
+    shippingUsd: row?.defaultShippingCostJpyIntl != null ? row.defaultShippingCostJpyIntl * usdPerJpy : DEFAULT_SHIPPING_USD,
+    targetMarginRatio: row?.defaultTargetMarginBasisPoints != null ? row.defaultTargetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO,
+  };
 }
 
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
@@ -227,11 +248,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const invoicesRes = await stripe.invoices.list({ customer: billing.stripeCustomerId, limit: 12 });
       const invoices = invoicesRes.data.map((inv) => ({
         id: inv.id,
+        // Stripe's own human-facing invoice number (e.g. "INV-202404"), distinct from the
+        // internal `id` above -- not previously returned, additive only.
+        number: inv.number ?? null,
         amountUsdCents: inv.amount_paid,
         createdAt: new Date(inv.created * 1000).toISOString(),
         status: inv.status,
         hostedInvoiceUrl: inv.hosted_invoice_url ?? null,
       }));
+      // Real, from the same customer object already fetched above for the payment method --
+      // not a separately-stored "billing email" anywhere in this platform's own schema.
+      const billingEmail = !customer.deleted ? (customer.email ?? null) : null;
 
       let subscription:
         | {
@@ -266,7 +293,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         };
       }
 
-      return json(200, { paymentMethod, invoices, subscription });
+      return json(200, { paymentMethod, invoices, subscription, billingEmail });
     }
 
     if (method === "POST" && path === "/admin/billing/cancel") {
@@ -292,9 +319,125 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
 
     if (method === "GET" && path === "/admin/tenant") {
-      const billing = await getTenantBillingStatus(db, tenantId);
-      if (!billing) return json(404, { error: "not_found" });
-      return json(200, { name: billing.name });
+      const [row] = await db
+        .select({
+          id: tenants.id,
+          name: tenants.name,
+          address: tenants.address,
+          timezone: tenants.timezone,
+          language: tenants.language,
+          contactEmail: tenants.contactEmail,
+        })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .limit(1);
+      if (!row) return json(404, { error: "not_found" });
+      return json(200, row);
+    }
+
+    // 請求・設定ページのテナント情報カードの編集アクション。name/address/timezone/language/
+    // contactEmail はすべて表示専用の情報(同期・価格計算パイプラインはまだ何も読まない)。
+    if (method === "PATCH" && path === "/admin/tenant") {
+      const body = JSON.parse(event.body ?? "{}") as {
+        name?: string;
+        address?: string | null;
+        timezone?: string | null;
+        language?: string | null;
+        contactEmail?: string | null;
+      };
+      const patch: Partial<typeof tenants.$inferInsert> = {};
+      if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
+      if ("address" in body) patch.address = body.address?.trim() || null;
+      if ("timezone" in body) patch.timezone = body.timezone?.trim() || null;
+      if ("language" in body) patch.language = body.language?.trim() || null;
+      if ("contactEmail" in body) patch.contactEmail = body.contactEmail?.trim() || null;
+
+      const [updated] = await db.update(tenants).set(patch).where(eq(tenants.id, tenantId)).returning({
+        id: tenants.id,
+        name: tenants.name,
+        address: tenants.address,
+        timezone: tenants.timezone,
+        language: tenants.language,
+        contactEmail: tenants.contactEmail,
+      });
+      if (!updated) return json(404, { error: "not_found" });
+      await recordAuditLog(db, { tenantId, actor: actorFromEvent(event), action: "tenant_settings_updated", entityType: "tenant", entityId: tenantId, after: patch });
+      return json(200, updated);
+    }
+
+    // 通知設定タブ。トグル自体は実際に保存・復元されるが、このプラットフォームは現時点で
+    // メールなどの通知配信基盤を一切持たない(SES/SNS等の送信経路が存在しない) -- フロント
+    // エンドはこの事実を明示し、「保存はされるが配信は行われない」ことを利用者に伝える。
+    const DEFAULT_NOTIFICATION_PREFERENCES = {
+      inventoryDiffAlert: true,
+      aiDraftCompleted: true,
+      billingNotice: true,
+      oauthExpiryNotice: true,
+      importantNotice: true,
+    };
+    if (method === "GET" && path === "/admin/tenant/notification-preferences") {
+      const [row] = await db.select({ notificationPreferences: tenants.notificationPreferences }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+      if (!row) return json(404, { error: "not_found" });
+      return json(200, { ...DEFAULT_NOTIFICATION_PREFERENCES, ...(row.notificationPreferences ?? {}) });
+    }
+
+    if (method === "PATCH" && path === "/admin/tenant/notification-preferences") {
+      const body = JSON.parse(event.body ?? "{}") as Record<string, unknown>;
+      const allowedKeys = Object.keys(DEFAULT_NOTIFICATION_PREFERENCES);
+      const patch: Record<string, boolean> = {};
+      for (const key of allowedKeys) {
+        if (typeof body[key] === "boolean") patch[key] = body[key] as boolean;
+      }
+      const [existing] = await db.select({ notificationPreferences: tenants.notificationPreferences }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+      if (!existing) return json(404, { error: "not_found" });
+      const merged = { ...DEFAULT_NOTIFICATION_PREFERENCES, ...(existing.notificationPreferences ?? {}), ...patch };
+      await db.update(tenants).set({ notificationPreferences: merged }).where(eq(tenants.id, tenantId));
+      return json(200, merged);
+    }
+
+    // 価格設定タブ: テナント全体のデフォルト値。null = このプラットフォーム自体のハード
+    // コード済みフォールバック(@ai-ec/core の DEFAULT_SHIPPING_USD / DEFAULT_TARGET_MARGIN_
+    // RATIO)を使う、という意味 -- 商品ごとの上書き(product_master)は引き続き最優先される。
+    if (method === "GET" && path === "/admin/tenant/pricing-defaults") {
+      const [row] = await db
+        .select({
+          defaultShippingCostJpyDomestic: tenants.defaultShippingCostJpyDomestic,
+          defaultShippingCostJpyIntl: tenants.defaultShippingCostJpyIntl,
+          defaultTargetMarginBasisPoints: tenants.defaultTargetMarginBasisPoints,
+        })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .limit(1);
+      if (!row) return json(404, { error: "not_found" });
+      return json(200, row);
+    }
+
+    if (method === "PATCH" && path === "/admin/tenant/pricing-defaults") {
+      const body = JSON.parse(event.body ?? "{}") as {
+        defaultShippingCostJpyDomestic?: number | null;
+        defaultShippingCostJpyIntl?: number | null;
+        defaultTargetMarginPercent?: number | null;
+      };
+      const patch: Partial<typeof tenants.$inferInsert> = {};
+      if ("defaultShippingCostJpyDomestic" in body) {
+        patch.defaultShippingCostJpyDomestic =
+          typeof body.defaultShippingCostJpyDomestic === "number" ? Math.round(body.defaultShippingCostJpyDomestic) : null;
+      }
+      if ("defaultShippingCostJpyIntl" in body) {
+        patch.defaultShippingCostJpyIntl = typeof body.defaultShippingCostJpyIntl === "number" ? Math.round(body.defaultShippingCostJpyIntl) : null;
+      }
+      if ("defaultTargetMarginPercent" in body) {
+        patch.defaultTargetMarginBasisPoints =
+          typeof body.defaultTargetMarginPercent === "number" ? Math.round(body.defaultTargetMarginPercent * 100) : null;
+      }
+      const [updated] = await db.update(tenants).set(patch).where(eq(tenants.id, tenantId)).returning({
+        defaultShippingCostJpyDomestic: tenants.defaultShippingCostJpyDomestic,
+        defaultShippingCostJpyIntl: tenants.defaultShippingCostJpyIntl,
+        defaultTargetMarginBasisPoints: tenants.defaultTargetMarginBasisPoints,
+      });
+      if (!updated) return json(404, { error: "not_found" });
+      await recordAuditLog(db, { tenantId, actor: actorFromEvent(event), action: "pricing_defaults_updated", entityType: "tenant", entityId: tenantId, after: patch });
+      return json(200, updated);
     }
 
     // Phase 3 of the SaaS conversion ("plan quota enforcement"). Informational only --
@@ -312,6 +455,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, {
         products: { used: productsUsed, limit: limits.maxProducts },
         aiGenerations: { used: aiGenerationsUsed, limit: limits.maxAiGenerationsPerMonth, periodStart: periodStart.toISOString() },
+        // 在庫監視ページの「監視対象商品数」と同じ real signal -- この基盤には商品カタログ
+        // 全体とは別の「監視SKU」概念がないため、同じ数値・上限を再利用する。
+        monitoredSkus: { used: productsUsed, limit: limits.maxProducts },
       });
     }
 
@@ -1396,16 +1542,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!product) return json(404, { error: "product_not_found" });
 
       const fx = await fetchFxRate();
+      const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
       const shippingUsd = event.queryStringParameters?.shippingUsd
         ? Number(event.queryStringParameters.shippingUsd)
         : product.shippingCostUsdCents !== null
           ? product.shippingCostUsdCents / 100
-          : DEFAULT_SHIPPING_USD;
+          : tenantDefaults.shippingUsd;
       const targetMarginRatio = event.queryStringParameters?.targetMarginRatio
         ? Number(event.queryStringParameters.targetMarginRatio)
         : product.targetMarginBasisPoints !== null
           ? product.targetMarginBasisPoints / 10000
-          : DEFAULT_TARGET_MARGIN_RATIO;
+          : tenantDefaults.targetMarginRatio;
 
       const price = computeDynamicPrice({
         costJpy: product.priceJpy,
@@ -1451,9 +1598,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
       const fx = await fetchFxRate();
-      const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : DEFAULT_SHIPPING_USD;
+      const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
+      const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : tenantDefaults.shippingUsd;
       const targetMarginRatio =
-        product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO;
+        product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : tenantDefaults.targetMarginRatio;
       const price = computeDynamicPrice({
         costJpy: product.priceJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
@@ -2629,6 +2777,23 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       const [base, ebay] = await Promise.all([connectionDetail("base"), connectionDetail("ebay")]);
       return json(200, { base, ebay });
+    }
+
+    // 請求・設定ページの「接続解除」ボタン。oauth_connections の行を削除するのみ -- Secrets
+    // Managerに保存された実トークン自体はここでは失効させない(この基盤にトークン revoke
+    // 呼び出しの仕組みがまだないため)。削除後は isChannelIsolated/getValidAccessToken が
+    // 「接続なし」を real に検知し、次回同期は自然にスキップされる。
+    if (method === "POST" && /^\/admin\/oauth\/(base|ebay)\/disconnect$/.test(path)) {
+      const channel = path.split("/")[3] as "base" | "ebay";
+      await db.delete(oauthConnections).where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)));
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "oauth_disconnected",
+        entityType: "oauth_connection",
+        entityId: channel,
+      });
+      return json(200, { channel, disconnected: true });
     }
 
     // sync_jobs is the Transactional Outbox table (see product-fetch's insertOutboxJob /
