@@ -4410,3 +4410,288 @@ tr[data-active="true"] {
   color: var(--fg-subtle);
   margin: 0;
 }
+
+/* ---------- Analytics page ---------- */
+
+.analytics-chart-header {
+  margin-bottom: 0.5rem;
+}
+
+.analytics-tri-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+@media (max-width: 1300px) {
+  .analytics-tri-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .analytics-tri-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.analytics-bottom-row {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+@media (max-width: 1100px) {
+  .analytics-bottom-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.analytics-ranking-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.section-subtitle {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--fg-subtle);
+  margin-left: 0.4rem;
+}
+
+/* Stacked (not grouped) channel-revenue bar chart */
+
+.stacked-bar-groups {
+  display: flex;
+  justify-content: space-around;
+  align-items: flex-end;
+  height: 200px;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+.stacked-bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  height: 100%;
+  justify-content: flex-end;
+}
+
+.stacked-bar-total {
+  font-size: 0.7rem;
+  color: var(--fg-subtle);
+  margin-bottom: 0.2rem;
+  white-space: nowrap;
+}
+
+.stacked-bar-track {
+  width: 60%;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  overflow: hidden;
+}
+
+.stacked-bar-segment {
+  width: 100%;
+}
+
+.stacked-bar-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-top: 0.5rem;
+}
+
+/* Waterfall chart */
+
+.waterfall-bars {
+  display: flex;
+  justify-content: space-around;
+  align-items: flex-end;
+  height: 220px;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+.waterfall-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  height: 100%;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.waterfall-value {
+  font-size: 0.68rem;
+  font-weight: 700;
+  margin-bottom: 0.2rem;
+  white-space: nowrap;
+}
+
+.waterfall-track {
+  position: relative;
+  width: 60%;
+  height: 100%;
+}
+
+.waterfall-bar {
+  position: absolute;
+  width: 100%;
+  border-radius: var(--radius-sm);
+}
+
+.waterfall-label {
+  font-size: 0.65rem;
+  color: var(--fg-subtle);
+  margin-top: 0.5rem;
+  text-align: center;
+  line-height: 1.3;
+}
+
+/* Turnover heatmap table */
+
+.heatmap-table th,
+.heatmap-table td {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.heatmap-week-label {
+  color: var(--fg-subtle);
+  font-size: 0.75rem;
+  text-align: left !important;
+}
+
+.heatmap-cell {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* Insights panel */
+
+.insights-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.insight-item {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.6rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.insight-item p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.insight-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--neutral-soft);
+  color: var(--fg-muted);
+}
+
+.insight-item[data-tone="info"] .insight-icon {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.insight-item[data-tone="ok"] .insight-icon {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.insight-item[data-tone="warn"] .insight-icon {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* Funnel chart */
+
+.funnel-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.funnel-stage {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.funnel-bar-wrap {
+  flex: 1;
+}
+
+.funnel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-sm);
+  color: #fff;
+  transition: width 0.3s ease;
+}
+
+.funnel-bar[data-stage="0"] {
+  background: #7c5cff;
+}
+
+.funnel-bar[data-stage="1"] {
+  background: #3aa876;
+}
+
+.funnel-bar[data-stage="2"] {
+  background: #2a78d6;
+}
+
+.funnel-bar-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.funnel-bar-value {
+  font-size: 0.95rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.funnel-pct {
+  font-size: 0.78rem;
+  color: var(--fg-subtle);
+  font-weight: 700;
+  min-width: 48px;
+  text-align: right;
+}

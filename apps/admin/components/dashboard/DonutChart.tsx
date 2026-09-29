@@ -35,18 +35,30 @@ export function DonutChart({ segments, centerLabel, centerValue }: DonutChartPro
           --donut-b: #16a34a;
           --donut-c: #8a919e;
           --donut-d: #d97706;
+          --donut-e: #9333ea;
+          --donut-f: #dc2626;
+          --donut-g: #0891b2;
+          --donut-h: #c2410c;
         }
         :root:not([data-theme="light"]) .donut-chart-root {
           --donut-a: #5b8def;
           --donut-b: #4ade80;
           --donut-c: #767c88;
           --donut-d: #f2b53d;
+          --donut-e: #c084fc;
+          --donut-f: #f87171;
+          --donut-g: #22d3ee;
+          --donut-h: #fb923c;
         }
         :root[data-theme="dark"] .donut-chart-root {
           --donut-a: #5b8def;
           --donut-b: #4ade80;
           --donut-c: #767c88;
           --donut-d: #f2b53d;
+          --donut-e: #c084fc;
+          --donut-f: #f87171;
+          --donut-g: #22d3ee;
+          --donut-h: #fb923c;
         }
       `}</style>
       <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} role="img" aria-label={`${centerLabel} ${centerValue}`}>

@@ -1821,6 +1821,430 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
     }
 
+    // --- 分析 (Analytics) page ---
+    // Two labels here deliberately don't match a literal reading of the design this page was
+    // built from, because the literal metric isn't honestly computable from what this
+    // platform actually stores:
+    //  - "eBay転換率" (view-to-purchase conversion) would need eBay traffic/impression data --
+    //    only eBay's Inventory/Offer/Order APIs are integrated (packages/adapters/ebay), never
+    //    Trends/Marketing/Analytics. Replaced with "eBay出品成約率" (published-listing-to-sale
+    //    rate), a real ratio this platform can compute.
+    //  - "在庫回転ヒートマップ" (turnover-rate heatmap) would need a per-category *current
+    //    inventory* denominator; product_master has no category column at all (confirmed via
+    //    schema grep), so "per category" already means "per AI-drafted category proxy", and a
+    //    full per-category inventory join across the whole catalog is out of scope here.
+    //    Replaced with a weekly units-sold-by-category heatmap -- real counts, no invented rate.
+    if (method === "GET" && path === "/admin/analytics/summary") {
+      const days = Math.min(90, Math.max(7, Number(event.queryStringParameters?.days) || 30));
+      const granularityRaw = event.queryStringParameters?.granularity;
+      const granularity = granularityRaw === "weekly" || granularityRaw === "monthly" ? granularityRaw : "daily";
+      const HEATMAP_WEEKS = 8;
+
+      const now = new Date();
+      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const prevMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+      const rangeStart = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+      const heatmapStart = new Date(now.getTime() - HEATMAP_WEEKS * 7 * 24 * 60 * 60 * 1000);
+      const since = [rangeStart, prevMonthStart, heatmapStart].reduce((a, b) => (b < a ? b : a));
+
+      const usdPerJpy = await currentFxRate();
+
+      const [relevantOrders, draftsInRange, approvalLogs, ebayPublishedCount, inventoryTotalRows, baseConfidence, ebayConfidence, syncErrorsInRange] =
+        await Promise.all([
+          db.select().from(orders).where(and(eq(orders.tenantId, tenantId), gte(orders.placedAt, since))),
+          db
+            .select({ productId: aiListingDraft.productId, createdAt: aiListingDraft.createdAt, categoryCandidates: aiListingDraft.categoryCandidates })
+            .from(aiListingDraft)
+            .where(and(eq(aiListingDraft.tenantId, tenantId), gte(aiListingDraft.createdAt, since))),
+          db
+            .select({ entityId: auditLog.entityId, createdAt: auditLog.createdAt })
+            .from(auditLog)
+            .where(and(eq(auditLog.tenantId, tenantId), eq(auditLog.action, "ebay_listing_publish_approved"), gte(auditLog.createdAt, since))),
+          countChannelListingsByStatus(db, tenantId, "ebay", "published"),
+          db
+            .select({ total: sql<number>`coalesce(sum(${inventoryMaster.quantity}), 0)::int` })
+            .from(inventoryMaster)
+            .where(eq(inventoryMaster.tenantId, tenantId)),
+          computeSyncConfidence(db, tenantId, "base", days * 24),
+          computeSyncConfidence(db, tenantId, "ebay", days * 24),
+          db
+            .select({ errorCode: syncErrors.errorCode, createdAt: syncErrors.createdAt })
+            .from(syncErrors)
+            .where(and(eq(syncErrors.tenantId, tenantId), gte(syncErrors.createdAt, since))),
+        ]);
+
+      // Category proxy: an order's product's LATEST ai_listing_draft.category_candidates[0]
+      // (regardless of when that draft was made -- unlike draftsInRange above, which is
+      // window-scoped for the funnel/approval-rate stages, category assignment needs to reach
+      // back arbitrarily far so an older, already-published product's past orders still get
+      // classified). A product that never got an AI draft has no category signal at all.
+      const orderProductIds = [...new Set(relevantOrders.map((o) => o.productId))];
+      const productDraftsForCategory = orderProductIds.length
+        ? await db
+            .select({ productId: aiListingDraft.productId, categoryCandidates: aiListingDraft.categoryCandidates, createdAt: aiListingDraft.createdAt })
+            .from(aiListingDraft)
+            .where(and(eq(aiListingDraft.tenantId, tenantId), inArray(aiListingDraft.productId, orderProductIds)))
+        : [];
+      const categoryByProduct = new Map<string, string>();
+      const latestDraftAtByProduct = new Map<string, Date>();
+      for (const d of productDraftsForCategory) {
+        const seen = latestDraftAtByProduct.get(d.productId);
+        if (!seen || d.createdAt > seen) {
+          latestDraftAtByProduct.set(d.productId, d.createdAt);
+          categoryByProduct.set(d.productId, d.categoryCandidates[0]?.label ?? "未分類");
+        }
+      }
+      function categoryFor(productId: string): string {
+        return categoryByProduct.get(productId) ?? "未分類";
+      }
+
+      function orderProfit(o: (typeof relevantOrders)[number]) {
+        const live = getLiveOrderProfit(o, usdPerJpy);
+        return { revenueUsdCents: live.revenueUsdCents, netProfitUsdCents: o.profitFinalizedAt ? (o.finalizedNetProfitUsdCents ?? 0) : live.netProfitUsdCents };
+      }
+      function usdCentsToJpy(cents: number): number {
+        return Math.round(cents / 100 / usdPerJpy);
+      }
+      function sumRevenueUsdCents(rows: typeof relevantOrders): number {
+        return rows.reduce((s, o) => s + orderProfit(o).revenueUsdCents, 0);
+      }
+      function sumProfitUsdCents(rows: typeof relevantOrders): number {
+        return rows.reduce((s, o) => s + orderProfit(o).netProfitUsdCents, 0);
+      }
+      function pctChange(current: number, previous: number): number | null {
+        if (previous === 0) return current === 0 ? 0 : null;
+        return Math.round(((current - previous) / previous) * 1000) / 10;
+      }
+
+      // --- KPI row (calendar-month current vs. previous, same boundary as dashboard/summary) ---
+      const currentMonthOrders = relevantOrders.filter((o) => o.placedAt >= monthStart);
+      const previousMonthOrders = relevantOrders.filter((o) => o.placedAt >= prevMonthStart && o.placedAt < monthStart);
+
+      const monthlyRevenueJpy = usdCentsToJpy(sumRevenueUsdCents(currentMonthOrders));
+      const prevMonthlyRevenueJpy = usdCentsToJpy(sumRevenueUsdCents(previousMonthOrders));
+      const monthlyProfitJpy = usdCentsToJpy(sumProfitUsdCents(currentMonthOrders));
+      const prevMonthlyProfitJpy = usdCentsToJpy(sumProfitUsdCents(previousMonthOrders));
+
+      const currentMonthEbayOrders = currentMonthOrders.filter((o) => o.channel === "ebay");
+      const previousMonthEbayOrders = previousMonthOrders.filter((o) => o.channel === "ebay");
+      // ebayPublishedCount is a CURRENT snapshot (no historical published-listing count is
+      // kept), reused as the denominator for both months so the comparison isolates the
+      // change in order volume rather than an unmeasurable change in listing count.
+      const ebayListingConversionRate = ebayPublishedCount > 0 ? Math.round((currentMonthEbayOrders.length / ebayPublishedCount) * 1000) / 10 : null;
+      const prevEbayListingConversionRate = ebayPublishedCount > 0 ? Math.round((previousMonthEbayOrders.length / ebayPublishedCount) * 1000) / 10 : null;
+
+      const totalInventoryQty = inventoryTotalRows[0]?.total ?? 0;
+      const currentMonthUnitsSold = currentMonthOrders.reduce((s, o) => s + o.quantity, 0);
+      const previousMonthUnitsSold = previousMonthOrders.reduce((s, o) => s + o.quantity, 0);
+      // Denominator is CURRENT total stock for both months (no historical inventory snapshot
+      // exists in this schema) -- an approximation of turnover, not a fabricated figure.
+      const turnoverRate = totalInventoryQty > 0 ? Math.round((currentMonthUnitsSold / totalInventoryQty) * 10) / 10 : null;
+      const prevTurnoverRate = totalInventoryQty > 0 ? Math.round((previousMonthUnitsSold / totalInventoryQty) * 10) / 10 : null;
+
+      // computeSyncConfidence has no "as of N days ago" parameter, only "trailing N hours from
+      // now" -- so a real previous-period comparison isn't available without duplicating its
+      // internal formula against an offset window. Left null rather than approximated.
+      const syncSuccessRate = Math.round((baseConfidence.score + ebayConfidence.score) / 2);
+
+      const currentMonthDraftProductIds = new Set(draftsInRange.filter((d) => d.createdAt >= monthStart).map((d) => d.productId));
+      const previousMonthDraftProductIds = new Set(
+        draftsInRange.filter((d) => d.createdAt >= prevMonthStart && d.createdAt < monthStart).map((d) => d.productId),
+      );
+      const currentMonthApprovedProductIds = new Set(approvalLogs.filter((a) => a.createdAt >= monthStart).map((a) => a.entityId));
+      const previousMonthApprovedProductIds = new Set(
+        approvalLogs.filter((a) => a.createdAt >= prevMonthStart && a.createdAt < monthStart).map((a) => a.entityId),
+      );
+      function approvalRate(draftIds: Set<string>, approvedIds: Set<string>): number | null {
+        if (draftIds.size === 0) return null;
+        let approved = 0;
+        for (const id of draftIds) if (approvedIds.has(id)) approved++;
+        return Math.round((approved / draftIds.size) * 1000) / 10;
+      }
+      const aiDraftApprovalRate = approvalRate(currentMonthDraftProductIds, currentMonthApprovedProductIds);
+      const prevAiDraftApprovalRate = approvalRate(previousMonthDraftProductIds, previousMonthApprovedProductIds);
+
+      // --- 売上推移 (granularity-bucketed trend) ---
+      const rangeOrders = relevantOrders.filter((o) => o.placedAt >= rangeStart);
+      function trendPoint(label: string, rows: typeof relevantOrders) {
+        let base = 0;
+        let ebay = 0;
+        for (const o of rows) {
+          const revenue = orderProfit(o).revenueUsdCents;
+          if (o.channel === "ebay") ebay += revenue;
+          else base += revenue;
+        }
+        return { period: label, totalRevenueJpy: usdCentsToJpy(base + ebay), baseRevenueJpy: usdCentsToJpy(base), ebayRevenueJpy: usdCentsToJpy(ebay) };
+      }
+      const trend: ReturnType<typeof trendPoint>[] = [];
+      if (granularity === "monthly") {
+        const months = Math.max(1, Math.ceil(days / 30));
+        for (let i = months - 1; i >= 0; i--) {
+          const bucketStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+          const bucketEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i + 1, 1));
+          trend.push(trendPoint(`${bucketStart.getUTCFullYear()}/${bucketStart.getUTCMonth() + 1}`, rangeOrders.filter((o) => o.placedAt >= bucketStart && o.placedAt < bucketEnd)));
+        }
+      } else if (granularity === "weekly") {
+        const weeks = Math.max(1, Math.ceil(days / 7));
+        for (let i = 0; i < weeks; i++) {
+          const bucketStart = new Date(rangeStart.getTime() + i * 7 * 24 * 60 * 60 * 1000);
+          const bucketEnd = new Date(Math.min(bucketStart.getTime() + 7 * 24 * 60 * 60 * 1000, now.getTime()));
+          trend.push(trendPoint(bucketStart.toISOString().slice(0, 10), rangeOrders.filter((o) => o.placedAt >= bucketStart && o.placedAt < bucketEnd)));
+        }
+      } else {
+        for (let i = 0; i < days; i++) {
+          const bucketStart = new Date(rangeStart.getTime() + i * 24 * 60 * 60 * 1000);
+          const bucketEnd = new Date(bucketStart.getTime() + 24 * 60 * 60 * 1000);
+          trend.push(trendPoint(bucketStart.toISOString().slice(0, 10), rangeOrders.filter((o) => o.placedAt >= bucketStart && o.placedAt < bucketEnd)));
+        }
+      }
+
+      // --- チャネル別売上 (fixed monthly, independent of the granularity toggle above) ---
+      const channelByMonth: Array<{ month: string; baseRevenueJpy: number; ebayRevenueJpy: number }> = [];
+      const monthsForChannelChart = 4;
+      for (let i = monthsForChannelChart - 1; i >= 0; i--) {
+        const bucketStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+        const bucketEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i + 1, 1));
+        const monthOrders = relevantOrders.filter((o) => o.placedAt >= bucketStart && o.placedAt < bucketEnd);
+        let base = 0;
+        let ebay = 0;
+        for (const o of monthOrders) {
+          const revenue = orderProfit(o).revenueUsdCents;
+          if (o.channel === "ebay") ebay += revenue;
+          else base += revenue;
+        }
+        channelByMonth.push({ month: `${bucketStart.getUTCMonth() + 1}月`, baseRevenueJpy: usdCentsToJpy(base), ebayRevenueJpy: usdCentsToJpy(ebay) });
+      }
+
+      // --- 利益構成ウォーターフォール (combined across channels, over the selected range) ---
+      let waterfallRevenueUsdCents = 0;
+      let waterfallProfitUsdCents = 0;
+      let waterfallCostJpy = 0;
+      let waterfallFeesUsdCents = 0;
+      let waterfallShippingJpy = 0;
+      for (const o of rangeOrders) {
+        const p = orderProfit(o);
+        waterfallRevenueUsdCents += p.revenueUsdCents;
+        waterfallProfitUsdCents += p.netProfitUsdCents;
+        waterfallCostJpy += o.costJpy ?? 0;
+        waterfallFeesUsdCents += (o.ebayFeeUsdCents ?? 0) + (o.paymentFeeUsdCents ?? 0);
+        waterfallShippingJpy += o.shippingCostJpy ?? 0;
+      }
+      // 利益 also reflects ad spend/FX cost/return amount (computeOrderProfit's other cost
+      // lines), not broken out as their own waterfall step here -- same documented gap as
+      // orders/summary's channelBreakdown.
+      const profitWaterfall = {
+        revenueJpy: usdCentsToJpy(waterfallRevenueUsdCents),
+        costJpy: waterfallCostJpy,
+        feesJpy: usdCentsToJpy(waterfallFeesUsdCents),
+        shippingJpy: waterfallShippingJpy,
+        profitJpy: usdCentsToJpy(waterfallProfitUsdCents),
+      };
+
+      // --- カテゴリ別売上 ---
+      const categoryRevenueUsdCents = new Map<string, number>();
+      for (const o of rangeOrders) {
+        const cat = categoryFor(o.productId);
+        categoryRevenueUsdCents.set(cat, (categoryRevenueUsdCents.get(cat) ?? 0) + orderProfit(o).revenueUsdCents);
+      }
+      const categoryRevenue = [...categoryRevenueUsdCents.entries()]
+        .map(([category, usdCents]) => ({ category, revenueJpy: usdCentsToJpy(usdCents) }))
+        .sort((a, b) => b.revenueJpy - a.revenueJpy)
+        .slice(0, 7);
+
+      // --- カテゴリ別 週次販売数ヒートマップ (see this route's own header comment) ---
+      const heatmapCategories = categoryRevenue.slice(0, 5).map((c) => c.category);
+      const heatmapOrders = relevantOrders.filter((o) => o.placedAt >= heatmapStart);
+      const weeks: string[] = [];
+      const heatmapCells: number[][] = heatmapCategories.map(() => []);
+      for (let w = 0; w < HEATMAP_WEEKS; w++) {
+        const weekStart = new Date(heatmapStart.getTime() + w * 7 * 24 * 60 * 60 * 1000);
+        const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+        weeks.push(`${weekStart.toISOString().slice(5, 10)}`);
+        const weekOrders = heatmapOrders.filter((o) => o.placedAt >= weekStart && o.placedAt < weekEnd);
+        heatmapCategories.forEach((cat, ci) => {
+          const units = weekOrders.filter((o) => categoryFor(o.productId) === cat).reduce((s, o) => s + o.quantity, 0);
+          heatmapCells[ci]!.push(units);
+        });
+      }
+
+      // --- AI出品 -> 公開 -> 受注 ファネル (scoped to the same selected range) ---
+      const funnelGeneratedProductIds = new Set(draftsInRange.filter((d) => d.createdAt >= rangeStart).map((d) => d.productId));
+      const funnelPublishedRows =
+        funnelGeneratedProductIds.size > 0
+          ? await db
+              .select({ productId: channelListings.productId })
+              .from(channelListings)
+              .where(
+                and(
+                  eq(channelListings.tenantId, tenantId),
+                  eq(channelListings.channel, "ebay"),
+                  eq(channelListings.status, "published"),
+                  inArray(channelListings.productId, [...funnelGeneratedProductIds]),
+                ),
+              )
+          : [];
+      const funnelPublishedProductIds = new Set(funnelPublishedRows.map((r) => r.productId));
+      const funnelOrderedProductIds = new Set(rangeOrders.filter((o) => funnelPublishedProductIds.has(o.productId)).map((o) => o.productId));
+      const funnel = { generated: funnelGeneratedProductIds.size, published: funnelPublishedProductIds.size, ordered: funnelOrderedProductIds.size };
+
+      // --- 運用インサイト (rule-based, gated by a minimum real gap so routine noise never
+      // shows up as a headline -- same spirit as GET /admin/orders's belowAverageMargin guard) ---
+      const insights: Array<{ tone: "info" | "warn" | "ok"; message: string }> = [];
+      const currentEbayShare = monthlyRevenueJpy > 0 ? (usdCentsToJpy(sumRevenueUsdCents(currentMonthEbayOrders)) / monthlyRevenueJpy) * 100 : null;
+      const previousEbayShare =
+        prevMonthlyRevenueJpy > 0 ? (usdCentsToJpy(sumRevenueUsdCents(previousMonthEbayOrders)) / prevMonthlyRevenueJpy) * 100 : null;
+      if (currentEbayShare !== null && previousEbayShare !== null && Math.abs(currentEbayShare - previousEbayShare) >= 3) {
+        const up = currentEbayShare > previousEbayShare;
+        insights.push({
+          tone: up ? "info" : "warn",
+          message: `eBayの売上比率が${up ? "上昇" : "低下"}しました。今月のeBay売上比率は${currentEbayShare.toFixed(0)}%で、前月の${previousEbayShare.toFixed(0)}%から変化しています。`,
+        });
+      }
+
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+      const diffErrorCodes = new Set(["inventory_drift", "possible_double_sale"]);
+      const thisWeekDiffCount = syncErrorsInRange.filter((e) => e.createdAt >= weekAgo && diffErrorCodes.has(e.errorCode)).length;
+      const lastWeekDiffCount = syncErrorsInRange.filter((e) => e.createdAt >= twoWeeksAgo && e.createdAt < weekAgo && diffErrorCodes.has(e.errorCode)).length;
+      const diffDeltaPct = pctChange(thisWeekDiffCount, lastWeekDiffCount);
+      if (diffDeltaPct !== null && Math.abs(diffDeltaPct) >= 20) {
+        insights.push({
+          tone: diffDeltaPct < 0 ? "ok" : "warn",
+          message: `在庫差分は先週比${diffDeltaPct > 0 ? "+" : ""}${diffDeltaPct}%です。今週${thisWeekDiffCount}件(先週${lastWeekDiffCount}件)を検知しています。`,
+        });
+      }
+
+      if (aiDraftApprovalRate !== null && prevAiDraftApprovalRate !== null && Math.abs(aiDraftApprovalRate - prevAiDraftApprovalRate) >= 3) {
+        const up = aiDraftApprovalRate > prevAiDraftApprovalRate;
+        insights.push({
+          tone: up ? "info" : "warn",
+          message: `AI下書き承認率が${up ? "向上" : "低下"}し、今月${aiDraftApprovalRate}%(前月${prevAiDraftApprovalRate}%)になりました。`,
+        });
+      }
+
+      const thisWeekErrorCount = syncErrorsInRange.filter((e) => e.createdAt >= weekAgo).length;
+      const lastWeekErrorCount = syncErrorsInRange.filter((e) => e.createdAt >= twoWeeksAgo && e.createdAt < weekAgo).length;
+      const errorDeltaPct = pctChange(thisWeekErrorCount, lastWeekErrorCount);
+      if (errorDeltaPct !== null && Math.abs(errorDeltaPct) >= 20) {
+        insights.push({
+          tone: errorDeltaPct < 0 ? "ok" : "warn",
+          message: `同期エラー件数は${errorDeltaPct < 0 ? "減少" : "増加"}しました。今週${thisWeekErrorCount}件(先週${lastWeekErrorCount}件)です。`,
+        });
+      }
+
+      return json(200, {
+        days,
+        granularity,
+        kpi: {
+          monthlyRevenueJpy: { value: monthlyRevenueJpy, deltaPct: pctChange(monthlyRevenueJpy, prevMonthlyRevenueJpy) },
+          monthlyProfitJpy: { value: monthlyProfitJpy, deltaPct: pctChange(monthlyProfitJpy, prevMonthlyProfitJpy) },
+          ebayListingConversionRate: {
+            value: ebayListingConversionRate,
+            deltaPct:
+              ebayListingConversionRate !== null && prevEbayListingConversionRate !== null
+                ? Math.round((ebayListingConversionRate - prevEbayListingConversionRate) * 10) / 10
+                : null,
+          },
+          turnoverRate: {
+            value: turnoverRate,
+            deltaPct: turnoverRate !== null && prevTurnoverRate !== null ? Math.round((turnoverRate - prevTurnoverRate) * 10) / 10 : null,
+          },
+          syncSuccessRate: { value: syncSuccessRate, deltaPct: null },
+          aiDraftApprovalRate: {
+            value: aiDraftApprovalRate,
+            deltaPct: aiDraftApprovalRate !== null && prevAiDraftApprovalRate !== null ? Math.round((aiDraftApprovalRate - prevAiDraftApprovalRate) * 10) / 10 : null,
+          },
+        },
+        trend,
+        channelByMonth,
+        profitWaterfall,
+        categoryRevenue,
+        turnoverHeatmap: { weeks, categories: heatmapCategories, cells: heatmapCells },
+        funnel,
+        insights,
+      });
+    }
+
+    // 商品別ランキング table on the 分析 page.
+    if (method === "GET" && path === "/admin/analytics/products") {
+      const days = Math.min(90, Math.max(7, Number(event.queryStringParameters?.days) || 30));
+      const sortRaw = event.queryStringParameters?.sort;
+      const sort = (["revenue", "profit", "orders", "turnover"] as const).find((s) => s === sortRaw) ?? "revenue";
+      const limit = Math.min(50, Math.max(1, Number(event.queryStringParameters?.limit) || 10));
+
+      const rangeStart = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const usdPerJpy = await currentFxRate();
+
+      const [rangeOrders, ebayConfidence] = await Promise.all([
+        db.select().from(orders).where(and(eq(orders.tenantId, tenantId), gte(orders.placedAt, rangeStart))),
+        computeSyncConfidence(db, tenantId, "ebay", days * 24),
+      ]);
+
+      const byProduct = new Map<string, { revenueUsdCents: number; netProfitUsdCents: number; orderCount: number; unitsSold: number }>();
+      for (const o of rangeOrders) {
+        const live = getLiveOrderProfit(o, usdPerJpy);
+        const netProfitUsdCents = o.profitFinalizedAt ? (o.finalizedNetProfitUsdCents ?? 0) : live.netProfitUsdCents;
+        const entry = byProduct.get(o.productId) ?? { revenueUsdCents: 0, netProfitUsdCents: 0, orderCount: 0, unitsSold: 0 };
+        entry.revenueUsdCents += live.revenueUsdCents;
+        entry.netProfitUsdCents += netProfitUsdCents;
+        entry.orderCount += 1;
+        entry.unitsSold += o.quantity;
+        byProduct.set(o.productId, entry);
+      }
+
+      const productIds = [...byProduct.keys()];
+      const [productRows, inventoryRows] = await Promise.all([
+        productIds.length
+          ? db
+              .select({ id: productMaster.id, sku: productMaster.sku, title: productMaster.title, images: productMaster.images })
+              .from(productMaster)
+              .where(and(eq(productMaster.tenantId, tenantId), inArray(productMaster.id, productIds)))
+          : [],
+        productIds.length
+          ? db
+              .select({ productId: inventoryMaster.productId, quantity: inventoryMaster.quantity })
+              .from(inventoryMaster)
+              .where(and(eq(inventoryMaster.tenantId, tenantId), inArray(inventoryMaster.productId, productIds)))
+          : [],
+      ]);
+      const productById = new Map(productRows.map((p) => [p.id, p]));
+      const quantityByProduct = new Map(inventoryRows.map((r) => [r.productId, r.quantity]));
+
+      function usdCentsToJpy(cents: number): number {
+        return Math.round(cents / 100 / usdPerJpy);
+      }
+
+      const ranked = productIds.map((id) => {
+        const stats = byProduct.get(id)!;
+        const qty = quantityByProduct.get(id) ?? 0;
+        // Same current-stock-as-denominator approximation as the summary route's turnoverRate.
+        const turnoverRate = qty > 0 ? Math.round((stats.unitsSold / qty) * 10) / 10 : null;
+        return {
+          productId: id,
+          title: productById.get(id)?.title ?? null,
+          sku: productById.get(id)?.sku ?? null,
+          images: productById.get(id)?.images ?? [],
+          revenueJpy: usdCentsToJpy(stats.revenueUsdCents),
+          profitJpy: usdCentsToJpy(stats.netProfitUsdCents),
+          orderCount: stats.orderCount,
+          turnoverRate,
+          // Channel-level (eBay) confidence reused as a proxy -- computeSyncConfidence has no
+          // per-product granularity anywhere in this codebase.
+          syncConfidenceScore: ebayConfidence.score,
+        };
+      });
+
+      const SORT_KEY: Record<typeof sort, (r: (typeof ranked)[number]) => number> = {
+        revenue: (r) => r.revenueJpy,
+        profit: (r) => r.profitJpy,
+        orders: (r) => r.orderCount,
+        turnover: (r) => r.turnoverRate ?? -Infinity,
+      };
+      ranked.sort((a, b) => SORT_KEY[sort](b) - SORT_KEY[sort](a));
+
+      return json(200, { products: ranked.slice(0, limit), sort, days });
+    }
+
     if (method === "GET" && /^\/admin\/products\/[^/]+\/orders$/.test(path)) {
       const id = path.split("/")[3]!;
       const orderRows = await listOrdersForProduct(db, tenantId, id);

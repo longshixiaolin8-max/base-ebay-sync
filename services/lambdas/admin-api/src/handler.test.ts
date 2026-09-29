@@ -1583,6 +1583,85 @@ describe("admin-api handler", () => {
       });
     });
 
+    describe("GET /admin/analytics/summary", () => {
+      it("returns zeroed KPIs, an empty category/heatmap, and no insights when there's no data", async () => {
+        fakeDb = createFakeDb([[], [], [], [{ total: 0 }], []]);
+        const res = await callHandler(makeEvent("GET", "/admin/analytics/summary"));
+        expect(res.statusCode).toBe(200);
+        const parsed = JSON.parse(res.body!);
+        expect(parsed.kpi.monthlyRevenueJpy).toEqual({ value: 0, deltaPct: 0 });
+        expect(parsed.kpi.ebayListingConversionRate).toEqual({ value: null, deltaPct: null });
+        expect(parsed.kpi.turnoverRate).toEqual({ value: null, deltaPct: null });
+        expect(parsed.kpi.syncSuccessRate).toEqual({ value: 100, deltaPct: null });
+        expect(parsed.kpi.aiDraftApprovalRate).toEqual({ value: null, deltaPct: null });
+        expect(parsed.trend).toHaveLength(30);
+        expect(parsed.channelByMonth).toHaveLength(4);
+        expect(parsed.categoryRevenue).toEqual([]);
+        expect(parsed.turnoverHeatmap.weeks).toHaveLength(8);
+        expect(parsed.turnoverHeatmap.categories).toEqual([]);
+        expect(parsed.funnel).toEqual({ generated: 0, published: 0, ordered: 0 });
+        expect(parsed.insights).toEqual([]);
+      });
+
+      it("computes real category revenue (via the AI draft category proxy), a profit waterfall, and a turnover-rate approximation from real orders", async () => {
+        const order = {
+          id: "o1",
+          productId: "p1",
+          channel: "ebay",
+          placedAt: new Date(),
+          quantity: 2,
+          profitFinalizedAt: null,
+          finalizedNetProfitUsdCents: null,
+          costJpy: 1000,
+          shippingCostJpy: 500,
+          ebayFeeUsdCents: 200,
+          paymentFeeUsdCents: 50,
+        };
+        fakeDb = createFakeDb([
+          [order], // relevantOrders
+          [], // draftsInRange
+          [], // approvalLogs
+          [{ total: 10 }], // inventoryTotalRows
+          [], // syncErrorsInRange
+          [{ productId: "p1", categoryCandidates: [{ ebayCategoryId: "1", label: "ホビー" }], createdAt: new Date() }], // productDraftsForCategory
+        ]);
+        getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 1750, netProfitUsdCents: 1350, profitMarginBasisPoints: 3750 });
+        countChannelListingsByStatusMock.mockResolvedValueOnce(5); // ebayPublishedCount
+
+        const res = await callHandler(makeEvent("GET", "/admin/analytics/summary"));
+        expect(res.statusCode).toBe(200);
+        const parsed = JSON.parse(res.body!);
+        // usdPerJpy is the fixed test-suite default (0.0067) -- usdCentsToJpy(cents) = round(cents/100/0.0067).
+        expect(parsed.categoryRevenue).toEqual([{ category: "ホビー", revenueJpy: 5373 }]);
+        expect(parsed.profitWaterfall).toEqual({ revenueJpy: 5373, costJpy: 1000, feesJpy: 373, shippingJpy: 500, profitJpy: 2015 });
+        expect(parsed.kpi.turnoverRate.value).toBe(0.2); // 2 units sold / 10 in stock
+        expect(parsed.kpi.ebayListingConversionRate.value).toBeCloseTo(20, 0); // 1 ebay order / 5 published listings
+        expect(parsed.turnoverHeatmap.categories).toEqual(["ホビー"]);
+      });
+    });
+
+    describe("GET /admin/analytics/products", () => {
+      it("ranks products by revenue by default, with a real turnover-rate approximation", async () => {
+        const order = { id: "o1", productId: "p1", channel: "ebay", placedAt: new Date(), quantity: 3, profitFinalizedAt: null, finalizedNetProfitUsdCents: null };
+        fakeDb = createFakeDb([[order], [{ id: "p1", sku: "SKU-1", title: "Product One", images: [] }], [{ productId: "p1", quantity: 15 }]]);
+        getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 });
+
+        const res = await callHandler(makeEvent("GET", "/admin/analytics/products"));
+        expect(res.statusCode).toBe(200);
+        const parsed = JSON.parse(res.body!);
+        expect(parsed.products).toEqual([
+          expect.objectContaining({ productId: "p1", title: "Product One", sku: "SKU-1", orderCount: 1, turnoverRate: 0.2 }),
+        ]);
+      });
+
+      it("returns an empty ranking when there are no orders in the window", async () => {
+        fakeDb = createFakeDb([[]]);
+        const res = await callHandler(makeEvent("GET", "/admin/analytics/products"));
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body!).products).toEqual([]);
+      });
+    });
+
     it("GET /admin/products/{id}/orders lists that product's orders", async () => {
       listOrdersForProductMock.mockResolvedValueOnce([{ id: "o1" }]);
       const res = await callHandler(makeEvent("GET", "/admin/products/p1/orders"));

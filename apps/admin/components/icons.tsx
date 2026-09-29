@@ -292,3 +292,16 @@ export function SparkleIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Bar-chart glyph for the 分析 (Analytics) nav item -- distinct from DashboardIcon's 4 equal
+ *  rectangles and ActivityIcon's pulse line, so it doesn't collide visually with either. */
+export function ChartIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M4 20V10" />
+      <path d="M12 20V4" />
+      <path d="M20 20v-7" />
+      <path d="M4 20h16" />
+    </Icon>
+  );
+}
