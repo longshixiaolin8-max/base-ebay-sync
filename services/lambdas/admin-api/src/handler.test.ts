@@ -53,7 +53,6 @@ const findStaleProductsMock = vi.fn();
 const getInventoryBreakdownMock = vi.fn();
 const getLiveOrderProfitMock = vi.fn();
 const getSnsContentMock = vi.fn();
-const listOrdersMock = vi.fn();
 const listOrdersForProductMock = vi.fn();
 const markSnsStatusMock = vi.fn();
 const transitionOrderStatusMock = vi.fn();
@@ -94,7 +93,6 @@ vi.mock("@ai-ec/db", () => ({
   getLiveOrderProfit: (...args: unknown[]) => getLiveOrderProfitMock(...args),
   getSnsContent: (...args: unknown[]) => getSnsContentMock(...args),
   InvalidOrderTransitionError: InvalidOrderTransitionErrorFake,
-  listOrders: (...args: unknown[]) => listOrdersMock(...args),
   listOrdersForProduct: (...args: unknown[]) => listOrdersForProductMock(...args),
   markSnsStatus: (...args: unknown[]) => markSnsStatusMock(...args),
   transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
@@ -271,7 +269,6 @@ describe("admin-api handler", () => {
     getInventoryBreakdownMock.mockClear();
     getLiveOrderProfitMock.mockClear();
     getSnsContentMock.mockClear();
-    listOrdersMock.mockClear();
     listOrdersForProductMock.mockClear();
     markSnsStatusMock.mockClear();
     transitionOrderStatusMock.mockReset();
@@ -1476,25 +1473,114 @@ describe("admin-api handler", () => {
   });
 
   describe("commercial-features round", () => {
-    it("GET /admin/orders lists orders, optionally filtered by status, enriched with product info", async () => {
-      listOrdersMock.mockResolvedValueOnce([{ id: "o1", status: "SHIPPED", productId: "p1" }]);
-      fakeDb = createFakeDb([[{ id: "p1", sku: "SKU-1", title: "Product One", images: [] }]]);
+    it("GET /admin/orders lists orders, optionally filtered by status, enriched with product info, live profit, and possible_double_sale/margin flags", async () => {
+      const order = {
+        id: "o1",
+        productId: "p1",
+        channel: "ebay",
+        status: "SHIPPED",
+        placedAt: new Date("2024-04-30T14:23:00.000Z"),
+        profitFinalizedAt: null,
+        finalizedNetProfitUsdCents: null,
+        returnRequestedAt: null,
+      };
+      fakeDb = createFakeDb([
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }], // rows
+        [{ count: 1 }], // totalRows
+        [], // recentOrdersForBaseline
+        [], // unresolvedDoubleSale
+      ]);
+      getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 });
+
       const res = await callHandler(makeEvent("GET", "/admin/orders", { status: "SHIPPED" }));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({
-        orders: [
-          { id: "o1", status: "SHIPPED", productId: "p1", product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } },
-        ],
-      });
-      expect(listOrdersMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, { status: "SHIPPED", limit: undefined });
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders).toEqual([
+        expect.objectContaining({
+          id: "o1",
+          product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] },
+          profit: { finalized: false, revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 },
+          hasPossibleDoubleSale: false,
+          belowAverageMargin: false,
+        }),
+      ]);
+      expect(parsed.total).toBe(1);
+      expect(parsed.avgProfitMarginBasisPoints).toBeNull();
     });
 
-    it("GET /admin/orders skips the product lookup entirely when there are no orders", async () => {
-      listOrdersMock.mockResolvedValueOnce([]);
-      fakeDb = createFakeDb([]); // no select results queued -- would throw if the route tried to consume one
+    it("GET /admin/orders flags a row whose product has an unresolved possible_double_sale error", async () => {
+      const order = {
+        id: "o1",
+        productId: "p1",
+        channel: "ebay",
+        status: "SHIPPED",
+        placedAt: new Date(),
+        profitFinalizedAt: null,
+        finalizedNetProfitUsdCents: null,
+        returnRequestedAt: null,
+      };
+      fakeDb = createFakeDb([
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }],
+        [{ count: 1 }],
+        [],
+        [{ productId: "p1" }], // unresolvedDoubleSale
+      ]);
+      getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 });
+
+      const res = await callHandler(makeEvent("GET", "/admin/orders"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders[0].hasPossibleDoubleSale).toBe(true);
+    });
+
+    it("GET /admin/orders returns an empty list with zero total when there are no matching orders", async () => {
+      fakeDb = createFakeDb([[], [{ count: 0 }], [], []]);
       const res = await callHandler(makeEvent("GET", "/admin/orders"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ orders: [] });
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders).toEqual([]);
+      expect(parsed.total).toBe(0);
+    });
+
+    describe("GET /admin/orders/summary", () => {
+      it("computes trailing-24h vs previous-24h KPIs, a daily trend, and a per-channel profit breakdown from real orders", async () => {
+        const order = {
+          id: "o1",
+          channel: "ebay",
+          placedAt: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2h ago -- inside last24h, not prev24h
+          profitFinalizedAt: null,
+          finalizedNetProfitUsdCents: null,
+          returnRequestedAt: null,
+          costJpy: 1200,
+          shippingCostJpy: 750,
+          ebayFeeUsdCents: 230,
+          paymentFeeUsdCents: 0,
+        };
+        fakeDb = createFakeDb([[order]]);
+        getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2180, netProfitUsdCents: 1420, profitMarginBasisPoints: 3944 });
+
+        const res = await callHandler(makeEvent("GET", "/admin/orders/summary"));
+        expect(res.statusCode).toBe(200);
+        const parsed = JSON.parse(res.body!);
+        // usdPerJpy is the test suite's fixed 0.0067 (fetchFxRateMock's default) -- these are
+        // exact usdCentsToJpy(cents) = round(cents/100/0.0067) conversions.
+        expect(parsed.kpi.orderCount).toEqual({ value: 1, deltaPct: null }); // previous window has 0 orders
+        expect(parsed.kpi.revenueJpy).toEqual({ value: 5373, deltaPct: null });
+        expect(parsed.kpi.ebayRevenueJpy).toEqual({ value: 5373, deltaPct: null });
+        expect(parsed.kpi.netProfitJpy).toEqual({ value: 2119, deltaPct: null });
+        expect(parsed.kpi.returnCount).toEqual({ value: 0, deltaAbs: 0 });
+        expect(parsed.trend).toHaveLength(30);
+        expect(parsed.trend.reduce((sum: number, d: { orderCount: number }) => sum + d.orderCount, 0)).toBe(1);
+        expect(parsed.channelBreakdown.ebay).toEqual({ revenueJpy: 5373, costJpy: 1200, feesJpy: 343, shippingJpy: 750, profitJpy: 2119 });
+        expect(parsed.channelBreakdown.base).toEqual({ revenueJpy: 0, costJpy: 0, feesJpy: 0, shippingJpy: 0, profitJpy: 0 });
+      });
+
+      it("accepts a custom ?days= window", async () => {
+        fakeDb = createFakeDb([[]]);
+        const res = await callHandler(makeEvent("GET", "/admin/orders/summary", { days: "7" }));
+        const parsed = JSON.parse(res.body!);
+        expect(parsed.days).toBe(7);
+        expect(parsed.trend).toHaveLength(7);
+      });
     });
 
     it("GET /admin/products/{id}/orders lists that product's orders", async () => {

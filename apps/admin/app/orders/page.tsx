@@ -1,53 +1,20 @@
 "use client";
 
 import type { OrderStatus } from "@ai-ec/core";
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
-import { isOrderStatusTerminal, ORDER_STATUS_BADGE, ORDER_STATUS_LABEL, validNextOrderStatuses } from "@/lib/order-copy";
-import { SkeletonRows, EmptyState } from "@/components/Skeleton";
+import { ORDER_STATUS_LABEL } from "@/lib/order-copy";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
-import { ChevronIcon, RefreshIcon } from "@/components/icons";
-
-interface OrderProduct {
-  id: string;
-  sku: string;
-  title: string;
-  images: string[];
-}
-
-interface OrderRow {
-  id: string;
-  productId: string;
-  channel: string;
-  externalOrderId: string;
-  quantity: number;
-  status: OrderStatus;
-  finalizedNetProfitUsdCents: number | null;
-  profitFinalizedAt: string | null;
-  placedAt: string;
-  product: OrderProduct | null;
-}
-
-interface LiveProfit {
-  finalized: boolean;
-  revenueUsdCents?: number;
-  costUsdCents?: number;
-  netProfitUsdCents: number;
-  profitMarginBasisPoints?: number | null;
-  profitFinalizedAt?: string;
-}
-
-interface ExtraFields {
-  shippingCostJpy: string;
-  ebayFeeUsdCents: string;
-  paymentFeeUsdCents: string;
-  adSpendUsdCents: string;
-  fxCostUsdCents: string;
-  returnAmountUsdCents: string;
-}
+import { PageHeader } from "@/components/ui/PageHeader";
+import { KpiCard } from "@/components/ui/KpiCard";
+import { CartIcon, ClockIcon, CoinIcon, TagIcon, TrendUpIcon } from "@/components/icons";
+import { RevenueTrendChart } from "@/components/orders/RevenueTrendChart";
+import { ChannelProfitChart } from "@/components/orders/ChannelProfitChart";
+import { OrdersTable } from "@/components/orders/OrdersTable";
+import { OrderDetailPanel, type ExtraFields } from "@/components/orders/OrderDetailPanel";
+import type { OrderRow, OrdersSummary } from "@/components/orders/types";
 
 const EMPTY_EXTRA: ExtraFields = {
   shippingCostJpy: "",
@@ -58,22 +25,17 @@ const EMPTY_EXTRA: ExtraFields = {
   returnAmountUsdCents: "",
 };
 
-type Tab = "all" | "unshipped" | "shipped" | "returns";
-
-const TAB_STATUSES: Record<Exclude<Tab, "all">, OrderStatus[]> = {
-  unshipped: ["ORDER_RECEIVED", "PAID", "ALLOCATED"],
-  shipped: ["SHIPPED", "DELIVERED"],
-  returns: ["RETURN_REQUESTED", "RETURNED", "REFUNDED", "CANCELLED"],
-};
-
-function usd(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+function isoDate(d: Date): string {
+  return d.toISOString().slice(0, 10);
 }
 
-function withoutKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
-  const copy = { ...obj };
-  delete copy[key];
-  return copy;
+function jpy(n: number): string {
+  return `¥${n.toLocaleString()}`;
+}
+
+function deltaBadge(deltaPct: number | null): { text: string; up: boolean } | null {
+  if (deltaPct === null) return null;
+  return { text: `${deltaPct > 0 ? "+" : ""}${deltaPct}%(前日比)`, up: deltaPct >= 0 };
 }
 
 function parseJpy(value: string): number | undefined {
@@ -91,378 +53,271 @@ function dollarsToCents(value: string): number | undefined {
 export default function OrdersPage() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
-  const [rows, setRows] = useState<OrderRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>("all");
-  const [query, setQuery] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [profitById, setProfitById] = useState<Record<string, LiveProfit | "loading">>({});
-  const [nextStatus, setNextStatus] = useState<Record<string, OrderStatus>>({});
-  const [extra, setExtra] = useState<Record<string, ExtraFields>>({});
-  const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function load() {
-    setLoading(true);
+  const [summary, setSummary] = useState<OrdersSummary | null>(null);
+  const [from, setFrom] = useState(() => isoDate(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000)));
+  const [to, setTo] = useState(() => isoDate(new Date()));
+
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [avgProfitMarginBasisPoints, setAvgProfitMarginBasisPoints] = useState<number | null>(null);
+  const [usdPerJpy, setUsdPerJpy] = useState<number | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+
+  const [q, setQ] = useState("");
+  const [channel, setChannel] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [profitStatus, setProfitStatus] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkFinalizing, setBulkFinalizing] = useState(false);
+
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"info" | "customer" | "profit" | "timeline">("info");
+  const [nextStatus, setNextStatus] = useState<OrderStatus | null>(null);
+  const [extra, setExtra] = useState<ExtraFields>(EMPTY_EXTRA);
+  const [busy, setBusy] = useState(false);
+
+  const loadSummary = useCallback(async () => {
     try {
-      const res = await apiGet<{ orders: OrderRow[] }>("/admin/orders?limit=200");
-      setRows(res.orders);
+      const days = Math.max(1, Math.round((new Date(to).getTime() - new Date(from).getTime()) / (24 * 60 * 60 * 1000)) + 1);
+      const res = await apiGet<OrdersSummary>(`/admin/orders/summary?days=${days}`);
+      setSummary(res);
+    } catch (err) {
+      notify(`注文サマリーの取得に失敗しました: ${(err as Error).message}`);
+    }
+  }, [from, to, notify]);
+
+  const loadOrders = useCallback(async () => {
+    setListLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
+      if (q.trim()) params.set("q", q.trim());
+      if (channel !== "all") params.set("channel", channel);
+      if (status !== "all") params.set("status", status);
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const res = await apiGet<{ orders: OrderRow[]; total: number; avgProfitMarginBasisPoints: number | null; usdPerJpy: number }>(
+        `/admin/orders?${params.toString()}`,
+      );
+      setOrders(res.orders);
+      setTotal(res.total);
+      setAvgProfitMarginBasisPoints(res.avgProfitMarginBasisPoints);
+      setUsdPerJpy(res.usdPerJpy);
     } catch (err) {
       notify(`注文一覧の取得に失敗しました: ${(err as Error).message}`);
     } finally {
-      setLoading(false);
+      setListLoading(false);
     }
-  }
+  }, [page, pageSize, q, channel, status, from, to, notify]);
 
   useEffect(() => {
-    if (ready) void load();
-  }, [ready]);
+    if (ready) void loadSummary();
+  }, [ready, loadSummary]);
 
-  async function toggleExpand(row: OrderRow) {
-    const next = expandedId === row.id ? null : row.id;
-    setExpandedId(next);
-    if (next && !profitById[row.id]) {
-      setProfitById((prev) => ({ ...prev, [row.id]: "loading" }));
-      try {
-        const profit = await apiGet<LiveProfit>(`/admin/orders/${row.id}/profit`);
-        setProfitById((prev) => ({ ...prev, [row.id]: profit }));
-      } catch (err) {
-        notify(`利益情報の取得に失敗しました: ${(err as Error).message}`);
-        setProfitById((prev) => withoutKey(prev, row.id));
-      }
-    }
+  useEffect(() => {
+    if (ready) void loadOrders();
+  }, [ready, loadOrders]);
+
+  useEffect(() => {
+    setNextStatus(null);
+    setExtra(EMPTY_EXTRA);
+    setActiveTab("info");
+  }, [selectedOrderId]);
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
-  async function submitStatusChange(row: OrderRow) {
-    const target = nextStatus[row.id];
-    if (!target) return;
-    const fields = extra[row.id] ?? EMPTY_EXTRA;
+  function toggleSelectAll() {
+    setSelectedIds((prev) => (prev.size === orders.length ? new Set() : new Set(orders.map((o) => o.id))));
+  }
+
+  function clearFilters() {
+    setQ("");
+    setChannel("all");
+    setStatus("all");
+    setProfitStatus("all");
+    setPage(1);
+  }
+
+  async function handleSubmitStatusChange() {
+    if (!selectedOrderId || !nextStatus) return;
     const extraPayload: Record<string, number> = {};
-    const shippingCostJpy = parseJpy(fields.shippingCostJpy);
+    const shippingCostJpy = parseJpy(extra.shippingCostJpy);
     if (shippingCostJpy !== undefined) extraPayload.shippingCostJpy = shippingCostJpy;
-    const ebayFee = dollarsToCents(fields.ebayFeeUsdCents);
+    const ebayFee = dollarsToCents(extra.ebayFeeUsdCents);
     if (ebayFee !== undefined) extraPayload.ebayFeeUsdCents = ebayFee;
-    const paymentFee = dollarsToCents(fields.paymentFeeUsdCents);
+    const paymentFee = dollarsToCents(extra.paymentFeeUsdCents);
     if (paymentFee !== undefined) extraPayload.paymentFeeUsdCents = paymentFee;
-    const adSpend = dollarsToCents(fields.adSpendUsdCents);
+    const adSpend = dollarsToCents(extra.adSpendUsdCents);
     if (adSpend !== undefined) extraPayload.adSpendUsdCents = adSpend;
-    const fxCost = dollarsToCents(fields.fxCostUsdCents);
+    const fxCost = dollarsToCents(extra.fxCostUsdCents);
     if (fxCost !== undefined) extraPayload.fxCostUsdCents = fxCost;
-    const returnAmount = dollarsToCents(fields.returnAmountUsdCents);
+    const returnAmount = dollarsToCents(extra.returnAmountUsdCents);
     if (returnAmount !== undefined) extraPayload.returnAmountUsdCents = returnAmount;
 
-    setBusyId(row.id);
+    setBusy(true);
     try {
-      await apiPost(`/admin/orders/${row.id}/status`, {
-        status: target,
+      await apiPost(`/admin/orders/${selectedOrderId}/status`, {
+        status: nextStatus,
         extra: Object.keys(extraPayload).length > 0 ? extraPayload : undefined,
       });
-      notify(`注文を「${ORDER_STATUS_LABEL[target]}」に更新しました。`, "success");
-      setProfitById((prev) => withoutKey(prev, row.id));
-      setExtra((prev) => ({ ...prev, [row.id]: EMPTY_EXTRA }));
-      await load();
+      notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新しました。`, "success");
+      setNextStatus(null);
+      setExtra(EMPTY_EXTRA);
+      await Promise.all([loadOrders(), loadSummary()]);
     } catch (err) {
       notify(`状態の更新に失敗しました: ${(err as Error).message}`);
     } finally {
-      setBusyId(null);
+      setBusy(false);
     }
   }
 
-  async function finalize(row: OrderRow) {
-    setBusyId(row.id);
+  async function handleFinalizeProfit() {
+    if (!selectedOrderId) return;
+    setBusy(true);
     try {
-      const res = await apiPost<{ order: OrderRow }>(`/admin/orders/${row.id}/finalize-profit`);
+      await apiPost(`/admin/orders/${selectedOrderId}/finalize-profit`);
       notify("利益を確定しました。", "success");
-      setProfitById((prev) => ({
-        ...prev,
-        [row.id]: { finalized: true, netProfitUsdCents: res.order.finalizedNetProfitUsdCents ?? 0 },
-      }));
-      await load();
+      await Promise.all([loadOrders(), loadSummary()]);
     } catch (err) {
       notify(`利益の確定に失敗しました: ${(err as Error).message}`);
     } finally {
-      setBusyId(null);
+      setBusy(false);
     }
   }
 
-  const counts = useMemo(() => {
-    const unshipped = rows.filter((r) => TAB_STATUSES.unshipped.includes(r.status)).length;
-    const shipped = rows.filter((r) => TAB_STATUSES.shipped.includes(r.status)).length;
-    const returns = rows.filter((r) => TAB_STATUSES.returns.includes(r.status)).length;
-    // Live (non-finalized) profit isn't loaded for every row up front -- only fetched
-    // per-row on expand -- so this is a count, not a summed dollar figure.
-    const unfinalizedCount = rows.filter((r) => !r.profitFinalizedAt).length;
-    return { unshipped, shipped, returns, unfinalizedCount };
-  }, [rows]);
-
-  const filtered = useMemo(() => {
-    let list = rows;
-    if (tab !== "all") list = list.filter((r) => TAB_STATUSES[tab].includes(r.status));
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter(
-        (r) =>
-          (r.product?.title.toLowerCase().includes(q) ?? false) ||
-          (r.product?.sku.toLowerCase().includes(q) ?? false) ||
-          r.externalOrderId.toLowerCase().includes(q),
-      );
+  async function handleBulkFinalize() {
+    setBulkFinalizing(true);
+    try {
+      const ids = [...selectedIds];
+      await Promise.all(ids.map((id) => apiPost(`/admin/orders/${id}/finalize-profit`).catch(() => null)));
+      notify(`${ids.length}件の利益を確定しました。`, "success");
+      setSelectedIds(new Set());
+      await Promise.all([loadOrders(), loadSummary()]);
+    } catch (err) {
+      notify(`一括確定に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setBulkFinalizing(false);
     }
-    return list;
-  }, [rows, tab, query]);
+  }
+
+  const selectedOrder = orders.find((o) => o.id === selectedOrderId) ?? null;
+  const orderCountDelta = summary ? deltaBadge(summary.kpi.orderCount.deltaPct) : null;
+  const revenueDelta = summary ? deltaBadge(summary.kpi.revenueJpy.deltaPct) : null;
+  const ebayRevenueDelta = summary ? deltaBadge(summary.kpi.ebayRevenueJpy.deltaPct) : null;
+  const profitDelta = summary ? deltaBadge(summary.kpi.netProfitJpy.deltaPct) : null;
+  const marginDelta = summary ? deltaBadge(summary.kpi.profitMarginPct.deltaPct) : null;
 
   return (
     <>
-      <Topbar onSearch={setQuery} searchPlaceholder="商品名・SKU・注文IDで検索..." />
+      <Topbar />
       <div className="page">
-        <div className="page-header">
-          <div>
-            <h1>注文管理</h1>
-            <p className="page-lead">BASE・eBayの注文状態を追跡し、利益を確定します。</p>
-          </div>
-          <button type="button" onClick={() => void load()} disabled={loading}>
-            <RefreshIcon /> 更新
-          </button>
+        <PageHeader
+          title="注文管理"
+          lead="BASE・eBayの注文履歴、発送状況、利益を一元管理します。"
+          actions={
+            <div className="draft-date-range">
+              <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} max={to} />〜
+              <input type="date" value={to} onChange={(e) => setTo(e.target.value)} min={from} max={isoDate(new Date())} />
+            </div>
+          }
+        />
+
+        <div className="kpi-grid">
+          <KpiCard icon={CartIcon} color="blue" value={summary?.kpi.orderCount.value ?? "..."} label="今日の注文数" sub={orderCountDelta ? <span className={orderCountDelta.up ? "kpi-trend up" : "kpi-trend down"}>{orderCountDelta.up ? "↑" : "↓"} {orderCountDelta.text}</span> : undefined} />
+          <KpiCard icon={CoinIcon} color="green" value={summary ? jpy(summary.kpi.revenueJpy.value) : "..."} label="24時間売上" sub={revenueDelta ? <span className={revenueDelta.up ? "kpi-trend up" : "kpi-trend down"}>{revenueDelta.up ? "↑" : "↓"} {revenueDelta.text}</span> : undefined} />
+          <KpiCard icon={TagIcon} color="orange" value={summary ? jpy(summary.kpi.ebayRevenueJpy.value) : "..."} label="eBay売上" sub={ebayRevenueDelta ? <span className={ebayRevenueDelta.up ? "kpi-trend up" : "kpi-trend down"}>{ebayRevenueDelta.up ? "↑" : "↓"} {ebayRevenueDelta.text}</span> : undefined} />
+          <KpiCard icon={TrendUpIcon} color="green" value={summary ? jpy(summary.kpi.netProfitJpy.value) : "..."} label="粗利" sub={profitDelta ? <span className={profitDelta.up ? "kpi-trend up" : "kpi-trend down"}>{profitDelta.up ? "↑" : "↓"} {profitDelta.text}</span> : undefined} />
+          <KpiCard icon={ClockIcon} color="orange" value={summary?.kpi.returnCount.value ?? "..."} label="返品件数" sub={summary ? <span className={summary.kpi.returnCount.deltaAbs <= 0 ? "kpi-trend up" : "kpi-trend down"}>{summary.kpi.returnCount.deltaAbs >= 0 ? "↑" : "↓"} {summary.kpi.returnCount.deltaAbs}(前日比)</span> : undefined} />
+          <KpiCard icon={TrendUpIcon} color="green" value={summary?.kpi.profitMarginPct.value != null ? `${summary.kpi.profitMarginPct.value.toFixed(1)}%` : "..."} label="利益率" sub={marginDelta ? <span className={marginDelta.up ? "kpi-trend up" : "kpi-trend down"}>{marginDelta.up ? "↑" : "↓"} {marginDelta.text}</span> : undefined} />
         </div>
 
-        {!ready || loading ? (
-          <SkeletonRows count={4} />
-        ) : (
-          <>
-            <div className="kpi-grid">
-              <div className="kpi-card">
-                <div className="kpi-value">{counts.unshipped}</div>
-                <div className="kpi-label">未出荷</div>
-              </div>
-              <div className="kpi-card">
-                <div className="kpi-value">{counts.shipped}</div>
-                <div className="kpi-label">出荷済み</div>
-              </div>
-              <div className="kpi-card">
-                <div className="kpi-value">{counts.returns}</div>
-                <div className="kpi-label">返品・キャンセル</div>
-              </div>
-              <div className="kpi-card">
-                <div className="kpi-value">{counts.unfinalizedCount}</div>
-                <div className="kpi-label">利益未確定</div>
-              </div>
+        <div className="inventory-charts-row">
+          <div className="card card-pad">
+            <h2 style={{ marginBottom: "0.75rem" }}>売上推移</h2>
+            {summary && <RevenueTrendChart data={summary.trend} formatJpy={jpy} />}
+          </div>
+          <div className="card card-pad">
+            <h2 style={{ marginBottom: "0.75rem" }}>チャネル別利益</h2>
+            {summary && <ChannelProfitChart base={summary.channelBreakdown.base} ebay={summary.channelBreakdown.ebay} formatJpy={jpy} />}
+          </div>
+        </div>
+
+        <div className="inventory-main-layout">
+          <div className="inventory-main-col">
+            <OrdersTable
+              orders={orders}
+              total={total}
+              loading={listLoading}
+              usdPerJpy={usdPerJpy}
+              q={q}
+              onQChange={(v) => {
+                setQ(v);
+                setPage(1);
+              }}
+              from={from}
+              to={to}
+              onFromChange={setFrom}
+              onToChange={setTo}
+              channel={channel}
+              onChannelChange={(v) => {
+                setChannel(v);
+                setPage(1);
+              }}
+              status={status}
+              onStatusChange={(v) => {
+                setStatus(v);
+                setPage(1);
+              }}
+              profitStatus={profitStatus}
+              onProfitStatusChange={setProfitStatus}
+              onClearFilters={clearFilters}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={(n) => {
+                setPageSize(n);
+                setPage(1);
+              }}
+              selectedIds={selectedIds}
+              onToggleSelect={toggleSelect}
+              onToggleSelectAll={toggleSelectAll}
+              selectedOrderId={selectedOrderId}
+              onSelectRow={(id) => setSelectedOrderId((cur) => (cur === id ? null : id))}
+              onBulkFinalize={handleBulkFinalize}
+              bulkFinalizing={bulkFinalizing}
+            />
+          </div>
+
+          {selectedOrder && (
+            <div className="inventory-side-col">
+              <OrderDetailPanel
+                order={selectedOrder}
+                usdPerJpy={usdPerJpy}
+                avgProfitMarginBasisPoints={avgProfitMarginBasisPoints}
+                activeTab={activeTab}
+                onTabChange={setActiveTab}
+                nextStatus={nextStatus}
+                onNextStatusChange={setNextStatus}
+                extra={extra}
+                onExtraChange={setExtra}
+                onSubmitStatusChange={handleSubmitStatusChange}
+                onFinalizeProfit={handleFinalizeProfit}
+                busy={busy}
+                onClose={() => setSelectedOrderId(null)}
+              />
             </div>
-
-            {rows.length === 0 ? (
-              <div className="table-wrapper" style={{ marginTop: "1.25rem" }}>
-                <EmptyState>まだ注文がありません。BASE・eBayでの売却が検知されると自動的にここに記録されます。</EmptyState>
-              </div>
-            ) : (
-              <>
-                <div className="filter-tabs" style={{ marginTop: "1.25rem", marginBottom: "0.75rem" }}>
-                  <button type="button" className="filter-tab" data-active={tab === "all"} onClick={() => setTab("all")}>
-                    全て ({rows.length})
-                  </button>
-                  <button type="button" className="filter-tab" data-active={tab === "unshipped"} onClick={() => setTab("unshipped")}>
-                    未出荷 {counts.unshipped > 0 && counts.unshipped}
-                  </button>
-                  <button type="button" className="filter-tab" data-active={tab === "shipped"} onClick={() => setTab("shipped")}>
-                    出荷済み {counts.shipped > 0 && counts.shipped}
-                  </button>
-                  <button type="button" className="filter-tab" data-active={tab === "returns"} onClick={() => setTab("returns")}>
-                    返品・キャンセル {counts.returns > 0 && counts.returns}
-                  </button>
-                </div>
-
-                {filtered.length === 0 ? (
-                  <div className="table-wrapper">
-                    <EmptyState>該当する注文がありません。</EmptyState>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-                    {filtered.map((row) => {
-                      const expanded = expandedId === row.id;
-                      const profit = profitById[row.id];
-                      const nextOptions = validNextOrderStatuses(row.status);
-                      const fields = extra[row.id] ?? EMPTY_EXTRA;
-                      return (
-                        <div key={row.id} className="card">
-                          <button
-                            type="button"
-                            onClick={() => void toggleExpand(row)}
-                            style={{
-                              display: "flex",
-                              gap: "0.75rem",
-                              alignItems: "center",
-                              background: "none",
-                              border: "none",
-                              padding: "0.9rem 1rem",
-                              textAlign: "left",
-                              cursor: "pointer",
-                              width: "100%",
-                            }}
-                          >
-                            {row.product?.images?.[0] ? (
-                              <img src={row.product.images[0]} alt="" className="product-card-thumb" style={{ width: 48, height: 48 }} />
-                            ) : (
-                              <div className="product-card-thumb" style={{ width: 48, height: 48 }} />
-                            )}
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-                                <span className={ORDER_STATUS_BADGE[row.status]}>{ORDER_STATUS_LABEL[row.status]}</span>
-                                <span className="badge">{row.channel.toUpperCase()}</span>
-                                {row.profitFinalizedAt && <span className="badge ok">利益確定済み</span>}
-                              </div>
-                              <div style={{ fontWeight: 700, marginTop: "0.25rem" }}>{row.product?.title ?? row.productId}</div>
-                              <div style={{ color: "var(--fg-subtle)", fontSize: "0.8rem" }}>
-                                {row.product?.sku ?? "—"} ・ 注文ID {row.externalOrderId} ・ 数量 {row.quantity} ・{" "}
-                                {new Date(row.placedAt).toLocaleDateString("ja-JP")}
-                              </div>
-                            </div>
-                            <span style={{ fontWeight: 700 }}>
-                              {row.profitFinalizedAt ? usd(row.finalizedNetProfitUsdCents ?? 0) : "—"}
-                            </span>
-                            <ChevronIcon style={{ transform: expanded ? "rotate(180deg)" : undefined, flexShrink: 0 }} />
-                          </button>
-
-                          {expanded && (
-                            <div style={{ padding: "0 1rem 1rem", borderTop: "1px solid var(--border)" }}>
-                              <div className="section-eyebrow" style={{ marginTop: "0.9rem" }}>利益</div>
-                              {profit === "loading" || !profit ? (
-                                <p style={{ fontSize: "0.82rem", color: "var(--fg-subtle)" }}>計算中...</p>
-                              ) : (
-                                <div className="detail-metric-grid">
-                                  <div className="detail-metric">
-                                    <div className="detail-metric-value">
-                                      {usd(profit.finalized ? (row.finalizedNetProfitUsdCents ?? 0) : profit.netProfitUsdCents)}
-                                    </div>
-                                    <div className="detail-metric-label">{profit.finalized ? "確定利益" : "見込み利益(未確定)"}</div>
-                                  </div>
-                                  {!profit.finalized && typeof profit.revenueUsdCents === "number" && (
-                                    <div className="detail-metric">
-                                      <div className="detail-metric-value">{usd(profit.revenueUsdCents)}</div>
-                                      <div className="detail-metric-label">売上</div>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-
-                              {!row.profitFinalizedAt && (
-                                <>
-                                  <div className="section-eyebrow" style={{ marginTop: "1rem" }}>状態を更新</div>
-                                  {isOrderStatusTerminal(row.status) ? (
-                                    <p style={{ fontSize: "0.82rem", color: "var(--fg-subtle)" }}>この注文はこれ以上状態を進められません。</p>
-                                  ) : (
-                                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.4rem" }}>
-                                      {nextOptions.map((s) => (
-                                        <button
-                                          key={s}
-                                          type="button"
-                                          className={nextStatus[row.id] === s ? "" : "secondary"}
-                                          onClick={() => setNextStatus((prev) => ({ ...prev, [row.id]: s }))}
-                                        >
-                                          {ORDER_STATUS_LABEL[s]}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  )}
-
-                                  {nextStatus[row.id] && (
-                                    <div style={{ marginTop: "0.75rem" }}>
-                                      <div className="specifics-grid">
-                                        <label className="specifics-field">
-                                          <span>送料(JPY)</span>
-                                          <input
-                                            type="text"
-                                            inputMode="numeric"
-                                            value={fields.shippingCostJpy}
-                                            onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, shippingCostJpy: e.target.value } }))}
-                                          />
-                                        </label>
-                                        <label className="specifics-field">
-                                          <span>eBay手数料(USD)</span>
-                                          <input
-                                            type="text"
-                                            inputMode="decimal"
-                                            value={fields.ebayFeeUsdCents}
-                                            onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, ebayFeeUsdCents: e.target.value } }))}
-                                          />
-                                        </label>
-                                        <label className="specifics-field">
-                                          <span>決済手数料(USD)</span>
-                                          <input
-                                            type="text"
-                                            inputMode="decimal"
-                                            value={fields.paymentFeeUsdCents}
-                                            onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, paymentFeeUsdCents: e.target.value } }))}
-                                          />
-                                        </label>
-                                        <label className="specifics-field">
-                                          <span>広告費(USD)</span>
-                                          <input
-                                            type="text"
-                                            inputMode="decimal"
-                                            value={fields.adSpendUsdCents}
-                                            onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, adSpendUsdCents: e.target.value } }))}
-                                          />
-                                        </label>
-                                        <label className="specifics-field">
-                                          <span>為替コスト(USD)</span>
-                                          <input
-                                            type="text"
-                                            inputMode="decimal"
-                                            value={fields.fxCostUsdCents}
-                                            onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, fxCostUsdCents: e.target.value } }))}
-                                          />
-                                        </label>
-                                        {(nextStatus[row.id] === "RETURNED" || row.status === "RETURN_REQUESTED") && (
-                                          <label className="specifics-field">
-                                            <span>返金額(USD)</span>
-                                            <input
-                                              type="text"
-                                              inputMode="decimal"
-                                              value={fields.returnAmountUsdCents}
-                                              onChange={(e) => setExtra((prev) => ({ ...prev, [row.id]: { ...fields, returnAmountUsdCents: e.target.value } }))}
-                                            />
-                                          </label>
-                                        )}
-                                      </div>
-                                      <button
-                                        type="button"
-                                        style={{ marginTop: "0.75rem" }}
-                                        onClick={() => void submitStatusChange(row)}
-                                        disabled={busyId === row.id}
-                                      >
-                                        {busyId === row.id ? "更新中..." : `「${ORDER_STATUS_LABEL[nextStatus[row.id]!]}」に更新`}
-                                      </button>
-                                    </div>
-                                  )}
-                                </>
-                              )}
-
-                              {profit && profit !== "loading" && !profit.finalized && (
-                                <button
-                                  type="button"
-                                  className="secondary"
-                                  style={{ marginTop: "0.9rem" }}
-                                  onClick={() => void finalize(row)}
-                                  disabled={busyId === row.id}
-                                >
-                                  {busyId === row.id ? "処理中..." : "利益を確定する"}
-                                </button>
-                              )}
-
-                              <Link
-                                href={`/products/detail?id=${row.productId}`}
-                                className="button secondary"
-                                style={{ width: "100%", marginTop: "0.6rem", display: "block", textAlign: "center" }}
-                              >
-                                商品詳細を開く
-                              </Link>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        )}
+          )}
+        </div>
       </div>
     </>
   );

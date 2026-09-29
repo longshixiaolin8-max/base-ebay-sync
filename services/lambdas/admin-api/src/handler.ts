@@ -39,7 +39,6 @@ import {
   getTenantBillingStatus,
   InvalidOrderTransitionError,
   inventoryMaster,
-  listOrders,
   listOrdersForProduct,
   markSnsStatus,
   oauthConnections,
@@ -1572,25 +1571,254 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // --- Commercial-features round: Order model (item #1) ---
 
     if (method === "GET" && path === "/admin/orders") {
-      const status = OrderStatus.safeParse(event.queryStringParameters?.status);
-      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : undefined;
-      const orderRows = await listOrders(db, tenantId, { status: status.success ? status.data : undefined, limit });
+      const statusParsed = OrderStatus.safeParse(event.queryStringParameters?.status);
+      const channelRaw = event.queryStringParameters?.channel;
+      const channelFilter = channelRaw === "base" || channelRaw === "ebay" ? channelRaw : undefined;
+      const fromRaw = event.queryStringParameters?.from;
+      const toRaw = event.queryStringParameters?.to;
+      const q = event.queryStringParameters?.q?.trim();
+      const limit = Math.min(200, Math.max(1, Number(event.queryStringParameters?.limit) || 50));
+      const offset = Math.max(0, Number(event.queryStringParameters?.offset) || 0);
+
+      const conditions = [eq(orders.tenantId, tenantId)];
+      if (statusParsed.success) conditions.push(eq(orders.status, statusParsed.data));
+      if (channelFilter) conditions.push(eq(orders.channel, channelFilter));
+      if (fromRaw) conditions.push(gte(orders.placedAt, new Date(fromRaw)));
+      if (toRaw) conditions.push(lte(orders.placedAt, new Date(`${toRaw}T23:59:59.999Z`)));
+      if (q) {
+        const searchCondition = or(ilike(productMaster.title, `%${q}%`), ilike(productMaster.sku, `%${q}%`), ilike(orders.externalOrderId, `%${q}%`));
+        if (searchCondition) conditions.push(searchCondition);
+      }
+      const whereClause = and(...conditions);
 
       // The orders table only has product_id -- every other order-management screen this
       // platform has (commerce-dashboard, product detail) already joins in sku/title/images
       // for display, so the standalone order list does the same rather than making the
-      // frontend show a bare UUID or fire one lookup per row.
-      const productIds = [...new Set(orderRows.map((o) => o.productId))];
-      const productRows = productIds.length
-        ? await db
-            .select({ id: productMaster.id, sku: productMaster.sku, title: productMaster.title, images: productMaster.images })
-            .from(productMaster)
-            .where(and(eq(productMaster.tenantId, tenantId), inArray(productMaster.id, productIds)))
-        : [];
-      const productById = new Map(productRows.map((p) => [p.id, p]));
+      // frontend show a bare UUID or fire one lookup per row. A left join, not inner -- an
+      // order whose product was since deleted must still appear rather than silently vanish.
+      const [rows, totalRows, usdPerJpy, recentOrdersForBaseline, unresolvedDoubleSale] = await Promise.all([
+        db
+          .select({ order: orders, product: productMaster })
+          .from(orders)
+          .leftJoin(productMaster, eq(productMaster.id, orders.productId))
+          .where(whereClause)
+          .orderBy(desc(orders.placedAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(orders)
+          .leftJoin(productMaster, eq(productMaster.id, orders.productId))
+          .where(whereClause),
+        currentFxRate(),
+        // 直近200件(現在のフィルタとは無関係)を「平均的な利益率」の基準として使う -- 現在
+        // 表示中のページだけから平均を取ると、フィルタで絞るたびに基準自体が動いてしまう。
+        db.select().from(orders).where(eq(orders.tenantId, tenantId)).orderBy(desc(orders.placedAt)).limit(200),
+        db
+          .select({ productId: syncErrors.productId })
+          .from(syncErrors)
+          .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.errorCode, "possible_double_sale"), eq(syncErrors.resolved, false))),
+      ]);
 
-      const enriched = orderRows.map((o) => ({ ...o, product: productById.get(o.productId) ?? null }));
-      return json(200, { orders: enriched });
+      // Revenue never changes after an order is placed (it's the buyer's paid price), so it's
+      // always safe to recompute live -- only the cost/profit side is frozen at finalization.
+      // This lets a finalized order still get a real, consistent margin figure here (finalized_
+      // net_profit_usd_cents / this same live revenue) instead of one being unavailable.
+      function marginBasisPointsFor(order: (typeof rows)[number]["order"]): number | null {
+        const live = getLiveOrderProfit(order, usdPerJpy);
+        if (!order.profitFinalizedAt) return live.profitMarginBasisPoints;
+        return live.revenueUsdCents > 0 ? Math.round(((order.finalizedNetProfitUsdCents ?? 0) / live.revenueUsdCents) * 10000) : null;
+      }
+
+      const baselineMargins = recentOrdersForBaseline.map((o) => marginBasisPointsFor(o)).filter((m): m is number => m !== null);
+      const avgMarginBasisPoints =
+        baselineMargins.length > 0 ? Math.round(baselineMargins.reduce((a, b) => a + b, 0) / baselineMargins.length) : null;
+      const doubleSaleProductIds = new Set(unresolvedDoubleSale.map((r) => r.productId).filter((id): id is string => Boolean(id)));
+      // "Below average" needs a minimum gap (5 percentage points), not just "any margin under
+      // the mean" -- half of any distribution is below its own average by definition, and
+      // flagging that would make the signal meaningless.
+      const BELOW_AVERAGE_GAP_BPS = 500;
+
+      const enriched = rows.map((r) => {
+        const live = getLiveOrderProfit(r.order, usdPerJpy);
+        const marginBasisPoints = marginBasisPointsFor(r.order);
+        return {
+          ...r.order,
+          product: r.product,
+          profit: {
+            finalized: Boolean(r.order.profitFinalizedAt),
+            revenueUsdCents: live.revenueUsdCents,
+            costUsdCents: live.costUsdCents,
+            netProfitUsdCents: r.order.profitFinalizedAt ? (r.order.finalizedNetProfitUsdCents ?? 0) : live.netProfitUsdCents,
+            profitMarginBasisPoints: marginBasisPoints,
+          },
+          hasPossibleDoubleSale: doubleSaleProductIds.has(r.order.productId),
+          belowAverageMargin:
+            avgMarginBasisPoints !== null && marginBasisPoints !== null && marginBasisPoints < avgMarginBasisPoints - BELOW_AVERAGE_GAP_BPS,
+        };
+      });
+
+      return json(200, {
+        orders: enriched,
+        total: totalRows[0]?.count ?? 0,
+        avgProfitMarginBasisPoints: avgMarginBasisPoints,
+        // Shared conversion rate this response's own per-row `profit` figures were computed
+        // with -- returned so the frontend can derive further JPY breakdowns (fees, shipping)
+        // from the same order fields using the identical rate, rather than guessing one back
+        // out of already-rounded USD figures.
+        usdPerJpy,
+      });
+    }
+
+    // KPI row + charts for the redesigned 注文管理 page. Every card is a trailing-24h vs.
+    // previous-24h comparison (matching the "前日比" badges in the design), independent of
+    // the `days` window, which only scopes the two charts below -- same split dashboard/
+    // summary already uses (its own last24h vs. its calendar-day trend).
+    if (method === "GET" && path === "/admin/orders/summary") {
+      const days = Math.min(90, Math.max(1, Number(event.queryStringParameters?.days) || 30));
+      const now = new Date();
+      const rangeStart = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+      const last24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const prev24hStart = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+      const since = rangeStart < prev24hStart ? rangeStart : prev24hStart;
+
+      const usdPerJpy = await currentFxRate();
+      const relevantOrders = await db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.tenantId, tenantId), gte(orders.placedAt, since)));
+
+      function usdCentsToJpy(cents: number): number {
+        return Math.round(cents / 100 / usdPerJpy);
+      }
+
+      const profitByOrderId = new Map(
+        relevantOrders.map((order) => {
+          const live = getLiveOrderProfit(order, usdPerJpy);
+          return [
+            order.id,
+            {
+              revenueUsdCents: live.revenueUsdCents,
+              netProfitUsdCents: order.profitFinalizedAt ? (order.finalizedNetProfitUsdCents ?? 0) : live.netProfitUsdCents,
+              costJpy: order.costJpy ?? 0,
+              feesUsdCents: (order.ebayFeeUsdCents ?? 0) + (order.paymentFeeUsdCents ?? 0),
+              shippingJpy: order.shippingCostJpy ?? 0,
+            },
+          ];
+        }),
+      );
+      const profitFor = (o: (typeof relevantOrders)[number]) => profitByOrderId.get(o.id)!;
+
+      function summarizeWindow(rows: typeof relevantOrders) {
+        let revenueUsdCents = 0;
+        let netProfitUsdCents = 0;
+        let ebayRevenueUsdCents = 0;
+        for (const o of rows) {
+          const p = profitFor(o);
+          revenueUsdCents += p.revenueUsdCents;
+          netProfitUsdCents += p.netProfitUsdCents;
+          if (o.channel === "ebay") ebayRevenueUsdCents += p.revenueUsdCents;
+        }
+        return {
+          orderCount: rows.length,
+          revenueJpy: usdCentsToJpy(revenueUsdCents),
+          ebayRevenueJpy: usdCentsToJpy(ebayRevenueUsdCents),
+          netProfitJpy: usdCentsToJpy(netProfitUsdCents),
+          profitMarginBasisPoints: revenueUsdCents > 0 ? Math.round((netProfitUsdCents / revenueUsdCents) * 10000) : null,
+        };
+      }
+
+      const last24hOrders = relevantOrders.filter((o) => o.placedAt >= last24hStart);
+      const prev24hOrders = relevantOrders.filter((o) => o.placedAt >= prev24hStart && o.placedAt < last24hStart);
+      // A return "happening" in a window is measured by returnRequestedAt (when the buyer
+      // actually asked for one), not placedAt (when the original sale happened, possibly
+      // long before) -- a return count keyed on sale date would miss returns of older orders.
+      const last24hReturnCount = relevantOrders.filter((o) => o.returnRequestedAt && o.returnRequestedAt >= last24hStart).length;
+      const prev24hReturnCount = relevantOrders.filter(
+        (o) => o.returnRequestedAt && o.returnRequestedAt >= prev24hStart && o.returnRequestedAt < last24hStart,
+      ).length;
+
+      const last24h = { ...summarizeWindow(last24hOrders), returnCount: last24hReturnCount };
+      const prev24h = { ...summarizeWindow(prev24hOrders), returnCount: prev24hReturnCount };
+
+      // Percentage change for counts/amounts; a percentage-POINT difference (not a relative
+      // %) for a figure that's already itself a percentage (profitMarginBasisPoints); and a
+      // plain integer difference for returnCount, since a relative "% change" of "2 vs 3
+      // returns" reads as noise, not signal, at this small a scale.
+      function pctChange(current: number, previous: number): number | null {
+        if (previous === 0) return current === 0 ? 0 : null;
+        return Math.round(((current - previous) / previous) * 1000) / 10;
+      }
+
+      const rangeOrders = relevantOrders.filter((o) => o.placedAt >= rangeStart);
+
+      const trend: Array<{ date: string; baseRevenueJpy: number; ebayRevenueJpy: number; orderCount: number }> = [];
+      for (let i = 0; i < days; i++) {
+        const dayStart = new Date(rangeStart.getTime() + i * 24 * 60 * 60 * 1000);
+        const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+        const dayOrders = rangeOrders.filter((o) => o.placedAt >= dayStart && o.placedAt < dayEnd);
+        let baseRevenueUsdCents = 0;
+        let ebayRevenueUsdCents = 0;
+        for (const o of dayOrders) {
+          const revenue = profitFor(o).revenueUsdCents;
+          if (o.channel === "ebay") ebayRevenueUsdCents += revenue;
+          else baseRevenueUsdCents += revenue;
+        }
+        trend.push({
+          date: dayStart.toISOString().slice(0, 10),
+          baseRevenueJpy: usdCentsToJpy(baseRevenueUsdCents),
+          ebayRevenueJpy: usdCentsToJpy(ebayRevenueUsdCents),
+          orderCount: dayOrders.length,
+        });
+      }
+
+      // 5-category channel breakdown chart. 利益 also reflects ad spend/FX cost/return
+      // amount (computeOrderProfit's other cost lines), which aren't broken out as their own
+      // bars here -- so 売上-原価-手数料-送料 will not exactly equal 利益 for a channel that
+      // has any of those; documented in the response itself rather than silently mismatched.
+      function channelBreakdown(channel: string) {
+        const rows = rangeOrders.filter((o) => o.channel === channel);
+        let revenueUsdCents = 0;
+        let costJpy = 0;
+        let feesUsdCents = 0;
+        let shippingJpy = 0;
+        let netProfitUsdCents = 0;
+        for (const o of rows) {
+          const p = profitFor(o);
+          revenueUsdCents += p.revenueUsdCents;
+          costJpy += p.costJpy;
+          feesUsdCents += p.feesUsdCents;
+          shippingJpy += p.shippingJpy;
+          netProfitUsdCents += p.netProfitUsdCents;
+        }
+        return {
+          revenueJpy: usdCentsToJpy(revenueUsdCents),
+          costJpy,
+          feesJpy: usdCentsToJpy(feesUsdCents),
+          shippingJpy,
+          profitJpy: usdCentsToJpy(netProfitUsdCents),
+        };
+      }
+
+      return json(200, {
+        days,
+        kpi: {
+          orderCount: { value: last24h.orderCount, deltaPct: pctChange(last24h.orderCount, prev24h.orderCount) },
+          revenueJpy: { value: last24h.revenueJpy, deltaPct: pctChange(last24h.revenueJpy, prev24h.revenueJpy) },
+          ebayRevenueJpy: { value: last24h.ebayRevenueJpy, deltaPct: pctChange(last24h.ebayRevenueJpy, prev24h.ebayRevenueJpy) },
+          netProfitJpy: { value: last24h.netProfitJpy, deltaPct: pctChange(last24h.netProfitJpy, prev24h.netProfitJpy) },
+          returnCount: { value: last24h.returnCount, deltaAbs: last24h.returnCount - prev24h.returnCount },
+          profitMarginPct: {
+            value: last24h.profitMarginBasisPoints !== null ? last24h.profitMarginBasisPoints / 100 : null,
+            deltaPct:
+              last24h.profitMarginBasisPoints !== null && prev24h.profitMarginBasisPoints !== null
+                ? Math.round((last24h.profitMarginBasisPoints - prev24h.profitMarginBasisPoints) / 10) / 10
+                : null,
+          },
+        },
+        trend,
+        channelBreakdown: { base: channelBreakdown("base"), ebay: channelBreakdown("ebay") },
+      });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/orders$/.test(path)) {
