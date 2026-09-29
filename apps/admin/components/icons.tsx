@@ -249,3 +249,35 @@ export function ChevronIcon(props: SVGProps<SVGSVGElement>) {
     </Icon>
   );
 }
+
+/** Central DB node in the dashboard's sync-topology card. */
+export function DatabaseIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <ellipse cx="12" cy="5" rx="8" ry="3" />
+      <path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
+      <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+    </Icon>
+  );
+}
+
+/** Directional connector between the sync-topology card's nodes. */
+export function ArrowRightIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={16} height={16}>
+      <path d="M5 12h14" />
+      <path d="m13 6 6 6-6 6" />
+    </Icon>
+  );
+}
+
+/** AI-generated content marker (draft review items, AI tag chips). */
+export function SparkleIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M12 3v4M12 17v4M3 12h4M17 12h4" />
+      <path d="m7 7 2.5 2.5M17 7l-2.5 2.5M7 17l2.5-2.5M17 17l-2.5-2.5" />
+      <circle cx="12" cy="12" r="2.5" />
+    </Icon>
+  );
+}

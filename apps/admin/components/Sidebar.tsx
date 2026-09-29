@@ -1,15 +1,18 @@
 "use client";
 
 import type { SyncError } from "@ai-ec/core";
-import { fetchUserAttributes, signOut } from "aws-amplify/auth";
+import { fetchUserAttributes } from "aws-amplify/auth";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
+import { planLabel } from "@/lib/format";
+import { useSignOut } from "@/lib/use-sign-out";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, SyncIcon } from "@/components/icons";
+import { PlanUsageWidget } from "@/components/dashboard/PlanUsageWidget";
 
 const LINKS = [
   { href: "/dashboard", label: "ダッシュボード", icon: DashboardIcon },
@@ -35,13 +38,14 @@ function statusDotClass(state?: ChannelState["state"]): string {
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
   const { open, close } = useMobileNav();
+  const { signingOut, handleSignOut } = useSignOut();
   const [email, setEmail] = useState<string | null>(null);
-  const [signingOut, setSigningOut] = useState(false);
   const [errorCount, setErrorCount] = useState(0);
   const [baseState, setBaseState] = useState<ChannelState | null>(null);
   const [ebayState, setEbayState] = useState<ChannelState | null>(null);
+  const [usage, setUsage] = useState<{ products: { used: number; limit: number } } | null>(null);
+  const [plan, setPlan] = useState<string | null>(null);
   // next.config.mjs's trailingSlash:true means the real route is "/login/", not "/login" --
   // an exact-match check without normalizing this let the sidebar (and its logout button)
   // render on top of the unauthenticated login screen in every real deploy. /signup is the
@@ -76,18 +80,15 @@ export function Sidebar() {
     apiGet<ChannelState>("/admin/sync/state?channel=ebay")
       .then(setEbayState)
       .catch(() => {});
+    apiGet<{ products: { used: number; limit: number } }>("/admin/usage")
+      .then(setUsage)
+      .catch(() => {});
+    apiGet<{ plan: string }>("/admin/billing/status")
+      .then((res) => setPlan(res.plan))
+      .catch(() => {});
   }, [isPublicPage]);
 
   if (isPublicPage) return null;
-
-  async function handleSignOut() {
-    setSigningOut(true);
-    try {
-      await signOut();
-    } finally {
-      router.replace("/login");
-    }
-  }
 
   // The public GET /oauth/ebay/authorize route was removed (round 12 hardening --
   // "public OAuth authorize routeを廃止"): OAuth connect now always starts from this
@@ -143,6 +144,8 @@ export function Sidebar() {
           )}
         </div>
       </div>
+
+      {usage && plan && <PlanUsageWidget planLabel={planLabel(plan)} productsUsed={usage.products.used} productsLimit={usage.products.limit} />}
 
       <ThemeToggle />
 

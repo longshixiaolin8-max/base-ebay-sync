@@ -213,6 +213,7 @@ function chain(result: unknown) {
     where: () => self,
     orderBy: () => self,
     limit: () => self,
+    groupBy: () => self,
     then: (resolve: (v: unknown) => void) => resolve(result),
   };
   return self;
@@ -1370,6 +1371,8 @@ describe("admin-api handler", () => {
           },
         ], // relevantOrders
         [{ id: "p1", title: "T1", sku: "sku-1" }], // products
+        [{ count: 5 }], // ebayPublishedRow
+        [{ channel: "base", lastSyncedAt: "2024-04-30T14:24:00.000Z" }], // lastSyncedRows
       ]);
       getLiveOrderProfitMock.mockReturnValueOnce({ revenueUsdCents: 10000, costUsdCents: 6000, netProfitUsdCents: 4000, profitMarginBasisPoints: 4000 });
       getInventoryBreakdownMock.mockResolvedValueOnce({ productId: "p1", onHand: 5, reserved: 1, available: 2, safetyBuffer: 3, sellableByChannel: {} });
@@ -1389,10 +1392,37 @@ describe("admin-api handler", () => {
       ]);
       expect(parsed.inventory).toEqual({ totalAvailable: 2, lowStockCount: 1 });
       expect(parsed.trend).toHaveLength(14);
+      expect(parsed.ebayPublishedCount).toBe(5);
+      expect(parsed.lastSyncedAt).toEqual({ base: "2024-04-30T14:24:00.000Z", ebay: null });
+    });
+
+    it("GET /admin/dashboard/summary's last24h window only counts orders placed in the trailing 24h, separately from the calendar-day trend", async () => {
+      const now = new Date();
+      const withinLast24h = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+      const overADayAgo = new Date(now.getTime() - 30 * 60 * 60 * 1000);
+      fakeDb = createFakeDb([
+        [
+          { id: "recent", productId: "p1", channel: "base", status: "PAID", placedAt: withinLast24h, profitFinalizedAt: null, finalizedNetProfitUsdCents: null },
+          { id: "old", productId: "p1", channel: "base", status: "PAID", placedAt: overADayAgo, profitFinalizedAt: null, finalizedNetProfitUsdCents: null },
+        ], // relevantOrders
+        [{ id: "p1", title: "T1", sku: "sku-1" }], // products
+        [{ count: 0 }], // ebayPublishedRow
+        [], // lastSyncedRows
+      ]);
+      getLiveOrderProfitMock
+        .mockReturnValueOnce({ revenueUsdCents: 500, costUsdCents: 100, netProfitUsdCents: 400, profitMarginBasisPoints: 8000 })
+        .mockReturnValueOnce({ revenueUsdCents: 900, costUsdCents: 100, netProfitUsdCents: 800, profitMarginBasisPoints: 8888 });
+      getInventoryBreakdownMock.mockResolvedValueOnce(null);
+
+      const res = await callHandler(makeEvent("GET", "/admin/dashboard/summary"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.last24h).toEqual({ revenueUsdCents: 500, orderCount: 1 });
+      expect(parsed.ebayPublishedCount).toBe(0);
+      expect(parsed.lastSyncedAt).toEqual({ base: null, ebay: null });
     });
 
     it("GET /admin/dashboard/summary returns zeroed KPIs and an empty recent-orders list with no real orders yet", async () => {
-      fakeDb = createFakeDb([[], []]);
+      fakeDb = createFakeDb([[], [], [{ count: 0 }], []]);
 
       const res = await callHandler(makeEvent("GET", "/admin/dashboard/summary"));
       expect(res.statusCode).toBe(200);
@@ -1400,6 +1430,9 @@ describe("admin-api handler", () => {
       expect(parsed.currentMonth).toMatchObject({ revenueUsdCents: 0, orderCount: 0, profitMarginBasisPoints: null });
       expect(parsed.recentOrders).toEqual([]);
       expect(parsed.inventory).toEqual({ totalAvailable: 0, lowStockCount: 0 });
+      expect(parsed.last24h).toEqual({ revenueUsdCents: 0, orderCount: 0 });
+      expect(parsed.ebayPublishedCount).toBe(0);
+      expect(parsed.lastSyncedAt).toEqual({ base: null, ebay: null });
       expect(getLiveOrderProfitMock).not.toHaveBeenCalled();
     });
   });

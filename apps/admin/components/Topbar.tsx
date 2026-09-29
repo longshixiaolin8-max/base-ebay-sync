@@ -7,8 +7,10 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
+import { useSignOut } from "@/lib/use-sign-out";
 import { useMobileNav } from "@/components/MobileNav";
 import { BellIcon, MenuIcon, SearchIcon } from "@/components/icons";
+import { DropdownMenu } from "@/components/ui/DropdownMenu";
 
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "ダッシュボード",
@@ -35,6 +37,7 @@ export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
   const isLoginPage = pathname?.replace(/\/$/, "") === "/login";
   const [email, setEmail] = useState<string | null>(null);
   const [errorCount, setErrorCount] = useState(0);
+  const { signingOut, handleSignOut } = useSignOut();
 
   useEffect(() => {
     if (isLoginPage) return;
@@ -76,7 +79,17 @@ export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
           <BellIcon />
           {errorCount > 0 && <span className="icon-button-badge">{errorCount > 99 ? "99+" : errorCount}</span>}
         </Link>
-        <span className="avatar">{initial}</span>
+        <DropdownMenu label="アカウントメニュー" align="right" trigger={<span className="avatar">{initial}</span>}>
+          <div className="dropdown-menu-meta">
+            <div className="dropdown-menu-meta-name">{email ?? "..."}</div>
+          </div>
+          <Link href="/billing" className="dropdown-menu-item">
+            請求・プラン
+          </Link>
+          <button type="button" className="dropdown-menu-item" onClick={handleSignOut} disabled={signingOut}>
+            {signingOut ? "ログアウト中..." : "ログアウト"}
+          </button>
+        </DropdownMenu>
       </div>
     </header>
   );

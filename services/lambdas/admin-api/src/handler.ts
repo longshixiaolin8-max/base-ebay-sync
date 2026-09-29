@@ -68,7 +68,7 @@ import {
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -1725,12 +1725,42 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         if (b.available <= b.safetyBuffer) lowStockCount++;
       }
 
+      // Dashboard KPI row (UI): a real rolling 24h window, distinct from the calendar-day
+      // trend buckets above -- computed from relevantOrders (already covers this range,
+      // since `since` is always at least a full month back) rather than a separate query.
+      const last24hStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const last24hOrders = relevantOrders.filter((o) => o.placedAt >= last24hStart);
+      const last24h = {
+        revenueUsdCents: last24hOrders.reduce((sum, o) => sum + profitFor(o).revenueUsdCents, 0),
+        orderCount: last24hOrders.length,
+      };
+
+      // "公開中eBay出品数" KPI: a real count, not the commerce-dashboard's per-product N+1
+      // breakdown (that endpoint answers a different question -- this dashboard just needs
+      // the one number).
+      const [ebayPublishedRow] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(channelListings)
+        .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.channel, "ebay"), eq(channelListings.status, "published")));
+
+      // Per-channel "最終同期" timestamp for the sync-topology card, from the same table's
+      // own bookkeeping (channel_listings.last_synced_at) rather than a guessed cadence.
+      const lastSyncedRows = await db
+        .select({ channel: channelListings.channel, lastSyncedAt: sql<string | null>`max(${channelListings.lastSyncedAt})` })
+        .from(channelListings)
+        .where(eq(channelListings.tenantId, tenantId))
+        .groupBy(channelListings.channel);
+      const lastSyncedByChannel = Object.fromEntries(lastSyncedRows.map((r) => [r.channel, r.lastSyncedAt]));
+
       return json(200, {
         currentMonth: summarize(currentMonthOrders),
         previousMonth: summarize(previousMonthOrders),
         trend,
         recentOrders,
         inventory: { totalAvailable, lowStockCount },
+        last24h,
+        ebayPublishedCount: ebayPublishedRow?.count ?? 0,
+        lastSyncedAt: { base: lastSyncedByChannel.base ?? null, ebay: lastSyncedByChannel.ebay ?? null },
       });
     }
 

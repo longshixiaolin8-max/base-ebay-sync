@@ -4,24 +4,12 @@ import type { SyncError } from "@ai-ec/core";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
+import { relativeTime } from "@/lib/format";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { ERROR_CODE_LABEL } from "@/lib/sync-error-copy";
-
-/** For fast triage at a glance -- the absolute timestamp (still shown alongside it) is
- *  the exact record; this is just how long it's been sitting unresolved. */
-function relativeTime(date: Date | string): string {
-  const diffMs = Date.now() - new Date(date).getTime();
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 1) return "たった今";
-  if (minutes < 60) return `${minutes}分前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}時間前`;
-  const days = Math.floor(hours / 24);
-  return `${days}日前`;
-}
 
 export default function SyncErrorsPage() {
   const { ready } = useRequireAuth();

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
+import { planLabel } from "@/lib/format";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
@@ -143,7 +144,7 @@ export default function BillingPage() {
           <div className="card card-pad" style={{ maxWidth: 480 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "0.4rem" }}>
               <span style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <strong>{billing.plan === "standard" ? "スタンダードプラン" : billing.plan}</strong>
+                <strong>{planLabel(billing.plan)}</strong>
                 {billing.testMode && <span className="badge">デモ契約</span>}
               </span>
               <span className={`badge ${billing.status === "active" ? "ok" : "warn"}`}>{STATUS_LABEL[billing.status]}</span>
