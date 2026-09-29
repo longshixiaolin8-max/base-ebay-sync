@@ -19,6 +19,7 @@ const LINKS = [
   { href: "/onboarding", label: "導入設定", icon: PlugIcon },
   { href: "/products", label: "商品マスター", icon: BoxIcon },
   { href: "/drafts", label: "AI出品下書き", icon: SparkleIcon },
+  { href: "/channel-sync", label: "チャネル同期", icon: SyncIcon },
   { href: "/commerce", label: "コマース統合", icon: SyncIcon },
   { href: "/orders", label: "注文管理", icon: CartIcon },
   { href: "/sync-errors", label: "同期エラー", icon: AlertIcon },
@@ -122,7 +123,12 @@ export function Sidebar() {
         {LINKS.map((link) => {
           const Icon = link.icon;
           const active = pathname?.startsWith(link.href) || undefined;
-          const badge = link.href === "/sync-errors" ? errorCount : link.href === "/drafts" ? reviewPendingCount : 0;
+          const badge =
+            link.href === "/sync-errors" || link.href === "/channel-sync"
+              ? errorCount
+              : link.href === "/drafts"
+                ? reviewPendingCount
+                : 0;
           return (
             <Link key={link.href} href={link.href} data-active={active}>
               <Icon />

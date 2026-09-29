@@ -59,6 +59,7 @@ const markSnsStatusMock = vi.fn();
 const transitionOrderStatusMock = vi.fn();
 const upsertSnsScriptMock = vi.fn();
 const computeChannelSyncStateMock = vi.fn();
+const getLatestSyncedAtMock = vi.fn().mockResolvedValue(null);
 const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
 const countProductsMock = vi.fn().mockResolvedValue(0);
 const countProductsByStatusMock = vi.fn().mockResolvedValue(0);
@@ -79,6 +80,8 @@ vi.mock("@ai-ec/db", () => ({
   auditLog: { createdAt: "createdAt" },
   orders: {},
   aiListingDraft: { createdAt: "createdAt" },
+  oauthConnections: { updatedAt: "updatedAt" },
+  getLatestSyncedAt: (...args: unknown[]) => getLatestSyncedAtMock(...args),
   computeSyncConfidence: (...args: unknown[]) => computeSyncConfidenceMock(...args),
   computeDynamicSafetyStock: (...args: unknown[]) => computeDynamicSafetyStockMock(...args),
   reconstructInventory: (...args: unknown[]) => reconstructInventoryMock(...args),
@@ -274,6 +277,7 @@ describe("admin-api handler", () => {
     transitionOrderStatusMock.mockReset();
     upsertSnsScriptMock.mockClear();
     computeChannelSyncStateMock.mockClear();
+    getLatestSyncedAtMock.mockClear().mockResolvedValue(null);
     generateSnsScriptMock.mockClear();
     suggestStaleProductImprovementMock.mockClear();
     countProductsMock.mockClear().mockResolvedValue(0);
@@ -456,6 +460,168 @@ describe("admin-api handler", () => {
     });
   });
 
+  describe("GET /admin/sync/connections", () => {
+    it("reports disconnected channels with no expiry/last-synced when nothing has ever connected", async () => {
+      fakeDb = createFakeDb([[], []]); // base oauthConnections select, ebay oauthConnections select
+      computeChannelSyncStateMock.mockImplementation((..._args: unknown[]) => Promise.resolve({ channel: "base", state: "HEALTHY", reasons: [] }));
+      getLatestSyncedAtMock.mockResolvedValue(null);
+
+      const res = await callHandler(makeEvent("GET", "/admin/sync/connections"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.base).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
+      expect(parsed.ebay).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
+    });
+
+    it("reports token expiry, last-synced time, and derived state per channel for a connected account", async () => {
+      const expiresAt = new Date("2024-06-28T14:32:00.000Z");
+      const lastSynced = new Date("2024-04-30T14:25:00.000Z");
+      fakeDb = createFakeDb([
+        [{ externalAccountId: "acct-base", expiresAt }], // base
+        [], // ebay -- not connected
+      ]);
+      // Argument-driven rather than call-order-driven, since both channels are looked up
+      // concurrently via Promise.all -- this stays correct regardless of microtask ordering.
+      computeChannelSyncStateMock.mockImplementation((_db: unknown, _tenantId: unknown, channel: string) =>
+        Promise.resolve(channel === "base" ? { channel, state: "DEGRADED", reasons: ["low confidence"] } : { channel, state: "HEALTHY", reasons: [] }),
+      );
+      getLatestSyncedAtMock.mockImplementation((_db: unknown, _tenantId: unknown, channel: string) =>
+        Promise.resolve(channel === "base" ? lastSynced : null),
+      );
+
+      const res = await callHandler(makeEvent("GET", "/admin/sync/connections"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.base).toEqual({
+        connected: true,
+        externalAccountId: "acct-base",
+        expiresAt: expiresAt.toISOString(),
+        lastSyncedAt: lastSynced.toISOString(),
+        state: "DEGRADED",
+        reasons: ["low confidence"],
+      });
+      expect(parsed.ebay).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
+    });
+  });
+
+  describe("GET /admin/sync/jobs", () => {
+    it("returns an empty queue with zeroed counts when there are no jobs", async () => {
+      fakeDb = createFakeDb([[]]); // syncJobs select only -- no productIds means no second select
+      const res = await callHandler(makeEvent("GET", "/admin/sync/jobs"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ jobs: [], counts: { all: 0, pending: 0, completed: 0, failed: 0 } });
+    });
+
+    it("joins job rows with their product and reports counts independent of the status filter", async () => {
+      const createdAt = new Date("2024-04-30T14:24:00.000Z");
+      fakeDb = createFakeDb([
+        [
+          { id: "j1", type: "ai_generate", productId: "p1", status: "completed", attempts: 1, idempotencyKey: "k1", payload: {}, createdAt, updatedAt: createdAt },
+          { id: "j2", type: "ebay_update", productId: "p2", status: "failed", attempts: 3, idempotencyKey: "k2", payload: {}, createdAt, updatedAt: createdAt },
+        ], // syncJobs
+        [
+          { id: "p1", title: "セラミックマグカップ", sku: "MUG-GR-001" },
+          { id: "p2", title: "レザートートバッグ", sku: "TOTE-BK-789" },
+        ], // productMaster
+      ]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/sync/jobs"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.counts).toEqual({ all: 2, pending: 0, completed: 1, failed: 1 });
+      expect(parsed.jobs).toEqual([
+        expect.objectContaining({ id: "j1", productTitle: "セラミックマグカップ", productSku: "MUG-GR-001", status: "completed" }),
+        expect.objectContaining({ id: "j2", productTitle: "レザートートバッグ", productSku: "TOTE-BK-789", status: "failed" }),
+      ]);
+    });
+
+    it("status filter narrows the returned jobs but not the counts", async () => {
+      const createdAt = new Date();
+      fakeDb = createFakeDb([
+        [
+          { id: "j1", type: "ai_generate", productId: null, status: "pending", attempts: 0, idempotencyKey: "k1", payload: {}, createdAt, updatedAt: createdAt },
+          { id: "j2", type: "ebay_update", productId: null, status: "failed", attempts: 1, idempotencyKey: "k2", payload: {}, createdAt, updatedAt: createdAt },
+        ],
+      ]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/sync/jobs", { status: "failed" }));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.jobs).toHaveLength(1);
+      expect(parsed.jobs[0].id).toBe("j2");
+      expect(parsed.counts).toEqual({ all: 2, pending: 1, completed: 0, failed: 1 });
+    });
+  });
+
+  describe("POST /admin/sync/jobs/{id}/retry", () => {
+    it("returns 404 when the job doesn't exist", async () => {
+      fakeDb = createFakeDb([[]]);
+      const res = await callHandler(makeEvent("POST", "/admin/sync/jobs/j1/retry"));
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("returns 400 when the job isn't currently failed", async () => {
+      fakeDb = createFakeDb([[{ id: "j1", status: "pending" }]]);
+      const res = await callHandler(makeEvent("POST", "/admin/sync/jobs/j1/retry"));
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("resets a failed job to pending and records an audit log entry", async () => {
+      fakeDb = createFakeDb([[{ id: "j1", status: "failed" }]]);
+      const res = await callHandler(makeEvent("POST", "/admin/sync/jobs/j1/retry"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ status: "pending" });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ actor: "admin@example.com", action: "sync_job_retried", entityType: "sync_job", entityId: "j1" }),
+      );
+    });
+  });
+
+  describe("POST /admin/sync/jobs/bulk-retry", () => {
+    it("returns 400 when ids is missing or empty", async () => {
+      const res = await callHandler(makeEvent("POST", "/admin/sync/jobs/bulk-retry", {}, { ids: [] }));
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("retries only the (already-failed) jobs the query matched, one audit log entry each", async () => {
+      fakeDb = createFakeDb([
+        [
+          { id: "j1", status: "failed" },
+          { id: "j2", status: "failed" },
+        ],
+      ]);
+      const res = await callHandler(makeEvent("POST", "/admin/sync/jobs/bulk-retry", {}, { ids: ["j1", "j2", "j3"] }));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ retried: 2 });
+      expect(recordAuditLogMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("GET /admin/sync/pipeline", () => {
+    it("returns real per-stage counts for the given date range", async () => {
+      fakeDb = createFakeDb([
+        [{ count: 128 }], // fetched (productMaster)
+        [{ count: 96 }], // transformed (aiListingDraft)
+        [{ count: 72 }], // published (channelListings)
+        [{ count: 4 }], // pendingTransform (syncJobs ai_generate pending)
+        [{ count: 2 }], // pendingPublish (syncJobs ebay_update/channel_inventory_push pending)
+      ]);
+
+      const res = await callHandler(makeEvent("GET", "/admin/sync/pipeline", { from: "2024-04-01", to: "2024-04-30" }));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.fetched).toEqual({ count: 128 });
+      expect(parsed.transformed).toEqual({ count: 96, pending: 4 });
+      expect(parsed.published).toEqual({ count: 72, pending: 2 });
+    });
+
+    it("defaults to a trailing 30-day window when no from/to is given", async () => {
+      fakeDb = createFakeDb([[{ count: 0 }], [{ count: 0 }], [{ count: 0 }], [{ count: 0 }], [{ count: 0 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/sync/pipeline"));
+      const parsed = JSON.parse(res.body!);
+      const diffDays = (new Date(parsed.to).getTime() - new Date(parsed.from).getTime()) / (24 * 60 * 60 * 1000);
+      expect(diffDays).toBeCloseTo(30, 0);
+    });
+  });
+
   it("GET /admin/products/{id} returns 404 when the product doesn't exist", async () => {
     fakeDb = createFakeDb([[]]);
     const res = await callHandler(makeEvent("GET", "/admin/products/missing-id"));
@@ -619,10 +785,39 @@ describe("admin-api handler", () => {
   });
 
   it("GET /admin/sync-errors filters by productId when provided", async () => {
-    fakeDb = createFakeDb([[{ id: "e1", productId: "p1" }]]);
+    fakeDb = createFakeDb([[{ error: { id: "e1", productId: "p1" }, productTitle: null, productSku: null, jobType: null }]]);
     const res = await callHandler(makeEvent("GET", "/admin/sync-errors", { resolved: "false", productId: "p1" }));
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body!)).toEqual({ syncErrors: [{ id: "e1", productId: "p1" }] });
+    expect(JSON.parse(res.body!)).toEqual({
+      syncErrors: [{ id: "e1", productId: "p1", productTitle: null, productSku: null, jobType: null }],
+    });
+  });
+
+  it("GET /admin/sync-errors includes the joined product name/SKU and job type when available", async () => {
+    fakeDb = createFakeDb([
+      [
+        {
+          error: { id: "e1", productId: "p1", jobId: "j1", errorCode: "inventory_sync_failed" },
+          productTitle: "レザートートバッグ",
+          productSku: "TOTE-BK-789",
+          jobType: "ebay_update",
+        },
+      ],
+    ]);
+    const res = await callHandler(makeEvent("GET", "/admin/sync-errors", { resolved: "false" }));
+    expect(JSON.parse(res.body!)).toEqual({
+      syncErrors: [
+        {
+          id: "e1",
+          productId: "p1",
+          jobId: "j1",
+          errorCode: "inventory_sync_failed",
+          productTitle: "レザートートバッグ",
+          productSku: "TOTE-BK-789",
+          jobType: "ebay_update",
+        },
+      ],
+    });
   });
 
   it("POST /admin/ebay/location creates the location and records an audit log entry", async () => {

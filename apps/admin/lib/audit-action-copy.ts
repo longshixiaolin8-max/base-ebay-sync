@@ -19,6 +19,7 @@ export const AUDIT_ACTION_LABEL: Record<string, string> = {
   ebay_business_policies_created: "eBayの事業者ポリシーを作成しました",
   ebay_webhook_subscribed: "eBay Webhookを登録しました",
   sync_error_retried: "同期エラーを再試行しました",
+  sync_job_retried: "同期ジョブを再試行しました",
   inventory_reconstructed: "在庫を再構築しました",
   auto_rollback_applied: "自動ロールバックを適用しました",
   anomaly_detected_sync_paused: "異常検知により同期を一時停止しました",

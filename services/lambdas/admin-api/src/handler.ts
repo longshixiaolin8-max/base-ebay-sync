@@ -31,6 +31,7 @@ import {
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
+  getLatestSyncedAt,
   getLiveOrderProfit,
   getMonthlyAiGenerationCount,
   getSnsContent,
@@ -40,6 +41,7 @@ import {
   listOrders,
   listOrdersForProduct,
   markSnsStatus,
+  oauthConnections,
   orders,
   predictStockoutRisk,
   productMaster,
@@ -73,7 +75,7 @@ import {
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -761,9 +763,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/sync-errors") {
       const resolvedOnly = event.queryStringParameters?.resolved === "true";
       const productId = event.queryStringParameters?.productId;
+      // Additive left-joins for the チャネル同期 page's error table (product name/SKU, the
+      // job type that failed) -- every existing field stays on the row unchanged (see the
+      // {...r.error} spread below), so the original /sync-errors page keeps working exactly
+      // as before against this same route.
       const rows = await db
-        .select()
+        .select({ error: syncErrors, productTitle: productMaster.title, productSku: productMaster.sku, jobType: syncJobs.type })
         .from(syncErrors)
+        .leftJoin(productMaster, eq(productMaster.id, syncErrors.productId))
+        .leftJoin(syncJobs, eq(syncJobs.id, syncErrors.jobId))
         .where(
           productId
             ? and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.resolved, resolvedOnly), eq(syncErrors.productId, productId))
@@ -771,7 +779,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         )
         .orderBy(desc(syncErrors.createdAt))
         .limit(200);
-      return json(200, { syncErrors: rows });
+      const syncErrorsOut = rows.map((r) => ({
+        ...r.error,
+        productTitle: r.productTitle ?? null,
+        productSku: r.productSku ?? null,
+        jobType: r.jobType ?? null,
+      }));
+      return json(200, { syncErrors: syncErrorsOut });
     }
 
     if (method === "POST" && /^\/admin\/sync-errors\/[^/]+\/retry$/.test(path)) {
@@ -1796,6 +1810,204 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         recentAutoRecoveryEvents,
         // Per-function API latency is already on the CloudWatch dashboard (MonitoringStack) --
         // not duplicated here; see the round's report for why.
+      });
+    }
+
+    // --- チャネル同期 round: 接続詳細・同期ジョブキュー・パイプライン ---
+    // Deliberately a NEW route rather than extending GET /admin/oauth/status -- that route's
+    // { base: boolean, ebay: boolean, ebayPoliciesConfigured } shape is already relied on by
+    // /onboarding and /commerce, and this page needs a much richer per-channel payload
+    // (token expiry, last-synced time, derived sync state) that would be a breaking shape
+    // change for those existing callers.
+
+    if (method === "GET" && path === "/admin/sync/connections") {
+      async function connectionDetail(channel: "base" | "ebay") {
+        const [connection] = await db
+          .select()
+          .from(oauthConnections)
+          .where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)))
+          .orderBy(desc(oauthConnections.updatedAt))
+          .limit(1);
+        const [lastSyncedAt, syncState] = await Promise.all([
+          getLatestSyncedAt(db, tenantId, channel),
+          computeChannelSyncState(db, tenantId, channel),
+        ]);
+        return {
+          connected: Boolean(connection),
+          externalAccountId: connection?.externalAccountId ?? null,
+          expiresAt: connection?.expiresAt?.toISOString() ?? null,
+          lastSyncedAt: lastSyncedAt?.toISOString() ?? null,
+          state: syncState.state,
+          reasons: syncState.reasons,
+        };
+      }
+      const [base, ebay] = await Promise.all([connectionDetail("base"), connectionDetail("ebay")]);
+      return json(200, { base, ebay });
+    }
+
+    // sync_jobs is the Transactional Outbox table (see product-fetch's insertOutboxJob /
+    // dispatchPendingOutboxJobs and packages/db's applySaleWithOutbox) -- it only ever holds
+    // rows of type "ai_generate", "ebay_update", or "channel_inventory_push", and its status
+    // only ever becomes "pending" -> "completed" (dispatched to SQS) or "failed" (dispatch
+    // failed); workers never write back a "processing"/"succeeded" status here (that would be
+    // this row's own downstream SQS consumer's job, which this table does not track). Bounded
+    // list rather than true pagination, same convention as GET /admin/sync-errors, since a
+    // healthy tenant's outbox queue is small by nature (num_pending items, single digits to
+    // low hundreds -- never a full product-catalog-sized dataset).
+    if (method === "GET" && path === "/admin/sync/jobs") {
+      const statusFilter = event.queryStringParameters?.status;
+      const rows = await db
+        .select()
+        .from(syncJobs)
+        .where(eq(syncJobs.tenantId, tenantId))
+        .orderBy(desc(syncJobs.updatedAt))
+        .limit(200);
+
+      const productIds = [...new Set(rows.map((r) => r.productId).filter((id): id is string => Boolean(id)))];
+      const products = productIds.length
+        ? await db
+            .select({ id: productMaster.id, title: productMaster.title, sku: productMaster.sku })
+            .from(productMaster)
+            .where(and(eq(productMaster.tenantId, tenantId), inArray(productMaster.id, productIds)))
+        : [];
+      const productById = new Map(products.map((p) => [p.id, p]));
+
+      // Counts reflect the full fetched set, independent of statusFilter -- so switching
+      // status tabs never makes the tab counts themselves jump around.
+      const counts = {
+        all: rows.length,
+        pending: rows.filter((r) => r.status === "pending").length,
+        completed: rows.filter((r) => r.status === "completed").length,
+        failed: rows.filter((r) => r.status === "failed").length,
+      };
+
+      const jobs = rows
+        .filter((r) => !statusFilter || r.status === statusFilter)
+        .map((r) => ({
+          id: r.id,
+          type: r.type,
+          productId: r.productId,
+          productTitle: r.productId ? (productById.get(r.productId)?.title ?? null) : null,
+          productSku: r.productId ? (productById.get(r.productId)?.sku ?? null) : null,
+          status: r.status,
+          attempts: r.attempts,
+          idempotencyKey: r.idempotencyKey,
+          payload: r.payload,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        }));
+
+      return json(200, { jobs, counts });
+    }
+
+    // Resets a failed outbox row back to "pending" so the next dispatchPendingOutboxJobs poll
+    // (product-fetch, every 15min) picks it back up -- the same thing that already happens to
+    // every failed row automatically; this just lets an operator ask for it explicitly and see
+    // it reflected immediately, rather than waiting for the next scheduled poll.
+    if (method === "POST" && /^\/admin\/sync\/jobs\/[^/]+\/retry$/.test(path)) {
+      const id = path.split("/")[4]!;
+      const [job] = await db
+        .select()
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, id)))
+        .limit(1);
+      if (!job) return json(404, { error: "not_found" });
+      if (job.status !== "failed") return json(400, { error: "job_not_failed" });
+
+      await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, id));
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "sync_job_retried",
+        entityType: "sync_job",
+        entityId: id,
+      });
+      return json(200, { status: "pending" });
+    }
+
+    if (method === "POST" && path === "/admin/sync/jobs/bulk-retry") {
+      const body = JSON.parse(event.body ?? "{}") as { ids?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === "string") : [];
+      if (ids.length === 0) return json(400, { error: "ids_required" });
+
+      const failedJobs = await db
+        .select()
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, tenantId), inArray(syncJobs.id, ids), eq(syncJobs.status, "failed")));
+
+      for (const row of failedJobs) {
+        await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, row.id));
+        await recordAuditLog(db, {
+          tenantId,
+          actor: actorFromEvent(event),
+          action: "sync_job_retried",
+          entityType: "sync_job",
+          entityId: row.id,
+        });
+      }
+      return json(200, { retried: failedJobs.length });
+    }
+
+    // Real per-stage counts for the selected date range, built from data this platform
+    // already records -- never a guessed/simulated queue-depth number:
+    //  - 取得: product_master rows touched by a BASE fetch in the window (source-of-truth for
+    //    "how much did we pull from BASE", since product-fetch itself keeps no fetch log).
+    //  - 変換: ai_listing_draft rows created in the window (AI turning BASE content into
+    //    eBay-ready listing content is literally what this stage is).
+    //  - 公開: channel_listings rows that reached eBay status=published with a lastSyncedAt in
+    //    the window (mirrors the drafts page's own "today公開" KPI, generalized to a range).
+    // "pending" on 変換/公開 is the CURRENT outbox backlog for that stage's job type(s), not
+    // range-scoped (a backlog is a right-now fact, not a historical one). 取得 has no queue --
+    // BASE import runs synchronously per poll -- so it reports no pending count.
+    if (method === "GET" && path === "/admin/sync/pipeline") {
+      const fromParam = event.queryStringParameters?.from;
+      const toParam = event.queryStringParameters?.to;
+      const from = fromParam ? new Date(fromParam) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const to = toParam ? new Date(toParam) : new Date();
+
+      const [fetchedRows, transformedRows, publishedRows, pendingTransform, pendingPublish] = await Promise.all([
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(productMaster)
+          .where(and(eq(productMaster.tenantId, tenantId), gte(productMaster.updatedAt, from), lte(productMaster.updatedAt, to))),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(aiListingDraft)
+          .where(and(eq(aiListingDraft.tenantId, tenantId), gte(aiListingDraft.createdAt, from), lte(aiListingDraft.createdAt, to))),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(channelListings)
+          .where(
+            and(
+              eq(channelListings.tenantId, tenantId),
+              eq(channelListings.channel, "ebay"),
+              eq(channelListings.status, "published"),
+              gte(channelListings.lastSyncedAt, from),
+              lte(channelListings.lastSyncedAt, to),
+            ),
+          ),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(syncJobs)
+          .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.type, "ai_generate"), eq(syncJobs.status, "pending"))),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(syncJobs)
+          .where(
+            and(
+              eq(syncJobs.tenantId, tenantId),
+              inArray(syncJobs.type, ["ebay_update", "channel_inventory_push"]),
+              eq(syncJobs.status, "pending"),
+            ),
+          ),
+      ]);
+
+      return json(200, {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        fetched: { count: fetchedRows[0]?.count ?? 0 },
+        transformed: { count: transformedRows[0]?.count ?? 0, pending: pendingTransform[0]?.count ?? 0 },
+        published: { count: publishedRows[0]?.count ?? 0, pending: pendingPublish[0]?.count ?? 0 },
       });
     }
 
