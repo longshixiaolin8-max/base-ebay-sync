@@ -25,6 +25,17 @@ export async function countProducts(db: Queryable, tenantId: string): Promise<nu
   return row?.count ?? 0;
 }
 
+/** Same real live count as countProducts, scoped to one product_master.status value -- used
+ *  by the products list's KPI row (下書き/売り切れ counts), which needs the true count across
+ *  the whole catalog, not just whatever page is currently loaded. */
+export async function countProductsByStatus(db: Queryable, tenantId: string, status: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(productMaster)
+    .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.status, status)));
+  return row?.count ?? 0;
+}
+
 export async function getMonthlyAiGenerationCount(db: Database, tenantId: string, now: Date = new Date()): Promise<number> {
   const periodStart = startOfMonthUtc(now);
   const [row] = await db

@@ -3,6 +3,7 @@ import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
 import {
   applyStandardAspectFallbacks,
+  ChannelType,
   classifyStaleness,
   computeDynamicPrice,
   DEFAULT_SHIPPING_USD,
@@ -13,6 +14,7 @@ import {
   matchProductIdentity,
   OrderStatus,
   type ProductIdentityCandidate,
+  ProductStatus,
 } from "@ai-ec/core";
 import {
   aiListingDraft,
@@ -22,7 +24,9 @@ import {
   computeChannelSyncState,
   computeDynamicSafetyStock,
   computeSyncConfidence,
+  countChannelListingsByStatus,
   countProducts,
+  countProductsByStatus,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
@@ -68,7 +72,7 @@ import {
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -316,6 +320,93 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .orderBy(desc(productMaster.updatedAt))
         .limit(200);
       return json(200, { products });
+    }
+
+    // --- 商品マスター table redesign: real server-side pagination/filtering, and catalog-
+    // wide KPI counts (independent of whatever filter is active, matching the design's KPI
+    // row staying constant while the table below it is filtered). Placed BEFORE the
+    // single-product GET below, since that route's /^\/admin\/products\/[^/]+$/ regex would
+    // otherwise treat "list" as a product id.
+    //
+    // No "category" filter/column: product_master has no category field (grepped the whole
+    // schema) -- this platform doesn't track a product taxonomy today, so a category filter
+    // here would have nothing real to query against. The frontend renders that filter as a
+    // visible-but-inert "すべて" only, not a fabricated API.
+    if (method === "GET" && path === "/admin/products/list") {
+      const limit = Math.min(100, Math.max(1, Number(event.queryStringParameters?.limit) || 10));
+      const offset = Math.max(0, Number(event.queryStringParameters?.offset) || 0);
+      const statusParsed = ProductStatus.safeParse(event.queryStringParameters?.status);
+      const channelParsed = ChannelType.safeParse(event.queryStringParameters?.channel);
+      const syncStatusRaw = event.queryStringParameters?.syncStatus;
+      const syncStatus = (["pending", "published", "update_pending", "error", "delisted"] as const).find((s) => s === syncStatusRaw);
+      const q = event.queryStringParameters?.q?.trim();
+
+      const conditions = [eq(productMaster.tenantId, tenantId)];
+      if (statusParsed.success) conditions.push(eq(productMaster.status, statusParsed.data));
+      if (channelParsed.success) conditions.push(eq(productMaster.sourceChannel, channelParsed.data));
+      if (q) {
+        const searchCondition = or(ilike(productMaster.title, `%${q}%`), ilike(productMaster.sku, `%${q}%`));
+        if (searchCondition) conditions.push(searchCondition);
+      }
+      // A left join, not inner -- a product with no eBay listing yet must still appear.
+      // Safe against row fan-out: channel_listings has a unique (product_id, channel) index,
+      // so this join can add at most one row per product.
+      const ebayJoin = and(eq(channelListings.productId, productMaster.id), eq(channelListings.channel, "ebay"));
+      if (syncStatus) conditions.push(eq(channelListings.status, syncStatus));
+      const whereClause = and(...conditions);
+
+      const [rows, totalRows, published, draft, soldOut, needsAttention, catalogTotal] = await Promise.all([
+        db
+          .select({ product: productMaster, ebayListing: channelListings })
+          .from(productMaster)
+          .leftJoin(channelListings, ebayJoin)
+          .where(whereClause)
+          .orderBy(desc(productMaster.updatedAt))
+          .limit(limit)
+          .offset(offset),
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(productMaster)
+          .leftJoin(channelListings, ebayJoin)
+          .where(whereClause),
+        countChannelListingsByStatus(db, tenantId, "ebay", "published"),
+        countProductsByStatus(db, tenantId, "ai_generated"),
+        countProductsByStatus(db, tenantId, "sold_out"),
+        countChannelListingsByStatus(db, tenantId, "ebay", "error"),
+        countProducts(db, tenantId),
+      ]);
+
+      const productIds = rows.map((r) => r.product.id);
+      const [inventories, draftCountRows] = await Promise.all([
+        Promise.all(rows.map((r) => getInventoryBreakdown(db, tenantId, r.product.id))),
+        productIds.length
+          ? db
+              .select({ productId: aiListingDraft.productId, count: sql<number>`count(*)::int` })
+              .from(aiListingDraft)
+              .where(and(eq(aiListingDraft.tenantId, tenantId), inArray(aiListingDraft.productId, productIds)))
+              .groupBy(aiListingDraft.productId)
+          : [],
+      ]);
+      const draftCountByProduct = Object.fromEntries(draftCountRows.map((d) => [d.productId, d.count]));
+
+      return json(200, {
+        products: rows.map((r, i) => ({
+          id: r.product.id,
+          sku: r.product.sku,
+          title: r.product.title,
+          sourceChannel: r.product.sourceChannel,
+          status: r.product.status,
+          images: r.product.images,
+          priceJpy: r.product.priceJpy,
+          costJpy: r.product.costJpy,
+          ebayListingStatus: r.ebayListing?.status ?? null,
+          inventory: inventories[i],
+          aiDraftCount: draftCountByProduct[r.product.id] ?? 0,
+          updatedAt: r.product.updatedAt.toISOString(),
+        })),
+        total: totalRows[0]?.count ?? 0,
+        kpi: { total: catalogTotal, published, draft, soldOut, needsAttention },
+      });
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+$/.test(path)) {
@@ -1738,10 +1829,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // "公開中eBay出品数" KPI: a real count, not the commerce-dashboard's per-product N+1
       // breakdown (that endpoint answers a different question -- this dashboard just needs
       // the one number).
-      const [ebayPublishedRow] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(channelListings)
-        .where(and(eq(channelListings.tenantId, tenantId), eq(channelListings.channel, "ebay"), eq(channelListings.status, "published")));
+      const ebayPublishedCount = await countChannelListingsByStatus(db, tenantId, "ebay", "published");
 
       // Per-channel "最終同期" timestamp for the sync-topology card, from the same table's
       // own bookkeeping (channel_listings.last_synced_at) rather than a guessed cadence.
@@ -1759,7 +1847,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         recentOrders,
         inventory: { totalAvailable, lowStockCount },
         last24h,
-        ebayPublishedCount: ebayPublishedRow?.count ?? 0,
+        ebayPublishedCount,
         lastSyncedAt: { base: lastSyncedByChannel.base ?? null, ebay: lastSyncedByChannel.ebay ?? null },
       });
     }

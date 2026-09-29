@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Database } from "./client.js";
 import {
   countProducts,
+  countProductsByStatus,
   getMonthlyAiGenerationCount,
   releaseMonthlyAiGenerationReservation,
   tryReserveMonthlyAiGeneration,
@@ -30,6 +31,32 @@ describe("countProducts", () => {
     } as unknown as Database;
 
     expect(await countProducts(db, "tenant-a")).toBe(0);
+  });
+});
+
+describe("countProductsByStatus", () => {
+  it("returns the live product_master row count for one status", async () => {
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: async () => [{ count: 3 }],
+        }),
+      }),
+    } as unknown as Database;
+
+    expect(await countProductsByStatus(db, "tenant-a", "sold_out")).toBe(3);
+  });
+
+  it("returns 0 when the query yields no row", async () => {
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: async () => [],
+        }),
+      }),
+    } as unknown as Database;
+
+    expect(await countProductsByStatus(db, "tenant-a", "ai_generated")).toBe(0);
   });
 });
 

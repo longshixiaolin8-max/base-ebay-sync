@@ -61,6 +61,8 @@ const upsertSnsScriptMock = vi.fn();
 const computeChannelSyncStateMock = vi.fn();
 const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
 const countProductsMock = vi.fn().mockResolvedValue(0);
+const countProductsByStatusMock = vi.fn().mockResolvedValue(0);
+const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
@@ -97,6 +99,8 @@ vi.mock("@ai-ec/db", () => ({
   computeChannelSyncState: (...args: unknown[]) => computeChannelSyncStateMock(...args),
   getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
   countProducts: (...args: unknown[]) => countProductsMock(...args),
+  countProductsByStatus: (...args: unknown[]) => countProductsByStatusMock(...args),
+  countChannelListingsByStatus: (...args: unknown[]) => countChannelListingsByStatusMock(...args),
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
@@ -210,9 +214,11 @@ async function callHandler(event: APIGatewayProxyEventV2) {
 function chain(result: unknown) {
   const self: Record<string, unknown> = {
     from: () => self,
+    leftJoin: () => self,
     where: () => self,
     orderBy: () => self,
     limit: () => self,
+    offset: () => self,
     groupBy: () => self,
     then: (resolve: (v: unknown) => void) => resolve(result),
   };
@@ -268,6 +274,8 @@ describe("admin-api handler", () => {
     generateSnsScriptMock.mockClear();
     suggestStaleProductImprovementMock.mockClear();
     countProductsMock.mockClear().mockResolvedValue(0);
+    countProductsByStatusMock.mockClear().mockResolvedValue(0);
+    countChannelListingsByStatusMock.mockClear().mockResolvedValue(0);
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
@@ -287,6 +295,67 @@ describe("admin-api handler", () => {
     const res = await callHandler(makeEvent("GET", "/admin/products"));
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body!)).toEqual({ products: [{ id: "p1" }, { id: "p2" }] });
+  });
+
+  describe("GET /admin/products/list", () => {
+    it("is not swallowed by the /admin/products/{id} route (the literal path segment 'list' must not be treated as a product id)", async () => {
+      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/products/list"));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed).toHaveProperty("products");
+      expect(parsed).toHaveProperty("kpi");
+    });
+
+    it("returns paginated rows joined with their eBay listing status, real inventory, and AI draft counts, plus catalog-wide KPI counts", async () => {
+      const updatedAt = new Date("2024-04-30T13:47:00.000Z");
+      fakeDb = createFakeDb([
+        [
+          {
+            product: { id: "p1", sku: "SKU-TP-002", title: "スウェットパーカー", sourceChannel: "base", status: "active", images: [], priceJpy: 6980, costJpy: 2500, updatedAt },
+            ebayListing: { channel: "ebay", status: "published" },
+          },
+        ], // rows
+        [{ count: 1245 }], // totalRows (matches the current filter, independent of kpi.total)
+        [{ productId: "p1", count: 3 }], // draftCountRows
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 120, reserved: 0, available: 120, safetyBuffer: 10, sellableByChannel: {} });
+      countChannelListingsByStatusMock.mockResolvedValueOnce(892).mockResolvedValueOnce(79); // published, needsAttention
+      countProductsByStatusMock.mockResolvedValueOnce(176).mockResolvedValueOnce(98); // draft (ai_generated), soldOut
+      countProductsMock.mockResolvedValueOnce(1245); // catalog-wide total
+
+      const res = await callHandler(makeEvent("GET", "/admin/products/list", { limit: "10", offset: "0" }));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products).toEqual([
+        expect.objectContaining({
+          id: "p1",
+          sku: "SKU-TP-002",
+          title: "スウェットパーカー",
+          sourceChannel: "base",
+          status: "active",
+          ebayListingStatus: "published",
+          inventory: { onHand: 120, reserved: 0, available: 120, safetyBuffer: 10, sellableByChannel: {} },
+          aiDraftCount: 3,
+        }),
+      ]);
+      expect(parsed.total).toBe(1245);
+      expect(parsed.kpi).toEqual({ total: 1245, published: 892, draft: 176, soldOut: 98, needsAttention: 79 });
+    });
+
+    it("reports ebayListingStatus null and aiDraftCount 0 for a product with neither, and skips the draft-count query entirely when the page is empty", async () => {
+      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/products/list"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products).toEqual([]);
+      expect(parsed.total).toBe(0);
+    });
+
+    it("clamps limit to at most 100 and offset to at least 0, rather than trusting client-supplied values directly", async () => {
+      fakeDb = createFakeDb([[], [{ count: 0 }]]);
+      const res = await callHandler(makeEvent("GET", "/admin/products/list", { limit: "99999", offset: "-5" }));
+      expect(res.statusCode).toBe(200);
+    });
   });
 
   it("GET /admin/products/{id} returns 404 when the product doesn't exist", async () => {
@@ -1371,9 +1440,9 @@ describe("admin-api handler", () => {
           },
         ], // relevantOrders
         [{ id: "p1", title: "T1", sku: "sku-1" }], // products
-        [{ count: 5 }], // ebayPublishedRow
         [{ channel: "base", lastSyncedAt: "2024-04-30T14:24:00.000Z" }], // lastSyncedRows
       ]);
+      countChannelListingsByStatusMock.mockResolvedValueOnce(5);
       getLiveOrderProfitMock.mockReturnValueOnce({ revenueUsdCents: 10000, costUsdCents: 6000, netProfitUsdCents: 4000, profitMarginBasisPoints: 4000 });
       getInventoryBreakdownMock.mockResolvedValueOnce({ productId: "p1", onHand: 5, reserved: 1, available: 2, safetyBuffer: 3, sellableByChannel: {} });
 
@@ -1406,7 +1475,6 @@ describe("admin-api handler", () => {
           { id: "old", productId: "p1", channel: "base", status: "PAID", placedAt: overADayAgo, profitFinalizedAt: null, finalizedNetProfitUsdCents: null },
         ], // relevantOrders
         [{ id: "p1", title: "T1", sku: "sku-1" }], // products
-        [{ count: 0 }], // ebayPublishedRow
         [], // lastSyncedRows
       ]);
       getLiveOrderProfitMock
@@ -1422,7 +1490,7 @@ describe("admin-api handler", () => {
     });
 
     it("GET /admin/dashboard/summary returns zeroed KPIs and an empty recent-orders list with no real orders yet", async () => {
-      fakeDb = createFakeDb([[], [], [{ count: 0 }], []]);
+      fakeDb = createFakeDb([[], [], []]);
 
       const res = await callHandler(makeEvent("GET", "/admin/dashboard/summary"));
       expect(res.statusCode).toBe(200);

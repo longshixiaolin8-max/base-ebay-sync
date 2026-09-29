@@ -271,6 +271,17 @@ export function ArrowRightIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Vertical kebab menu trigger for per-row table actions. */
+export function MoreIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props} width={16} height={16}>
+      <circle cx="12" cy="5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="19" r="1.2" fill="currentColor" stroke="none" />
+    </Icon>
+  );
+}
+
 /** AI-generated content marker (draft review items, AI tag chips). */
 export function SparkleIcon(props: SVGProps<SVGSVGElement>) {
   return (

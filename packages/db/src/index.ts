@@ -18,3 +18,4 @@ export * from "./tenants.js";
 export * from "./billing.js";
 export * from "./webhook-events.js";
 export * from "./usage.js";
+export * from "./channel-listings.js";

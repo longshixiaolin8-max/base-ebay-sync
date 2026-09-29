@@ -1,12 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { apiGet } from "@/lib/api-client";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { apiGet, apiPost } from "@/lib/api-client";
+import { relativeTime } from "@/lib/format";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
+import { MoreIcon } from "@/components/icons";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { KpiCard } from "@/components/ui/KpiCard";
+import { Badge } from "@/components/ui/Badge";
+import { Select } from "@/components/ui/Select";
+import { Checkbox } from "@/components/ui/Checkbox";
+import { Pagination } from "@/components/ui/Pagination";
+import { DropdownMenu } from "@/components/ui/DropdownMenu";
+import { BoxIcon, TagIcon, FileIcon, CartIcon, AlertIcon } from "@/components/icons";
+import { ProductPreviewDrawer } from "@/components/products/ProductPreviewDrawer";
 
 interface InventoryBreakdown {
   onHand: number;
@@ -16,229 +28,332 @@ interface InventoryBreakdown {
   sellableByChannel: Record<string, number>;
 }
 
-interface ProductRow {
-  productId: string;
+interface ProductListRow {
+  id: string;
   sku: string;
   title: string;
+  sourceChannel: string;
   status: string;
   images: string[];
-  channelStatus: Record<string, string>;
+  priceJpy: number;
+  costJpy: number | null;
+  ebayListingStatus: string | null;
   inventory: InventoryBreakdown | null;
-  staleLevel: "fresh" | "stale_30" | "stale_60" | "stale_90";
+  aiDraftCount: number;
+  updatedAt: string;
 }
 
-const STATUS_BADGE: Record<string, string> = {
-  draft: "badge",
-  ai_generated: "badge warn",
-  active: "badge ok",
-  sold_out: "badge error",
-  archived: "badge",
-};
+interface ProductListResponse {
+  products: ProductListRow[];
+  total: number;
+  kpi: { total: number; published: number; draft: number; soldOut: number; needsAttention: number };
+}
 
 const STATUS_LABEL: Record<string, string> = {
-  draft: "取込済み(未生成)",
-  ai_generated: "AI生成済み・承認待ち",
-  active: "eBay出品中",
+  draft: "取込済み",
+  ai_generated: "下書き",
+  active: "公開中",
   sold_out: "売り切れ",
   archived: "アーカイブ",
 };
 
-const CHANNEL_BADGE: Record<string, string> = {
-  published: "badge ok",
-  pending_approval: "badge warn",
-  error: "badge error",
-  update_pending: "badge warn",
-  pending: "badge warn",
-  delisted: "badge",
-};
-
-const CHANNEL_LABEL: Record<string, string> = {
-  published: "出品中",
-  pending_approval: "承認待ち",
-  error: "要確認",
+const EBAY_STATUS_LABEL: Record<string, string> = {
+  pending: "下書き",
+  published: "公開中",
   update_pending: "更新中",
-  pending: "準備中",
+  error: "エラー(要修正)",
   delisted: "削除済み",
 };
 
-const STALE_BADGE: Record<ProductRow["staleLevel"], string> = {
-  fresh: "badge ok",
-  stale_30: "badge warn",
-  stale_60: "badge warn",
-  stale_90: "badge error",
+const EBAY_STATUS_TONE: Record<string, "neutral" | "ok" | "warn" | "error"> = {
+  pending: "warn",
+  published: "ok",
+  update_pending: "warn",
+  error: "error",
+  delisted: "neutral",
 };
 
-const STALE_LABEL: Record<ProductRow["staleLevel"], string> = {
-  fresh: "",
-  stale_30: "滞留30日+",
-  stale_60: "滞留60日+",
-  stale_90: "滞留90日+",
-};
+function formatJpy(value: number): string {
+  return `¥${value.toLocaleString()}`;
+}
 
-type FilterTab = "all" | "pending" | "active" | "attention" | "stale";
-
-const PAGE_SIZE = 30;
-
-export default function ProductsPage() {
+function ProductsPageInner() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
-  const [rows, setRows] = useState<ProductRow[]>([]);
+  // Lets other pages deep-link into a pre-filtered view (e.g. the dashboard's "AI出品下書き"
+  // alert links to /products?status=ai_generated) instead of landing on the unfiltered table.
+  const searchParams = useSearchParams();
+  const [data, setData] = useState<ProductListResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadedError, setLoadedError] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [limit, setLimit] = useState(PAGE_SIZE);
-  const [hasMore, setHasMore] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const [query, setQuery] = useState("");
-  const [tab, setTab] = useState<FilterTab>("all");
+  const [status, setStatus] = useState(() => searchParams.get("status") ?? "");
+  const [channel, setChannel] = useState(() => searchParams.get("channel") ?? "");
+  const [syncStatus, setSyncStatus] = useState(() => searchParams.get("syncStatus") ?? "");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [bulkRunning, setBulkRunning] = useState(false);
 
-  async function load(requestedLimit: number) {
-    if (requestedLimit === PAGE_SIZE) setLoading(true);
-    else setLoadingMore(true);
-    setLoadedError(false);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
     try {
-      const res = await apiGet<{ products: ProductRow[] }>(`/admin/commerce-dashboard?limit=${requestedLimit}`);
-      setRows(res.products);
-      // The backend returns a flat, bounded list (no cursor) -- if we got back exactly as
-      // many rows as we asked for, there may be more; asking for one more than currently
-      // shown is how "load more" is implemented below.
-      setHasMore(res.products.length >= requestedLimit);
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String((page - 1) * pageSize) });
+      if (query.trim()) params.set("q", query.trim());
+      if (status) params.set("status", status);
+      if (channel) params.set("channel", channel);
+      if (syncStatus) params.set("syncStatus", syncStatus);
+      const res = await apiGet<ProductListResponse>(`/admin/products/list?${params.toString()}`);
+      setData(res);
     } catch (err) {
-      setLoadedError(true);
+      setLoadError(true);
       notify(`商品一覧の取得に失敗しました: ${(err as Error).message}`);
     } finally {
       setLoading(false);
-      setLoadingMore(false);
     }
-  }
+  }, [page, pageSize, query, status, channel, syncStatus, notify]);
 
   useEffect(() => {
-    if (ready) void load(limit);
-  }, [ready]);
+    if (ready) void load();
+  }, [ready, load]);
 
-  function loadMore() {
-    const next = limit + PAGE_SIZE;
-    setLimit(next);
-    void load(next);
+  // Any filter/search change re-queries from page 1 -- staying on e.g. page 5 of a filter
+  // that now has 2 matching pages would just show an empty page.
+  useEffect(() => {
+    setPage(1);
+  }, [query, status, channel, syncStatus, pageSize]);
+
+  const rows = data?.products ?? [];
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+  const allOnPageSelected = rows.length > 0 && rows.every((r) => selected.has(r.id));
+
+  function toggleAll(checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const r of rows) {
+        if (checked) next.add(r.id);
+        else next.delete(r.id);
+      }
+      return next;
+    });
   }
 
-  const pendingCount = rows.filter((r) => r.status === "ai_generated").length;
-  const attentionCount = rows.filter((r) => r.channelStatus.base === "error" || r.channelStatus.ebay === "error").length;
-  const staleCount = rows.filter((r) => r.staleLevel !== "fresh").length;
+  function toggleOne(id: string, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
 
-  const filtered = useMemo(() => {
-    let list = rows;
-    if (tab === "pending") list = list.filter((r) => r.status === "ai_generated");
-    else if (tab === "active") list = list.filter((r) => r.channelStatus.ebay === "published");
-    else if (tab === "attention") list = list.filter((r) => r.channelStatus.base === "error" || r.channelStatus.ebay === "error");
-    else if (tab === "stale") list = list.filter((r) => r.staleLevel !== "fresh");
-    const q = query.trim().toLowerCase();
-    if (q) list = list.filter((r) => r.title.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q));
-    return list;
-  }, [rows, tab, query]);
+  // Real action, looped client-side over the existing single-product endpoint -- there is no
+  // dedicated bulk-approve API. Only attempted for rows that actually have a non-published
+  // eBay listing to approve; others are silently skipped rather than sent to an endpoint that
+  // would just 404/409 them.
+  async function bulkApprove() {
+    const targets = rows.filter((r) => selected.has(r.id) && r.ebayListingStatus && r.ebayListingStatus !== "published");
+    if (targets.length === 0) {
+      notify("選択した商品の中に承認待ちのeBay出品がありません。");
+      return;
+    }
+    setBulkRunning(true);
+    let succeeded = 0;
+    let failed = 0;
+    for (const t of targets) {
+      try {
+        await apiPost(`/admin/products/${t.id}/approve-ebay-listing`, {});
+        succeeded++;
+      } catch {
+        failed++;
+      }
+    }
+    setBulkRunning(false);
+    setSelected(new Set());
+    notify(failed > 0 ? `${succeeded}件承認しました(${failed}件失敗)。` : `${succeeded}件承認しました。`);
+    void load();
+  }
+
+  const selectedCount = selected.size;
 
   return (
     <>
-      <Topbar onSearch={setQuery} />
-      <div className="page">
-        <div className="page-header">
-          <div>
-            <h1>商品マスター</h1>
-            <p className="page-lead">
-              eBayへの出品は必ず人間の承認が必要です。「AI生成済み・承認待ち」の商品を開いて内容を確認のうえ承認してください。BASEの商品は自動で取り込まれます(最短15分ごと)。
-            </p>
-          </div>
-          <Link href="/products/link-existing" className="button secondary">
-            既存eBay出品を紐付ける
-          </Link>
-        </div>
+      <Topbar searchPlaceholder="商品名・SKU・説明文で検索..." />
+      <div className="page page-wide">
+        <PageHeader
+          title="商品マスター"
+          lead="BASEとeBayの商品を一元管理し、AIでの商品最適化・多チャネル展開を効率化します。"
+          actions={
+            <Link href="/products/link-existing" className="button">
+              既存eBay出品を紐付ける
+            </Link>
+          }
+        />
 
-        <div className="filter-tabs" style={{ marginBottom: "1rem" }}>
-          <button type="button" className="filter-tab" data-active={tab === "all"} onClick={() => setTab("all")}>
-            全商品 {rows.length > 0 && `(${rows.length})`}
-          </button>
-          <button type="button" className="filter-tab" data-active={tab === "pending"} onClick={() => setTab("pending")}>
-            承認待ち {pendingCount > 0 && `(${pendingCount})`}
-          </button>
-          <button type="button" className="filter-tab" data-active={tab === "active"} onClick={() => setTab("active")}>
-            出品中
-          </button>
-          <button type="button" className="filter-tab" data-active={tab === "attention"} onClick={() => setTab("attention")}>
-            要確認 {attentionCount > 0 && `(${attentionCount})`}
-          </button>
-          <button type="button" className="filter-tab" data-active={tab === "stale"} onClick={() => setTab("stale")}>
-            滞留 {staleCount > 0 && `(${staleCount})`}
-          </button>
-        </div>
-
-        {!ready || loading ? (
-          <SkeletonRows />
-        ) : loadedError ? (
+        {!ready || (loading && !data) ? (
+          <SkeletonRows count={4} />
+        ) : loadError ? (
           <div className="table-wrapper">
             <EmptyState>
               読み込みに失敗しました。
-              <button type="button" className="secondary" style={{ marginLeft: "0.6rem" }} onClick={() => load(limit)}>
+              <button type="button" className="secondary" style={{ marginLeft: "0.6rem" }} onClick={() => void load()}>
                 再試行
               </button>
             </EmptyState>
           </div>
-        ) : filtered.length === 0 ? (
-          <div className="table-wrapper">
-            <EmptyState>
-              {query.trim() || tab !== "all" ? (
-                "該当する商品がありません。"
-              ) : (
-                <>
-                  商品がまだ登録されていません。BASEの商品は自動で取り込まれます(最短15分ごと)。導入設定がお済みでない場合は
-                  <Link href="/onboarding">導入設定</Link>からBASE連携をご確認ください。
-                </>
-              )}
-            </EmptyState>
-          </div>
         ) : (
-          <>
-            <div className="product-card-list">
-              {filtered.map((p) => (
-                <Link key={p.productId} href={`/products/detail?id=${p.productId}`} className="product-card">
-                  {p.images[0] ? (
-                    <img src={p.images[0]} alt="" className="product-card-thumb" />
-                  ) : (
-                    <div className="product-card-thumb product-card-thumb-empty" aria-hidden="true" />
-                  )}
-                  <div className="product-card-body">
-                    <div className="product-card-title">{p.title}</div>
-                    <div className="product-card-sku">{p.sku}</div>
-                    <div className="product-card-badges">
-                      <span className={STATUS_BADGE[p.status] ?? "badge"}>{STATUS_LABEL[p.status] ?? p.status}</span>
-                      {p.channelStatus.ebay && (
-                        <span className={CHANNEL_BADGE[p.channelStatus.ebay] ?? "badge"}>
-                          eBay: {CHANNEL_LABEL[p.channelStatus.ebay] ?? p.channelStatus.ebay}
-                        </span>
-                      )}
-                      {p.staleLevel !== "fresh" && <span className={STALE_BADGE[p.staleLevel]}>{STALE_LABEL[p.staleLevel]}</span>}
-                    </div>
-                    {p.inventory && (
-                      <div className="product-card-stock">
-                        手持在庫 {p.inventory.onHand}点
-                        {" ・ "}
-                        {Object.entries(p.inventory.sellableByChannel)
-                          .map(([ch, qty]) => `${ch.toUpperCase()}販売可${qty}`)
-                          .join(" / ")}
-                      </div>
-                    )}
-                  </div>
-                </Link>
-              ))}
-            </div>
-            {hasMore && (
-              <div style={{ textAlign: "center", marginTop: "1.25rem" }}>
-                <button type="button" className="secondary" onClick={loadMore} disabled={loadingMore}>
-                  {loadingMore ? "読み込み中..." : "もっと読み込む"}
-                </button>
+          data && (
+            <>
+              <div className="kpi-grid">
+                <KpiCard icon={BoxIcon} color="blue" value={data.kpi.total.toLocaleString()} label="総商品数" />
+                <KpiCard icon={TagIcon} color="green" value={data.kpi.published.toLocaleString()} label="出品済み" />
+                <KpiCard icon={FileIcon} color="purple" value={data.kpi.draft.toLocaleString()} label="下書き" />
+                <KpiCard icon={CartIcon} color="orange" value={data.kpi.soldOut.toLocaleString()} label="売り切れ" />
+                <KpiCard
+                  icon={AlertIcon}
+                  color={data.kpi.needsAttention > 0 ? "red" : "green"}
+                  value={data.kpi.needsAttention.toLocaleString()}
+                  label="要修正"
+                  href="/sync-errors"
+                />
               </div>
-            )}
-          </>
+
+              <div className="products-filter-bar">
+                <label className="products-search">
+                  <input type="text" placeholder="商品名・SKUで検索..." value={query} onChange={(e) => setQuery(e.target.value)} />
+                </label>
+                <Select label="カテゴリ" value="" onChange={() => {}} disabled>
+                  <option value="">すべて</option>
+                </Select>
+                <Select label="販売チャネル" value={channel} onChange={setChannel}>
+                  <option value="">すべて</option>
+                  <option value="base">BASE</option>
+                  <option value="ebay">eBay</option>
+                </Select>
+                <Select label="ステータス" value={status} onChange={setStatus}>
+                  <option value="">すべて</option>
+                  {Object.entries(STATUS_LABEL).map(([v, l]) => (
+                    <option key={v} value={v}>
+                      {l}
+                    </option>
+                  ))}
+                </Select>
+                <Select label="同期ステータス" value={syncStatus} onChange={setSyncStatus}>
+                  <option value="">すべて</option>
+                  {Object.entries(EBAY_STATUS_LABEL).map(([v, l]) => (
+                    <option key={v} value={v}>
+                      {l}
+                    </option>
+                  ))}
+                </Select>
+                <div className="products-bulk-bar">
+                  <span>選択した{selectedCount}件</span>
+                  <DropdownMenu
+                    label="一括操作"
+                    trigger={
+                      <span className="secondary products-bulk-trigger" data-disabled={selectedCount === 0}>
+                        一括操作
+                      </span>
+                    }
+                  >
+                    <button type="button" className="dropdown-menu-item" disabled={selectedCount === 0 || bulkRunning} onClick={bulkApprove}>
+                      {bulkRunning ? "承認中..." : "選択したeBay出品を一括承認"}
+                    </button>
+                  </DropdownMenu>
+                </div>
+              </div>
+
+              {rows.length === 0 ? (
+                <div className="table-wrapper">
+                  <EmptyState>該当する商品がありません。</EmptyState>
+                </div>
+              ) : (
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th style={{ width: "2rem" }}>
+                          <Checkbox checked={allOnPageSelected} onChange={toggleAll} label="このページの商品をすべて選択" labelHidden />
+                        </th>
+                        <th>商品</th>
+                        <th>SKU</th>
+                        <th>元チャネル</th>
+                        <th>価格</th>
+                        <th>原価</th>
+                        <th>在庫</th>
+                        <th>eBay公開状況</th>
+                        <th>AI下書き</th>
+                        <th>最終更新</th>
+                        <th aria-label="アクション" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r) => (
+                        <tr key={r.id} className="products-table-row" onClick={() => setPreviewId(r.id)}>
+                          <td onClick={(e) => e.stopPropagation()}>
+                            <Checkbox checked={selected.has(r.id)} onChange={(c) => toggleOne(r.id, c)} label={`${r.title}を選択`} labelHidden />
+                          </td>
+                          <td>
+                            <div className="products-table-title-cell">
+                              {r.images[0] ? (
+                                <img src={r.images[0]} alt="" className="products-table-thumb" />
+                              ) : (
+                                <div className="products-table-thumb products-table-thumb-empty" aria-hidden="true" />
+                              )}
+                              <span>{r.title}</span>
+                            </div>
+                          </td>
+                          <td>{r.sku}</td>
+                          <td>
+                            <Badge tone="neutral">{r.sourceChannel === "base" ? "BASE" : r.sourceChannel === "ebay" ? "eBay" : r.sourceChannel}</Badge>
+                          </td>
+                          <td>{formatJpy(r.priceJpy)}</td>
+                          <td>{r.costJpy != null ? formatJpy(r.costJpy) : "—"}</td>
+                          <td>{r.inventory ? r.inventory.available.toLocaleString() : "—"}</td>
+                          <td>
+                            {r.ebayListingStatus ? (
+                              <Badge tone={EBAY_STATUS_TONE[r.ebayListingStatus] ?? "neutral"}>
+                                {EBAY_STATUS_LABEL[r.ebayListingStatus] ?? r.ebayListingStatus}
+                              </Badge>
+                            ) : (
+                              <Badge tone="neutral">未出品</Badge>
+                            )}
+                          </td>
+                          <td>{r.aiDraftCount > 0 ? `下書きあり(${r.aiDraftCount}件)` : "—"}</td>
+                          <td style={{ whiteSpace: "nowrap", color: "var(--fg-subtle)", fontSize: "0.8rem" }}>{relativeTime(r.updatedAt)}</td>
+                          <td onClick={(e) => e.stopPropagation()}>
+                            <DropdownMenu label={`${r.title}のアクション`} trigger={<MoreIcon />}>
+                              <button type="button" className="dropdown-menu-item" onClick={() => setPreviewId(r.id)}>
+                                プレビュー
+                              </button>
+                              <Link href={`/products/detail?id=${r.id}`} className="dropdown-menu-item">
+                                詳細を編集
+                              </Link>
+                            </DropdownMenu>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} pageSize={pageSize} onPageSizeChange={setPageSize} totalCount={data.total} />
+            </>
+          )
         )}
       </div>
+      <ProductPreviewDrawer productId={previewId} onClose={() => setPreviewId(null)} />
     </>
+  );
+}
+
+export default function ProductsPage() {
+  return (
+    <Suspense fallback={<SkeletonRows count={4} />}>
+      <ProductsPageInner />
+    </Suspense>
   );
 }

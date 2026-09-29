@@ -179,7 +179,7 @@ export default function DashboardPage() {
         title: `AI出品下書きが${pendingApproval}件あります`,
         description: "生成された出品下書きを確認し、公開してください。",
         actionLabel: "下書きを確認",
-        actionHref: "/products",
+        actionHref: "/products?status=ai_generated",
       });
     }
     return list;
@@ -201,7 +201,7 @@ export default function DashboardPage() {
   const donutTotal = donutSegments.reduce((sum, s) => sum + s.value, 0);
 
   const quickActions: QuickAction[] = [
-    { id: "review", icon: SparkleIcon, title: "新規出品レビュー", desc: "AIで生成された下書きを確認", href: "/products", primary: true },
+    { id: "review", icon: SparkleIcon, title: "新規出品レビュー", desc: "AIで生成された下書きを確認", href: "/products?status=ai_generated", primary: true },
     { id: "inventory", icon: BoxIcon, title: "在庫差分を確認", desc: "在庫情報の食い違いを確認・同期", href: "/sync-errors" },
     { id: "ebay", icon: PlugIcon, title: "eBay接続確認", desc: "接続状態の確認・再認証", onClick: () => reconnect("ebay") },
     { id: "billing", icon: CoinIcon, title: "請求状況確認", desc: "ご利用プラン・請求履歴", href: "/billing" },
@@ -240,7 +240,7 @@ export default function DashboardPage() {
         statusTone: "info",
         createdAt: p.updatedAt.toString(),
         actionLabel: "確認する",
-        actionHref: "/products",
+        actionHref: "/products?status=ai_generated",
       }));
     return [...fromErrors, ...fromDrafts].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 8);
   }, [syncErrors, products]);
