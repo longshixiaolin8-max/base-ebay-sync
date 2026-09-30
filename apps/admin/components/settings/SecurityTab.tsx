@@ -101,7 +101,13 @@ export default function SecurityTab() {
         <p className="settings-disabled-note">
           テナント向けのAPIキー発行機能は現在ご提供していません。外部システムとの連携が必要な場合はサポートまでお問い合わせください。
         </p>
-        <button type="button" className="secondary" disabled style={{ marginTop: "0.5rem" }}>
+        <button
+          type="button"
+          className="secondary"
+          disabled
+          title="テナント向けのAPIキー発行機能は現在ご提供していません"
+          style={{ marginTop: "0.5rem" }}
+        >
           APIキーを発行(未提供)
         </button>
       </Card>

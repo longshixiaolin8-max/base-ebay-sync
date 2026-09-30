@@ -202,7 +202,13 @@ export default function ConnectionsTab() {
         <p className="settings-disabled-note">
           このプラットフォームが対応する外部サービスは現在BASE・eBayの2つのみです。他サービスとの連携は未提供のため、追加ボタンは無効化しています。
         </p>
-        <button type="button" className="secondary" disabled style={{ marginTop: "0.75rem" }}>
+        <button
+          type="button"
+          className="secondary"
+          disabled
+          title="このプラットフォームが対応する外部サービスは現在BASE・eBayの2つのみです。他サービスとの連携は未提供です"
+          style={{ marginTop: "0.75rem" }}
+        >
           外部サービスを追加(未提供)
         </button>
       </Card>
