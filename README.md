@@ -70,7 +70,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
   - **手順**: (1) 該当環境でこのルートを初めてデプロイする回は、`enableEbayPlatformNotificationThrottle`をfalse(既定)のままデプロイ — throttleなしでRouteだけ作成される。(2) それが成功した後の**次回以降のデプロイ**で、`workflow_dispatch`の`enableEbayPlatformNotificationThrottle`入力をtrueにして再デプロイ — 今度はRouteが既に存在するのでStage更新が成功する。一度trueにして成功すれば、以降は毎回trueのままで問題ない。
 - **WAF**: round 15でCloudFrontを実際の本番経路として使えるようにした(下の「WAF/CloudFrontの本番適用」参照)。デフォルトはまだ直接execute-apiのままで、切り替えは明示的な運用手順が必要。
 - **既存のeBay Platform Notification購読への影響**: ルートが`{token}`必須になったため、**このデプロイ前に登録された(トークンなしの)購読はeBayからの配信が404になる**。該当テナントで`POST /admin/ebay/platform-notification-setup`を再実行し、新しいトークン付きURLで再登録すること。
-- REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)は今回スコープ外 — 既にBOOTSTRAP_TENANT_ID固定だが、署名検証があるため悪用リスクは低い。debounceのみ同じ仕組みを適用した。
+- REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)も、本番化レビューで同じ`{token}`パターンを追加適用した: `POST /admin/ebay/webhook-setup`がテナントごとの署名付きトークンを埋め込んだ`.../notifications/{token}`という宛先URLを登録するようになり、`ebay-webhook`のchallenge応答・notification処理の両方がそのトークンから実テナントIDを復元する(eBayのchallenge-response仕様上、ハッシュ計算に使う`endpoint`文字列は実際に呼ばれたURLと完全一致している必要があるため、`{token}`付きの場合は`handleChallenge`もそれを含めて計算する)。トークンなし(素のパス)のルートは残してあるため、この修正より前に登録済みの1件(BOOTSTRAP_TENANT_ID宛)は無停止でそのまま動き続ける — 破壊的な切り替えではなく、新規テナント向けの追加のみ。
 
 ### WAF/CloudFrontの本番適用と、direct execute-api URLの制限
 

@@ -131,8 +131,14 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
 }
 
 /**
- * GET /webhooks/ebay/notifications?challenge_code=... — eBay's one-time endpoint-ownership
- * check, sent immediately when a Notification API destination pointing at this URL is created.
+ * GET /webhooks/ebay/notifications?challenge_code=... (or the per-tenant
+ * .../notifications/{token} path -- see handleNotification's own doc comment) — eBay's
+ * one-time endpoint-ownership check, sent immediately when a Notification API destination
+ * pointing at this URL is created. eBay's challenge-response hash is SHA256(challengeCode +
+ * verificationToken + endpoint), where `endpoint` must be byte-for-byte the exact URL eBay
+ * is calling right now (confirmed against eBay's own spec) -- so when a {token} path segment
+ * is present, it must be included here too, or every per-tenant destination's ownership
+ * verification would fail against a hash eBay never sent that request to.
  */
 async function handleChallenge(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const challengeCode = event.queryStringParameters?.challenge_code;
@@ -142,8 +148,10 @@ async function handleChallenge(event: APIGatewayProxyEventV2): Promise<APIGatewa
   if (!creds.webhookVerificationToken) {
     return { statusCode: 500, body: "webhookVerificationToken is not configured" };
   }
-  const endpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
-  if (!endpoint) return { statusCode: 500, body: "EBAY_WEBHOOK_ENDPOINT_URL is not configured" };
+  const baseEndpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
+  if (!baseEndpoint) return { statusCode: 500, body: "EBAY_WEBHOOK_ENDPOINT_URL is not configured" };
+  const token = event.pathParameters?.token;
+  const endpoint = token ? `${baseEndpoint}/${token}` : baseEndpoint;
 
   const challengeResponse = computeChallengeResponse(challengeCode, creds.webhookVerificationToken, endpoint);
   return {
@@ -154,10 +162,11 @@ async function handleChallenge(event: APIGatewayProxyEventV2): Promise<APIGatewa
 }
 
 /**
- * POST /webhooks/ebay/notifications — an actual event delivery. Only ever used as a "poll
- * eBay now" trigger: the notification body is never treated as authoritative sale data.
- * Even a forged or malformed delivery can, at worst, cause one extra Fulfillment API poll —
- * the real sale facts always come from listRecentSales() via the eBay Orders API.
+ * POST /webhooks/ebay/notifications (or the per-tenant .../notifications/{token} path) — an
+ * actual event delivery. Only ever used as a "poll eBay now" trigger: the notification body
+ * is never treated as authoritative sale data. Even a forged or malformed delivery can, at
+ * worst, cause one extra Fulfillment API poll — the real sale facts always come from
+ * listRecentSales() via the eBay Orders API.
  */
 async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const rawBody = event.isBase64Encoded && event.body ? Buffer.from(event.body, "base64").toString("utf-8") : event.body ?? "";
@@ -197,17 +206,27 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
     return handleAccountDeletion(payload);
   }
 
-  // eBay's notification delivery carries no tenant hint at all -- unlike the other pollers,
-  // there's no way to derive which tenant this webhook belongs to without a per-tenant
-  // webhook-registration redesign (this is the same limitation round 14's
-  // platform-notifications fix below solves via a per-tenant signed destination token, but
-  // this REST path is a different, already X-EBAY-SIGNATURE-verified delivery mechanism --
-  // extending the same per-tenant redesign here is out of this round's scope). Hardcoded to
-  // the one bootstrap tenant, matching the one real registered eBay webhook destination
-  // that exists today. Routed through triggerCoalescedPoll (not a direct pollChannelSales
-  // call) so a burst of otherwise-legitimate, signature-verified notifications still can't
-  // amplify 1:1 into eBay API calls.
-  await triggerCoalescedPoll(BOOTSTRAP_TENANT_ID, "ebay");
+  // eBay's notification delivery carries no tenant hint of its own -- production-readiness
+  // fix: the per-tenant {token} path segment (same signed-token mechanism
+  // EbayPlatformNotify/handlePlatformNotification below already uses) now carries it
+  // instead, for any destination registered via POST /admin/ebay/webhook-setup after this
+  // fix shipped. The X-EBAY-SIGNATURE check above already proved this delivery is genuinely
+  // from eBay, so a missing or invalid token here isn't a forgery concern -- it's just a
+  // signal we can't identify which tenant. Falls back to BOOTSTRAP_TENANT_ID (this file's
+  // pre-existing behavior) only in that case, so the one destination already registered
+  // under the old, bare (tokenless) URL keeps working exactly as before. Routed through
+  // triggerCoalescedPoll (not a direct pollChannelSales call) either way, so a burst of
+  // otherwise-legitimate notifications still can't amplify 1:1 into eBay API calls.
+  const token = event.pathParameters?.token;
+  let tenantId = BOOTSTRAP_TENANT_ID;
+  if (token) {
+    try {
+      tenantId = verifyWebhookDestinationToken(creds.clientSecret, token);
+    } catch (err) {
+      console.warn("ebay-webhook: notification's destination token failed verification, falling back to the bootstrap tenant", (err as Error).message);
+    }
+  }
+  await triggerCoalescedPoll(tenantId, "ebay");
 
   return { statusCode: 204 };
 }

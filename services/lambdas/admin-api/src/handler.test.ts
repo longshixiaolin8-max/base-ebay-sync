@@ -921,9 +921,10 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(409);
   });
 
-  it("POST /admin/ebay/webhook-setup creates a destination and subscription", async () => {
+  it("POST /admin/ebay/webhook-setup creates a per-tenant tokened destination and subscription", async () => {
     process.env.EBAY_WEBHOOK_ENDPOINT_URL = "https://api.example.com/webhooks/ebay/notifications";
-    getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", webhookVerificationToken: "verify-me" });
+    getAppCredentialsMock.mockResolvedValueOnce({ clientId: "cid", clientSecret: "ebay-csecret", webhookVerificationToken: "verify-me" });
+    signWebhookDestinationTokenMock.mockClear().mockReturnValue("webhook-token");
     fakeDb = createFakeDb([]);
     const res = await callHandler(
       makeEvent("POST", "/admin/ebay/webhook-setup", {}, { topicId: "LISTING", alertEmail: "ops@example.com" }),
@@ -931,10 +932,14 @@ describe("admin-api handler", () => {
     expect(res.statusCode).toBe(201);
     expect(JSON.parse(res.body!)).toEqual({ destinationId: "dest-1", subscriptionId: "sub-1" });
     expect(updateNotificationConfigMock).toHaveBeenCalledWith("token", "ops@example.com");
+    // Production-readiness fix: registers each tenant's own /{token}-suffixed destination
+    // URL, not the shared bare one every tenant used to collide on -- see ebay-webhook's
+    // handleNotification, which now reads this same token back to resolve the real tenant.
+    expect(signWebhookDestinationTokenMock).toHaveBeenCalledWith("ebay-csecret", TENANT_A);
     expect(createNotificationDestinationMock).toHaveBeenCalledWith(
       "token",
       "AI EC Platform",
-      "https://api.example.com/webhooks/ebay/notifications",
+      "https://api.example.com/webhooks/ebay/notifications/webhook-token",
       "verify-me",
     );
     expect(createNotificationSubscriptionMock).toHaveBeenCalledWith("token", "LISTING", "dest-1");

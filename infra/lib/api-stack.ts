@@ -98,6 +98,16 @@ export class ApiStack extends cdk.Stack {
     const ebayWebhookIntegration = new HttpLambdaIntegration("EbayWebhookIntegration", props.ebayWebhookFn);
     addRoute("EbayWebhookChallenge", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
     addRoute("EbayWebhookNotify", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications", ebayWebhookIntegration, false);
+    // Production-readiness fix: the bare path above has no per-tenant hint at all (eBay's
+    // REST Notification API payload never carries one), so it was hardcoded to
+    // BOOTSTRAP_TENANT_ID -- fine for a single-tenant deploy, silently wrong for a 2nd real
+    // tenant. Same per-tenant signed-token pattern as EbayPlatformNotify below: admin-api's
+    // POST /admin/ebay/webhook-setup now registers each tenant's own
+    // .../notifications/{token} destination URL instead of the shared bare one. The bare
+    // routes above stay live (not removed) so the one destination already registered under
+    // the old URL keeps working unchanged -- this is purely additive, not a breaking cutover.
+    addRoute("EbayWebhookChallengeTokened", apigwv2.HttpMethod.GET, "/webhooks/ebay/notifications/{token}", ebayWebhookIntegration, false);
+    addRoute("EbayWebhookNotifyTokened", apigwv2.HttpMethod.POST, "/webhooks/ebay/notifications/{token}", ebayWebhookIntegration, false);
     // Delivery target for the legacy Trading API's Platform Notifications (FixedPriceTransaction),
     // a wholly different mechanism from the REST Notification API routes above -- no
     // X-EBAY-SIGNATURE or other per-request crypto verification exists for this delivery

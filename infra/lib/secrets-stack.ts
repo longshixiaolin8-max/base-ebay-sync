@@ -35,6 +35,14 @@ export class SecretsStack extends cdk.Stack {
     super(scope, id, props);
 
     const envSegment = props.envName === "dev" ? "" : `${props.envName}/`;
+    // Same env-conditional pattern database-stack.ts/storage-stack.ts/auth-stack.ts already
+    // use for their own stateful resources: CloudFormation's default (RemovalPolicy.DESTROY,
+    // schedules AWS Secrets Manager's own 30-day recovery-window deletion) is fine for dev,
+    // but in prod a stack replacement or accidental `cdk destroy` must never be able to lose
+    // every tenant's live BASE/eBay/Stripe credentials -- RETAIN means CloudFormation leaves
+    // the secret in place (and its value untouched) even if this stack or the resource itself
+    // is deleted.
+    const secretRemovalPolicy = props.envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
     // Only a prefix for IAM scoping (see oauthTokenSecretArnPattern in infra/bin/infra.ts) --
     // the actual secrets under it are created dynamically at runtime by saveOAuthToken
     // (services/lambdas/shared/src/secrets.ts), not provisioned here. Its full name is
@@ -89,5 +97,19 @@ export class SecretsStack extends cdk.Stack {
       description: "Auto-generated -- CloudFront injects this as a custom header; Lambdas verify it. Never filled in manually.",
       generateSecretString: { excludePunctuation: true, passwordLength: 32 },
     });
+
+    // secretsmanager.Secret's props don't accept removalPolicy directly (unlike the RDS
+    // cluster/S3 bucket constructs above it borrows this pattern from) -- applied here via
+    // the same method every CDK resource exposes.
+    for (const secret of [
+      this.baseAppCredentials,
+      this.ebayAppCredentials,
+      this.openAiApiKey,
+      this.stripeAppCredentials,
+      this.signupCredentials,
+      this.cloudfrontSharedSecret,
+    ]) {
+      secret.applyRemovalPolicy(secretRemovalPolicy);
+    }
   }
 }

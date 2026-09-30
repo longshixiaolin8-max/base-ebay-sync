@@ -1227,8 +1227,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       if (!creds.webhookVerificationToken) return json(409, { error: "webhookVerificationToken_not_configured" });
 
-      const endpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
-      if (!endpoint) return json(500, { error: "EBAY_WEBHOOK_ENDPOINT_URL_not_configured" });
+      const baseEndpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
+      if (!baseEndpoint) return json(500, { error: "EBAY_WEBHOOK_ENDPOINT_URL_not_configured" });
+      // Production-readiness fix: this used to register every tenant's destination at the
+      // exact same bare URL, which gave ebay-webhook's handleNotification no way to tell
+      // tenants apart (it was hardcoded to BOOTSTRAP_TENANT_ID). Same per-tenant signed-token
+      // pattern as /admin/ebay/platform-notification-setup below -- ebay-webhook's
+      // handleChallenge/handleNotification both read this {token} path segment now.
+      const token = signWebhookDestinationToken(creds.clientSecret, tenantId);
+      const endpoint = `${baseEndpoint}/${token}`;
 
       const adapter = createEbayAdapter(creds);
       // LISTING (and other USER-scoped topics) require the connected seller's own OAuth

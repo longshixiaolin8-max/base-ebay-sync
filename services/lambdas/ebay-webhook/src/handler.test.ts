@@ -1,3 +1,4 @@
+import { BOOTSTRAP_TENANT_ID } from "@ai-ec/db";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -102,7 +103,22 @@ describe("ebay-webhook handler", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("POST with a valid signature debounces/dispatches a coalesced poll (via SQS, not a direct call) and returns 204", async () => {
+  it("GET with a {token} path segment includes it in the endpoint the challenge hash is computed against", async () => {
+    const res = (await handler(
+      makeEvent({ pathParameters: { token: "tenant-x-token" }, queryStringParameters: { challenge_code: "abc123" } } as never),
+    )) as { statusCode: number; body?: string };
+
+    expect(res.statusCode).toBe(200);
+    // eBay's own spec: the hash must be computed against the exact URL it called, byte for
+    // byte -- a per-tenant destination's challenge must include that tenant's own token.
+    expect(computeChallengeResponseMock).toHaveBeenCalledWith(
+      "abc123",
+      "verify-me",
+      "https://api.example.com/webhooks/ebay/notifications/tenant-x-token",
+    );
+  });
+
+  it("POST with a valid signature and no {token} segment debounces/dispatches a coalesced poll for the bootstrap tenant (via SQS, not a direct call) and returns 204", async () => {
     parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
     getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
     verifyNotificationSignatureMock.mockReturnValue(true);
@@ -119,7 +135,53 @@ describe("ebay-webhook handler", () => {
     // The actual eBay poll no longer happens inline on this request -- only
     // dispatchPoll (a separate Lambda, tested below) ever calls pollChannelSales.
     expect(pollChannelSalesMock).not.toHaveBeenCalled();
-    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: expect.any(String), channel: "ebay" });
+    // The one destination already registered under the old bare URL (no token) keeps
+    // resolving to the bootstrap tenant, exactly as before this production-readiness fix.
+    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: BOOTSTRAP_TENANT_ID, channel: "ebay" });
+  });
+
+  it("POST with a valid signature and a valid {token} segment dispatches a coalesced poll for that token's own tenant, not the bootstrap tenant", async () => {
+    parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
+    getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
+    verifyNotificationSignatureMock.mockReturnValue(true);
+    verifyWebhookDestinationTokenMock.mockReturnValue("real-tenant-42");
+
+    const res = (await handler(
+      makeEvent({
+        pathParameters: { token: "tenant-42-token" },
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({ metadata: { topic: "LISTING" } }),
+      } as never),
+    )) as { statusCode: number };
+
+    expect(res.statusCode).toBe(204);
+    expect(verifyWebhookDestinationTokenMock).toHaveBeenCalledWith("app-client-secret", "tenant-42-token");
+    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: "real-tenant-42", channel: "ebay" });
+  });
+
+  it("POST with a valid signature but an invalid/forged {token} segment falls back to the bootstrap tenant rather than failing the whole delivery", async () => {
+    parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
+    getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
+    verifyNotificationSignatureMock.mockReturnValue(true);
+    verifyWebhookDestinationTokenMock.mockImplementation(() => {
+      throw new Error("Webhook destination token signature mismatch (possible forged/tampered URL)");
+    });
+
+    const res = (await handler(
+      makeEvent({
+        pathParameters: { token: "tampered-token" },
+        requestContext: { http: { method: "POST" } } as never,
+        headers: { "x-ebay-signature": "sig-header" },
+        body: JSON.stringify({ metadata: { topic: "LISTING" } }),
+      } as never),
+    )) as { statusCode: number };
+
+    // Still acknowledged (204) -- the X-EBAY-SIGNATURE check already proved this delivery is
+    // genuinely from eBay, so an unresolvable tenant hint degrades to "poll the bootstrap
+    // tenant" rather than rejecting an otherwise-legitimate eBay delivery.
+    expect(res.statusCode).toBe(204);
+    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: BOOTSTRAP_TENANT_ID, channel: "ebay" });
   });
 
   it("POST with an invalid signature is rejected and does not trigger a poll", async () => {
