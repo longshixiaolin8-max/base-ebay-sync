@@ -23,13 +23,9 @@ import {
   listConnectedAccountIds,
   recordAuditLog,
   recordSyncError,
+  type BaseAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
-
-interface BaseAppCredentials {
-  clientId: string;
-  clientSecret: string;
-}
 
 /** Structural subset of Database a Drizzle transaction's `tx` handle also satisfies --
  *  mirrors InventoryWriteDb in packages/db/src/inventory.ts's own Phase-4 outbox helper. */

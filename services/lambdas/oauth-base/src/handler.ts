@@ -7,13 +7,9 @@ import {
   requireEnv,
   saveOAuthToken,
   verifyState,
+  type BaseAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-
-interface BaseAppCredentials {
-  clientId: string;
-  clientSecret: string;
-}
 
 function redirectUri(): string {
   return requireEnv("BASE_OAUTH_REDIRECT_URI");
