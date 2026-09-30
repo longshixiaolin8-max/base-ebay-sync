@@ -14,12 +14,11 @@ const deleteOAuthConnectionsForTenantMock = vi.fn().mockResolvedValue([]);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
-  createEbayAdapter: vi.fn(),
   deleteOAuthConnectionsForTenant: (...args: unknown[]) => deleteOAuthConnectionsForTenantMock(...args),
-  getAppCredentials: vi.fn(),
   getDb: vi.fn(),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
+  loadImplementedChannelAdapters: vi.fn().mockResolvedValue({ base: {}, ebay: {} }),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));

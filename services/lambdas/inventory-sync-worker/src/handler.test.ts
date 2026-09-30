@@ -22,22 +22,18 @@ const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 const getIdempotencyStoreMock = vi.fn();
-const getAppCredentialsMock = vi.fn().mockResolvedValue({ clientId: "cid", clientSecret: "secret" });
 const getDbMock = vi.fn();
-const createEbayAdapterMock = vi.fn();
+const loadImplementedChannelAdaptersMock = vi.fn().mockResolvedValue({ base: {}, ebay: {} });
 
 vi.mock("@ai-ec/lambda-shared", () => ({
-  createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
-  getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: (...args: unknown[]) => getDbMock(...args),
   getIdempotencyStore: (...args: unknown[]) => getIdempotencyStoreMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
+  loadImplementedChannelAdapters: (...args: unknown[]) => loadImplementedChannelAdaptersMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
-
-vi.mock("@ai-ec/adapter-base", () => ({ BaseAdapter: vi.fn().mockImplementation(() => ({})) }));
 
 const { runPhaseA, dispatchPhaseB, handler } = await import("./handler.js");
 
@@ -373,7 +369,7 @@ describe("handler (end-to-end idempotency, using a real in-memory IdempotencySto
     upsertOrderReceivedMock.mockClear().mockResolvedValue(undefined);
     listConnectedAccountIdsMock.mockClear().mockResolvedValue(["acct-1"]);
     isChannelIsolatedMock.mockClear().mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
-    createEbayAdapterMock.mockReset();
+    loadImplementedChannelAdaptersMock.mockReset().mockResolvedValue({ base: {}, ebay: {} });
     getDbMock.mockReset();
     applySaleWithOutboxMock.mockReset();
   });
@@ -385,7 +381,7 @@ describe("handler (end-to-end idempotency, using a real in-memory IdempotencySto
     getIdempotencyStoreMock.mockReturnValue(store);
 
     const setInventory = vi.fn().mockRejectedValue(new Error("eBay API error 503: temporarily unavailable"));
-    createEbayAdapterMock.mockReturnValue({ setInventory });
+    loadImplementedChannelAdaptersMock.mockResolvedValue({ base: {}, ebay: { setInventory } });
     getDbMock.mockReturnValue(
       createFakeDb([
         // First delivery: listing lookup, then runPhaseA's productForOrder select, then
@@ -433,7 +429,7 @@ describe("handler (end-to-end idempotency, using a real in-memory IdempotencySto
     getIdempotencyStoreMock.mockReturnValue(store);
 
     const setInventory = vi.fn().mockRejectedValue(new Error("eBay API error 503: temporarily unavailable"));
-    createEbayAdapterMock.mockReturnValue({ setInventory });
+    loadImplementedChannelAdaptersMock.mockResolvedValue({ base: {}, ebay: { setInventory } });
 
     for (let attempt = 0; attempt < 6; attempt++) {
       getDbMock.mockReturnValue(
@@ -457,7 +453,7 @@ describe("handler (end-to-end idempotency, using a real in-memory IdempotencySto
     const store = createInMemoryIdempotencyStore();
     getIdempotencyStoreMock.mockReturnValue(store);
     const setInventory = vi.fn().mockResolvedValue(undefined);
-    createEbayAdapterMock.mockReturnValue({ setInventory });
+    loadImplementedChannelAdaptersMock.mockResolvedValue({ base: {}, ebay: { setInventory } });
 
     getDbMock.mockReturnValue(
       createFakeDb([

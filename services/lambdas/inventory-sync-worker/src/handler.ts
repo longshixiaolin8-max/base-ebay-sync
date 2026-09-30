@@ -1,5 +1,4 @@
-import { BaseAdapter } from "@ai-ec/adapter-base";
-import { buildIdempotencyKey, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
+import { buildIdempotencyKey, otherChannels, withIdempotency, type ChannelAdapter, type ChannelType, type SaleEvent } from "@ai-ec/core";
 import {
   applySaleWithOutbox,
   calculateChannelAvailableQuantity,
@@ -12,15 +11,13 @@ import {
   type ApplySaleWithOutboxResult,
 } from "@ai-ec/db";
 import {
-  createEbayAdapter,
-  getAppCredentials,
   getDb,
   getIdempotencyStore,
   getValidAccessToken,
   listConnectedAccountIds,
+  loadImplementedChannelAdapters,
   recordAuditLog,
   recordSyncError,
-  type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
@@ -31,8 +28,25 @@ interface SaleDetectedMessage {
   sale: SaleEvent;
 }
 
-function otherChannelOf(channel: ChannelType): ChannelType {
-  return channel === "base" ? "ebay" : "base";
+/**
+ * The sale-application transaction below (applySaleWithOutbox, in @ai-ec/db) and this file's
+ * own dispatchPhaseB are still built around exactly one "other channel" per sale: one outbox
+ * sync_jobs row, one idempotency key with no target-channel component, one setInventory call.
+ * Deriving "the other channel" from the N-safe otherChannels() core helper -- instead of the
+ * old `channel === "base" ? "ebay" : "base"` ternary -- means a 3rd channel added to
+ * IMPLEMENTED_CHANNELS fails loudly right here instead of silently syncing to only one of two
+ * other channels (or the wrong one). See docs/adding-a-channel.md for what real N-channel
+ * fan-out here would require (a per-target-channel idempotency key and one outbox job per
+ * other channel, not one) before lifting this guard.
+ */
+function singleOtherChannel(channel: ChannelType): ChannelType {
+  const others = otherChannels(channel);
+  if (others.length !== 1) {
+    throw new Error(
+      `inventory-sync-worker's sale pipeline only supports exactly 2 implemented channels today; otherChannels(${channel}) returned [${others.join(", ")}]. See docs/adding-a-channel.md before adding a 3rd channel to IMPLEMENTED_CHANNELS.`,
+    );
+  }
+  return others[0]!;
 }
 
 /**
@@ -53,15 +67,7 @@ class PhaseBDispatchError extends Error {
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
 
-  const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-  const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapters: Record<ChannelType, ChannelAdapter> = {
-    base: new BaseAdapter(baseCreds),
-    ebay: createEbayAdapter(ebayCreds),
-    shopify: notImplementedAdapter("shopify"),
-    amazon: notImplementedAdapter("amazon"),
-    rakuten: notImplementedAdapter("rakuten"),
-  };
+  const adapters = await loadImplementedChannelAdapters();
 
   const failures: { itemIdentifier: string }[] = [];
 
@@ -150,7 +156,7 @@ export async function runPhaseA(
     channel: sale.channel,
     sequenceAt: sale.occurredAt,
     externalEventId: sale.externalOrderId,
-    otherChannel: otherChannelOf(sale.channel),
+    otherChannel: singleOtherChannel(sale.channel),
   });
 
   // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
@@ -197,7 +203,7 @@ export async function runPhaseA(
 export async function dispatchPhaseB(
   db: ReturnType<typeof getDb>,
   tenantId: string,
-  adapters: Record<ChannelType, ChannelAdapter>,
+  adapters: Partial<Record<ChannelType, ChannelAdapter>>,
   productId: string,
   sale: SaleEvent,
   phaseA: ApplySaleWithOutboxResult,
@@ -223,7 +229,7 @@ export async function dispatchPhaseB(
   const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, phaseA.outboxJobId)).limit(1);
   if (!job || job.status === "completed") return; // already dispatched by a concurrent/earlier attempt
 
-  const otherChannel = otherChannelOf(sale.channel);
+  const otherChannel = singleOtherChannel(sale.channel);
   const [otherListing] = await db
     .select()
     .from(channelListings)
@@ -263,6 +269,13 @@ export async function dispatchPhaseB(
       return;
     }
     const adapter = adapters[otherChannel];
+    if (!adapter) {
+      // Can't actually happen today -- singleOtherChannel() already throws before this point
+      // for any channel outside IMPLEMENTED_CHANNELS, and loadImplementedChannelAdapters()
+      // covers exactly IMPLEMENTED_CHANNELS. Guarded anyway so a future gap between those two
+      // fails loudly here rather than crashing on a bare undefined a few lines down.
+      throw new Error(`No ChannelAdapter wired for "${otherChannel}" -- loadImplementedChannelAdapters() is out of sync with IMPLEMENTED_CHANNELS`);
+    }
     const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
 
     // Recomputed fresh, live, right before pushing -- never trusted from whenever Phase A
@@ -314,12 +327,4 @@ export async function dispatchPhaseB(
     });
     throw new PhaseBDispatchError(error);
   }
-}
-
-function notImplementedAdapter(channel: string): ChannelAdapter {
-  return new Proxy({} as ChannelAdapter, {
-    get() {
-      throw new Error(`Channel adapter "${channel}" is not implemented yet`);
-    },
-  });
 }

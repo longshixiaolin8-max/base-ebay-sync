@@ -41,6 +41,11 @@ export interface ListProductsResult {
  * the admin UI depend only on ChannelAdapter, never on a specific channel's SDK/API
  * shape. This is what keeps BASE and eBay from ever talking to each other directly:
  * both are just adapters plugged into the same Product/Inventory Master.
+ *
+ * Implementing this interface is necessary but not sufficient for a new channel to actually
+ * work end-to-end -- see docs/adding-a-channel.md at the repo root for the rest of the
+ * checklist (some of it automatic once you're on this interface, some of it genuinely
+ * manual per channel).
  */
 export interface ChannelAdapter {
   readonly channel: ChannelType;

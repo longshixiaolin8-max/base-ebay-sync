@@ -4,6 +4,7 @@ import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement 
 import {
   applyStandardAspectFallbacks,
   ChannelType,
+  IMPLEMENTED_CHANNELS,
   classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
@@ -2667,8 +2668,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // from this caller's own tenantId, rather than trusting a client-supplied tenant hint on
     // the public /oauth/.../authorize routes (see services/lambdas/oauth-{base,ebay}). ---
 
-    if (method === "GET" && /^\/admin\/oauth\/(base|ebay)\/authorize-url$/.test(path)) {
-      const channel = path.split("/")[3] as "base" | "ebay";
+    if (method === "GET" && /^\/admin\/oauth\/[^/]+\/authorize-url$/.test(path)) {
+      const channelParsed = ChannelType.safeParse(path.split("/")[3]);
+      if (!channelParsed.success || !IMPLEMENTED_CHANNELS.includes(channelParsed.data)) return json(400, { error: "unknown_channel" });
+      const channel = channelParsed.data;
       if (channel === "ebay") {
         const creds = await getAppCredentials<EbayAppCredentials>("ebay");
         const adapter = createEbayAdapter(creds);
@@ -2755,7 +2758,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // change for those existing callers.
 
     if (method === "GET" && path === "/admin/sync/connections") {
-      async function connectionDetail(channel: "base" | "ebay") {
+      async function connectionDetail(channel: ChannelType) {
         const [connection] = await db
           .select()
           .from(oauthConnections)
@@ -2775,16 +2778,21 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           reasons: syncState.reasons,
         };
       }
-      const [base, ebay] = await Promise.all([connectionDetail("base"), connectionDetail("ebay")]);
-      return json(200, { base, ebay });
+      // Built from IMPLEMENTED_CHANNELS (today: exactly base/ebay, same wire shape as before
+      // this loop) rather than two hand-written connectionDetail("base")/("ebay") calls -- a
+      // 3rd channel added to IMPLEMENTED_CHANNELS shows up here with zero further edits.
+      const entries = await Promise.all(IMPLEMENTED_CHANNELS.map(async (channel) => [channel, await connectionDetail(channel)] as const));
+      return json(200, Object.fromEntries(entries));
     }
 
     // 請求・設定ページの「接続解除」ボタン。oauth_connections の行を削除するのみ -- Secrets
     // Managerに保存された実トークン自体はここでは失効させない(この基盤にトークン revoke
     // 呼び出しの仕組みがまだないため)。削除後は isChannelIsolated/getValidAccessToken が
     // 「接続なし」を real に検知し、次回同期は自然にスキップされる。
-    if (method === "POST" && /^\/admin\/oauth\/(base|ebay)\/disconnect$/.test(path)) {
-      const channel = path.split("/")[3] as "base" | "ebay";
+    if (method === "POST" && /^\/admin\/oauth\/[^/]+\/disconnect$/.test(path)) {
+      const channelParsed = ChannelType.safeParse(path.split("/")[3]);
+      if (!channelParsed.success || !IMPLEMENTED_CHANNELS.includes(channelParsed.data)) return json(400, { error: "unknown_channel" });
+      const channel = channelParsed.data;
       await db.delete(oauthConnections).where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)));
       await recordAuditLog(db, {
         tenantId,

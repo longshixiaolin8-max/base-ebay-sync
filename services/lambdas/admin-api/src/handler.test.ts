@@ -2146,6 +2146,13 @@ describe("admin-api handler", () => {
       // tenantIdFromEvent(event)'s authenticated Cognito claims (TENANT_A in these tests).
       expect(signStateMock).toHaveBeenCalledWith("csecret", TENANT_A);
     });
+
+    it("returns 400 for a channel that isn't implemented yet, rather than falling through to a generic 404", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/shopify/authorize-url"));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "unknown_channel" });
+    });
   });
 
   describe("billing", () => {
@@ -2476,6 +2483,14 @@ describe("admin-api handler", () => {
         fakeDb,
         expect.objectContaining({ actor: "admin@example.com", action: "oauth_disconnected", entityType: "oauth_connection", entityId: "ebay" }),
       );
+    });
+
+    it("POST /admin/oauth/{channel}/disconnect returns 400 for a channel that isn't implemented yet", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("POST", "/admin/oauth/amazon/disconnect"));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "unknown_channel" });
+      expect((fakeDb as { delete: ReturnType<typeof vi.fn> }).delete).not.toHaveBeenCalled();
     });
 
     it("POST /admin/billing/portal-session is reachable even when the tenant is inactive, and returns the Stripe portal URL", async () => {

@@ -1,23 +1,19 @@
 import Link from "next/link";
 import { relativeTime } from "@/lib/format";
-import { BoxIcon, RefreshIcon, TagIcon } from "@/components/icons";
+import { CHANNEL_META, type DisplayedChannel } from "@/lib/channel-meta";
+import { RefreshIcon } from "@/components/icons";
 import { StatusBadge } from "@/components/ui/Badge";
 import { DropdownMenu } from "@/components/ui/DropdownMenu";
 import type { ConnectionDetail } from "./types";
 
 interface ConnectionCardProps {
-  channel: "base" | "ebay";
+  channel: DisplayedChannel;
   detail: ConnectionDetail | null;
   loading: boolean;
   onCheck: () => void;
   onReconnect: () => void;
   checking: boolean;
 }
-
-const CHANNEL_META = {
-  base: { icon: BoxIcon, title: "BASE", subtitle: "自社ストア" },
-  ebay: { icon: TagIcon, title: "eBay", subtitle: "海外マーケット" },
-};
 
 /** "あと58日" style countdown -- negative (already expired) shown separately, since a plain
  *  negative day count ("あと-3日") reads as a bug, not an expired token. */

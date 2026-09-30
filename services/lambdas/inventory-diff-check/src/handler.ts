@@ -1,15 +1,6 @@
-import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { ChannelAdapter, ChannelType } from "@ai-ec/core";
 import { calculateChannelAvailableQuantity, channelListings, inventoryMaster, listWorkerEligibleTenants, productMaster } from "@ai-ec/db";
-import {
-  createEbayAdapter,
-  getAppCredentials,
-  getDb,
-  getValidAccessToken,
-  listConnectedAccountIds,
-  recordSyncError,
-  type EbayAppCredentials,
-} from "@ai-ec/lambda-shared";
+import { getDb, getValidAccessToken, listConnectedAccountIds, loadImplementedChannelAdapters, recordSyncError } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
 
 /**
@@ -23,12 +14,7 @@ export async function handler(): Promise<void> {
   const db = getDb();
   const tenants = await listWorkerEligibleTenants(db);
 
-  const baseCreds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");
-  const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapters: Partial<Record<ChannelType, ChannelAdapter>> = {
-    base: new BaseAdapter(baseCreds),
-    ebay: createEbayAdapter(ebayCreds),
-  };
+  const adapters = await loadImplementedChannelAdapters();
 
   for (const tenant of tenants) {
     await checkTenant(db, tenant.id, adapters);

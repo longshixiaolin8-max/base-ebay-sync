@@ -1,25 +1,15 @@
-import { BaseAdapter } from "@ai-ec/adapter-base";
-import type { ChannelAdapter, ChannelType } from "@ai-ec/core";
+import { IMPLEMENTED_CHANNELS, type ChannelAdapter, type ChannelType } from "@ai-ec/core";
 import { channelListings, listOffboardingCandidates, markTenantMarketplaceOffboarded, type Database } from "@ai-ec/db";
 import {
-  createEbayAdapter,
   deleteOAuthConnectionsForTenant,
-  getAppCredentials,
   getDb,
   getValidAccessToken,
   listConnectedAccountIds,
+  loadImplementedChannelAdapters,
   recordAuditLog,
   recordSyncError,
-  type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, eq } from "drizzle-orm";
-
-interface BaseAppCredentials {
-  clientId: string;
-  clientSecret: string;
-}
-
-const OFFBOARDED_CHANNELS: ChannelType[] = ["base", "ebay"];
 
 /**
  * Scheduled (EventBridge) worker: the "offboarding" half of a canceled/canceling tenant's
@@ -33,12 +23,7 @@ const OFFBOARDED_CHANNELS: ChannelType[] = ["base", "ebay"];
 export async function handler(): Promise<void> {
   const db = getDb();
 
-  const baseCreds = await getAppCredentials<BaseAppCredentials>("base");
-  const ebayCreds = await getAppCredentials<EbayAppCredentials>("ebay");
-  const adapters: Partial<Record<ChannelType, ChannelAdapter>> = {
-    base: new BaseAdapter(baseCreds),
-    ebay: createEbayAdapter(ebayCreds),
-  };
+  const adapters = await loadImplementedChannelAdapters();
 
   const candidates = await listOffboardingCandidates(db);
   for (const tenant of candidates) {
@@ -112,7 +97,7 @@ export async function offboardTenant(
 
   if (!allDelisted) return; // retried on the next scheduled run
 
-  for (const channel of OFFBOARDED_CHANNELS) {
+  for (const channel of IMPLEMENTED_CHANNELS) {
     await deleteOAuthConnectionsForTenant(db, tenantId, channel);
   }
 

@@ -7,6 +7,7 @@ export * from "./oauth-state.js";
 export * from "./webhook-token.js";
 export * from "./cloudfront-origin.js";
 export * from "./ebay.js";
+export * from "./channel-adapters.js";
 export * from "./sales-sync.js";
 export * from "./fx-rate.js";
 export * from "./metrics.js";

@@ -3,16 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { relativeTime } from "@/lib/format";
+import { CHANNEL_META, DISPLAYED_CHANNELS, type DisplayedChannel } from "@/lib/channel-meta";
 import { useToast } from "@/components/Toast";
 import { Card } from "@/components/ui/Card";
 import { StatusBadge, Badge } from "@/components/ui/Badge";
-import { BoxIcon, TagIcon, PlugIcon } from "@/components/icons";
+import { PlugIcon } from "@/components/icons";
 import type { ConnectionDetailLite, ConnectionsResponseLite } from "./types";
-
-const CHANNEL_META = {
-  base: { icon: BoxIcon, title: "BASE", subtitle: "自社ストア" },
-  ebay: { icon: TagIcon, title: "eBay", subtitle: "海外マーケット" },
-} as const;
 
 function expiresAtLabel(expiresAt: string | null): string {
   if (!expiresAt) return "未接続";
@@ -32,7 +28,7 @@ function ConnectionRow({
   checking,
   disconnecting,
 }: {
-  channel: "base" | "ebay";
+  channel: DisplayedChannel;
   detail: ConnectionDetailLite | null;
   loading: boolean;
   onCheck: () => void;
@@ -99,8 +95,8 @@ export default function ConnectionsTab() {
   const [connections, setConnections] = useState<ConnectionsResponseLite | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
-  const [disconnecting, setDisconnecting] = useState<"base" | "ebay" | null>(null);
-  const [confirmDisconnect, setConfirmDisconnect] = useState<"base" | "ebay" | null>(null);
+  const [disconnecting, setDisconnecting] = useState<DisplayedChannel | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState<DisplayedChannel | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -118,7 +114,7 @@ export default function ConnectionsTab() {
     void load();
   }, []);
 
-  async function handleReconnect(channel: "base" | "ebay") {
+  async function handleReconnect(channel: DisplayedChannel) {
     try {
       const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
       window.open(res.url, "_blank", "noopener,noreferrer");
@@ -127,7 +123,7 @@ export default function ConnectionsTab() {
     }
   }
 
-  async function handleDisconnect(channel: "base" | "ebay") {
+  async function handleDisconnect(channel: DisplayedChannel) {
     setDisconnecting(channel);
     try {
       await apiPost(`/admin/oauth/${channel}/disconnect`);
@@ -144,32 +140,22 @@ export default function ConnectionsTab() {
   return (
     <div>
       <div className="channel-sync-connections">
-        <ConnectionRow
-          channel="base"
-          detail={connections?.base ?? null}
-          loading={loading}
-          checking={checking}
-          disconnecting={disconnecting === "base"}
-          onCheck={() => {
-            setChecking(true);
-            void load();
-          }}
-          onReconnect={() => handleReconnect("base")}
-          onDisconnect={() => setConfirmDisconnect("base")}
-        />
-        <ConnectionRow
-          channel="ebay"
-          detail={connections?.ebay ?? null}
-          loading={loading}
-          checking={checking}
-          disconnecting={disconnecting === "ebay"}
-          onCheck={() => {
-            setChecking(true);
-            void load();
-          }}
-          onReconnect={() => handleReconnect("ebay")}
-          onDisconnect={() => setConfirmDisconnect("ebay")}
-        />
+        {DISPLAYED_CHANNELS.map((channel) => (
+          <ConnectionRow
+            key={channel}
+            channel={channel}
+            detail={connections?.[channel] ?? null}
+            loading={loading}
+            checking={checking}
+            disconnecting={disconnecting === channel}
+            onCheck={() => {
+              setChecking(true);
+              void load();
+            }}
+            onReconnect={() => handleReconnect(channel)}
+            onDisconnect={() => setConfirmDisconnect(channel)}
+          />
+        ))}
       </div>
 
       {confirmDisconnect && (

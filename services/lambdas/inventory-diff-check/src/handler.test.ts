@@ -6,11 +6,10 @@ const getValidAccessTokenMock = vi.fn();
 const listConnectedAccountIdsMock = vi.fn();
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
-  createEbayAdapter: vi.fn(),
-  getAppCredentials: vi.fn(),
   getDb: vi.fn(),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
+  loadImplementedChannelAdapters: vi.fn().mockResolvedValue({ base: {}, ebay: {} }),
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 

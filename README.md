@@ -11,7 +11,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
      (ChannelAdapter実装)          (ChannelAdapter実装)
 ```
 
-将来Shopify/Amazon/楽天を追加する場合は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。
+将来Shopify/Amazon/楽天を追加する場合、アダプタ自体は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。ただし接続管理まわり(OAuth接続/切断ルート・管理画面の接続カード・ワーカーのアダプタ生成)は`docs/adding-a-channel.md`の手順に沿えば自動的に拡張されるが、CDKインフラ(Secrets/Lambda/キュー)と、売却時の他チャネル反映(現状ちょうど1つの「他チャネル」を前提にした二重販売防止トランザクション)は依然として手作業での対応が必要 — 詳細と実装手順は`docs/adding-a-channel.md`を参照。
 
 ## 現在の完成度
 
@@ -38,7 +38,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 4. Cognito管理者ユーザーの作成(セルフサインアップ不可のため)。
 5. Amplify Hostingとこのリポジトリの接続(コンソールから、GitHub Appトークンはコードに置かない)。
 6. `packages/db` のAurora実インスタンスに対するマイグレーション適用・統合テスト追加。
-7. Shopify/Amazon/楽天 Adapter実装(将来タスク、`ChannelAdapter` を実装するだけ)。
+7. Shopify/Amazon/楽天 Adapter実装(将来タスク)。`packages/adapters/shopify`に、実ストアには未接続・未検証のテンプレート実装を用意済み — 追加手順は`docs/adding-a-channel.md`参照。
 
 ## アーキテクチャ
 
