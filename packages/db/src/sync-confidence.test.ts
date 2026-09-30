@@ -47,7 +47,11 @@ describe("computeSyncConfidence", () => {
 
   it("scores low when every recent attempt failed", async () => {
     const db = fakeDb({
-      syncErrors: [{ id: "e1" }, { id: "e2" }, { id: "e3" }],
+      syncErrors: [
+        { id: "e1", errorMessage: "eBay API error 500: internal server error" },
+        { id: "e2", errorMessage: "eBay API error 503: service unavailable" },
+        { id: "e3", errorMessage: "eBay API error 400: invalid category" },
+      ],
       channelListings: [],
       inventoryEvents: [],
     });
@@ -60,7 +64,10 @@ describe("computeSyncConfidence", () => {
   it("averages the error-rate and reversal-rate components", async () => {
     // 2 successes / 2 failures -> errorScore 50; 3 applied / 4 events -> orderScore 75
     const db = fakeDb({
-      syncErrors: [{ id: "e1" }, { id: "e2" }],
+      syncErrors: [
+        { id: "e1", errorMessage: "BASE API error 500: internal server error" },
+        { id: "e2", errorMessage: "BASE API error 429: rate limited" },
+      ],
       channelListings: [{ id: "1" }, { id: "2" }],
       inventoryEvents: [{ applied: true }, { applied: true }, { applied: true }, { applied: false }],
     });
@@ -69,6 +76,25 @@ describe("computeSyncConfidence", () => {
     expect(result.score).toBe(63); // round((50 + 75) / 2)
     expect(result.outOfOrderEventCount).toBe(1);
     expect(result.totalEventCount).toBe(4);
+  });
+
+  it("does not let an unrelated AI-generation failure tagged with this channel count against its sync confidence", async () => {
+    // Confirmed live: 31 ai-generate-worker failures (Bedrock daily-token-quota exhaustion)
+    // recorded against channel:"ebay" crashed this score to 0/100 and paused every new eBay
+    // publish -- for a reason that says nothing about eBay's own API actually being
+    // unreliable. Only genuine "<Channel> API error <status>:" rows may count as failures.
+    const db = fakeDb({
+      syncErrors: [
+        { id: "e1", errorMessage: "Too many tokens per day, please wait before trying again." },
+        { id: "e2", errorMessage: "Too many tokens per day, please wait before trying again." },
+      ],
+      channelListings: [{ id: "1" }, { id: "2" }],
+      inventoryEvents: [],
+    });
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
+
+    expect(result.failureCount).toBe(0);
+    expect(result.score).toBe(100);
   });
 
   it("does not let ordinary 'nothing changed' BASE polls count against the reversal rate", async () => {

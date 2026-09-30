@@ -20,7 +20,7 @@ const DEFAULT_WINDOW_MINUTES = 15;
  *  eBay's own API health -- reusing that score here would have throttled real sale polling
  *  over an unrelated AI-quota outage. This matches only the adapters' own error format.
  */
-const API_ERROR_STATUS_PATTERN = /API error (\d{3}):/;
+export const API_ERROR_STATUS_PATTERN = /API error (\d{3}):/;
 /** Only 429 (explicit rate limit) and 5xx (server-side trouble) are evidence the channel's
  *  own API needs a break. A 4xx other than 429 is a malformed-request bug on our side --
  *  also confirmed live (stale, already-fixed condition/aspect validation errors) -- and

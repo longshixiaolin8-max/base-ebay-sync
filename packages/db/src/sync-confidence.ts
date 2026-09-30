@@ -1,5 +1,6 @@
 import { and, eq, gte } from "drizzle-orm";
 import type { Database } from "./client.js";
+import { API_ERROR_STATUS_PATTERN } from "./rate-control.js";
 import { channelListings, inventoryEvents, syncErrors } from "./schema.js";
 
 export interface SyncConfidence {
@@ -34,10 +35,18 @@ export async function computeSyncConfidence(
 ): Promise<SyncConfidence> {
   const since = new Date(Date.now() - windowHours * 60 * 60 * 1000);
 
-  const failures = await db
+  const recentSyncErrors = await db
     .select()
     .from(syncErrors)
     .where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.channel, channel), gte(syncErrors.createdAt, since)));
+  // Confirmed live (Sept 2026): ai-generate-worker tags Bedrock/OpenAI quota errors with
+  // channel:"ebay" too (since they block that channel's own listing), and an unfiltered count
+  // let a same-day AI-provider outage alone crash this score to 0 and pause every new eBay
+  // publish -- for a reason that says nothing about eBay's own API actually being unreliable.
+  // rate-control.ts's shouldThrottleChannel already had this exact fix; this was the one other
+  // sync_errors consumer still missing it. Only rows shaped like the adapters' own
+  // "<Channel> API error <status>:" format are genuine evidence of that channel's API health.
+  const failures = recentSyncErrors.filter((e) => API_ERROR_STATUS_PATTERN.test(e.errorMessage));
   const successes = await db
     .select()
     .from(channelListings)
