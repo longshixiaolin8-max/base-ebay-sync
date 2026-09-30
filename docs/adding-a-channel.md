@@ -13,11 +13,12 @@ narrowed to channels a real, existing competitor already integrates with, not a 
 guess. Checked against 3 real Japanese EC一元管理 (multi-channel commerce sync) tools —
 ネクストエンジン (Next Engine), CROSS MALL, GoQSystem:
 
-| Channel | Why it's on the list |
-| --- | --- |
-| `amazon`, `rakuten` | Every one of the 3 tools above supports both as baseline coverage. |
-| `yahoo_shopping` | The 3rd of Japan's "big 3" marketplaces — Amazon・楽天市場・Yahoo!ショッピング is the standard baseline every one of those tools lists, not just 2 of the 3. |
-| `shopify` | Not a marketplace (it's a storefront platform like BASE itself), but real, confirmed demand exists: CROSS MALL's operator (アイル) is a certified **Shopify Experts** partner, and Next Engine ships its own dedicated Shopify sync app. Already has a concrete scaffold: `packages/adapters/shopify`. |
+| Channel | Why it's on the list | Adapter scaffold |
+| --- | --- | --- |
+| `amazon` | Every one of the 3 tools above supports it as baseline coverage. | `packages/adapters/amazon` |
+| `rakuten` | Same — baseline coverage across all 3. | `packages/adapters/rakuten` |
+| `yahoo_shopping` | The 3rd of Japan's "big 3" marketplaces — Amazon・楽天市場・Yahoo!ショッピング is the standard baseline every one of those tools lists, not just 2 of the 3. | none yet |
+| `shopify` | Not a marketplace (it's a storefront platform like BASE itself), but real, confirmed demand exists: CROSS MALL's operator (アイル) is a certified **Shopify Experts** partner, and Next Engine ships its own dedicated Shopify sync app. | `packages/adapters/shopify` |
 
 Deliberately **not** on the list (yet): au PAYマーケット, Qoo10, メルカリShops, TikTok Shop,
 ZOZOTOWN and the various fashion-vertical malls CROSS MALL also supports — these came up in
@@ -26,22 +27,35 @@ checked), not the "everyone integrates with this" bar the current 4 meet. Worth 
 a specific tenant actually asks for one of them, not worth speculatively building ahead of
 demand.
 
-Amazon and 楽天市場 (`rakuten`) are already in `ChannelType` but have no adapter package yet —
-that's the actual next piece of real work here, not Yahoo!ショッピング or Shopify (Shopify
-already has its scaffold). Both Amazon (SP-API) and 楽天市場 (RMS API) have official,
-public seller APIs suitable for the same `client.ts`-against-public-docs treatment
-`packages/adapters/shopify` already got.
+**Every one of the 4 candidates now has a scaffold adapter** (`packages/adapters/{shopify,
+amazon,rakuten}` — see each one's own README for real gaps found while writing it). None are
+in `IMPLEMENTED_CHANNELS`. Yahoo!ショッピング has no scaffold yet — that's the actual next
+piece of real work here. Two things the Amazon and Rakuten scaffolds surfaced that Shopify's
+own didn't, worth reading before picking up either:
+
+- **Amazon**: `listProducts`/`createListing` both throw (SP-API has no single "list all my
+  listings" call, and creating a listing needs Amazon's per-product-type attribute schema
+  `CreateListingInput`'s flat shape can't express), and every real call needs a per-tenant
+  `sellerId` that `ChannelAdapter`'s shared interface has no parameter slot for — see
+  `packages/adapters/amazon/src/client.ts`'s own class doc for what that means for
+  `loadImplementedChannelAdapters()`.
+- **Rakuten**: has **no OAuth redirect flow at all** — a shop's RMS license key is generated
+  manually in Rakuten's merchant control panel and entered directly, not obtained via
+  redirect. `getAuthorizationUrl`/`exchangeCodeForToken`/`refreshToken` all throw; connecting/
+  reconnecting Rakuten needs its own UI (a license-key entry form), not the "再接続" redirect
+  button `ConnectionCard`/`ConnectionsTab` use for every other channel today. Also: lower
+  confidence than the other 3 scaffolds on exact API field names — RMS API 2.0 is far less
+  publicly documented than Shopify's or Amazon SP-API's own docs.
 
 ## Step 0: implement the adapter
 
 Copy `packages/adapters/shopify`'s file layout (`config.ts`, `client.ts`, `client.test.ts`,
-`index.ts`) into a new `packages/adapters/<channel>` package. `shopify`'s own `client.ts`
-implements `ChannelAdapter` against Shopify's real public API and is unit-tested, but has
-**never been run against a live store** — see that package's README before treating it as
-more than a template. Whatever channel you're adding, verify every endpoint/field against
-that channel's current API reference and (ideally) a real sandbox account, the way
-`packages/adapters/base/src/client.ts`'s comments document having been checked against a live
-BASE account.
+`index.ts`) into a new `packages/adapters/<channel>` package (or start from the `amazon`/
+`rakuten` scaffolds, which are further along for those two specific channels already).
+Whatever channel you're adding, verify every endpoint/field against that channel's current API
+reference and (ideally) a real sandbox account before treating any of these 3 as more than a
+template — see each package's own README, and `packages/adapters/base/src/client.ts`'s
+comments for what "actually verified" looks like once you've done that.
 
 ## Step 1: now automatic (as of this round's generalization)
 

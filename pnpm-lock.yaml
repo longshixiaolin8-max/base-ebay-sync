@@ -104,6 +104,19 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@20.19.43)
 
+  packages/adapters/amazon:
+    dependencies:
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
   packages/adapters/base:
     dependencies:
       '@ai-ec/core':
@@ -118,6 +131,19 @@ importers:
         version: 2.1.9(@types/node@20.19.43)
 
   packages/adapters/ebay:
+    dependencies:
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.4
+        version: 2.1.9(@types/node@20.19.43)
+
+  packages/adapters/rakuten:
     dependencies:
       '@ai-ec/core':
         specifier: workspace:*

@@ -38,7 +38,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 4. Cognito管理者ユーザーの作成(セルフサインアップ不可のため)。
 5. Amplify Hostingとこのリポジトリの接続(コンソールから、GitHub Appトークンはコードに置かない)。
 6. `packages/db` のAurora実インスタンスに対するマイグレーション適用・統合テスト追加。
-7. Amazon/楽天市場/Yahoo!ショッピング/Shopify Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Shopifyのみ`packages/adapters/shopify`に実ストア未接続・未検証のテンプレート実装を用意済み。
+7. Amazon/楽天市場/Yahoo!ショッピング/Shopify Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Shopify・Amazon・楽天市場は`packages/adapters/{shopify,amazon,rakuten}`に実アカウント未接続・未検証のテンプレート実装を用意済み(いずれも`IMPLEMENTED_CHANNELS`には未登録)。Yahoo!ショッピングのみ未着手。
 
 ## アーキテクチャ
 
