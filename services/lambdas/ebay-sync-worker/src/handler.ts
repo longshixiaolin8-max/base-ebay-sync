@@ -80,6 +80,18 @@ async function computeFallbackPriceUsd(
  * unreliable, making things worse rather than safer.
  */
 const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
+/**
+ * Confirmed live: with computeSyncConfidence's score = successCount / (successCount +
+ * failureCount), a single genuine eBay 500 (no successful eBay sync yet in the trailing
+ * window to offset it) computes as 0/100 by itself -- gating on score alone then paused
+ * *every* new publish for the full 24h window, with no way to self-heal, since a blocked
+ * attempt never reaches eBay to ever produce the counterbalancing success. Requiring this
+ * many *genuine* channel-API failures (not just a low score) before actually pausing
+ * matches shouldThrottleChannel's own "3+ looks like real trouble, not one-off noise"
+ * threshold (rate-control.ts) -- the same reasoning applies here: one transient 500 is
+ * noise, not evidence the whole channel is unreliable.
+ */
+const MIN_FAILURES_TO_PAUSE_PUBLISHING = 3;
 
 /**
  * Item #2 of the hardening list ("動的安全在庫"): recomputes and persists the product's
@@ -274,7 +286,7 @@ export async function publish(
   await enforceChannelNotIsolated(db, tenantId);
 
   const confidence = await computeSyncConfidence(db, tenantId, "ebay");
-  if (confidence.score < SYNC_CONFIDENCE_PUBLISH_THRESHOLD) {
+  if (confidence.score < SYNC_CONFIDENCE_PUBLISH_THRESHOLD && confidence.failureCount >= MIN_FAILURES_TO_PAUSE_PUBLISHING) {
     throw new Error(
       `eBay sync confidence too low to publish new listings (score ${confidence.score}/100 over the last ` +
         `${confidence.windowHours}h: ${confidence.successCount} synced / ${confidence.failureCount} failed, ` +

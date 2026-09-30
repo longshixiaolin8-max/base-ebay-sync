@@ -321,6 +321,29 @@ describe("publish", () => {
     expect(adapter.createListing).not.toHaveBeenCalled();
   });
 
+  it("does not block a new publish on a single transient failure (score 0/100 from 1 failure, no successes yet)", async () => {
+    // Confirmed live: computeSyncConfidence's score is successCount/(successCount+failureCount),
+    // so one genuine eBay 500 with nothing else in the window computes as a literal 0 -- gating
+    // on score alone would pause every new publish for the full 24h window with no way to
+    // self-heal, since a blocked attempt never reaches eBay to produce a counterbalancing
+    // success. Requiring a few genuine failures (not just a low score) avoids that deadlock.
+    computeSyncConfidenceMock.mockResolvedValue({
+      channel: "ebay",
+      score: 0,
+      windowHours: 24,
+      successCount: 0,
+      failureCount: 1,
+      outOfOrderEventCount: 0,
+      totalEventCount: 0,
+    });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1");
+
+    expect(adapter.createListing).toHaveBeenCalled();
+  });
+
   it("publishes normally once confidence is back above the threshold", async () => {
     computeSyncConfidenceMock.mockResolvedValue({
       channel: "ebay",
