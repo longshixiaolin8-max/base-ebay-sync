@@ -1,10 +1,36 @@
-# Adding a new sales channel (Shopify, Amazon, 楽天, ...)
+# Adding a new sales channel (Amazon, 楽天市場, Yahoo!ショッピング, Shopify)
 
 `README.md` and `packages/core/src/channel.ts`/`adapter.ts` say adding a channel is "just
 implement `ChannelAdapter`". That's true for the adapter itself, but a repo-wide audit (done
 alongside this doc) found several other places that still hardcode "exactly BASE and eBay".
 This doc is the honest, current checklist: what's now automatic once you add a channel to
 `IMPLEMENTED_CHANNELS`, and what you still have to touch by hand.
+
+## Which channel is actually worth adding next
+
+`ChannelType` (`packages/core/src/channel.ts`) isn't "every marketplace that exists" — it's
+narrowed to channels a real, existing competitor already integrates with, not a speculative
+guess. Checked against 3 real Japanese EC一元管理 (multi-channel commerce sync) tools —
+ネクストエンジン (Next Engine), CROSS MALL, GoQSystem:
+
+| Channel | Why it's on the list |
+| --- | --- |
+| `amazon`, `rakuten` | Every one of the 3 tools above supports both as baseline coverage. |
+| `yahoo_shopping` | The 3rd of Japan's "big 3" marketplaces — Amazon・楽天市場・Yahoo!ショッピング is the standard baseline every one of those tools lists, not just 2 of the 3. |
+| `shopify` | Not a marketplace (it's a storefront platform like BASE itself), but real, confirmed demand exists: CROSS MALL's operator (アイル) is a certified **Shopify Experts** partner, and Next Engine ships its own dedicated Shopify sync app. Already has a concrete scaffold: `packages/adapters/shopify`. |
+
+Deliberately **not** on the list (yet): au PAYマーケット, Qoo10, メルカリShops, TikTok Shop,
+ZOZOTOWN and the various fashion-vertical malls CROSS MALL also supports — these came up in
+the same research pass but are a clear second tier (supported by some, not all, of the tools
+checked), not the "everyone integrates with this" bar the current 4 meet. Worth revisiting if
+a specific tenant actually asks for one of them, not worth speculatively building ahead of
+demand.
+
+Amazon and 楽天市場 (`rakuten`) are already in `ChannelType` but have no adapter package yet —
+that's the actual next piece of real work here, not Yahoo!ショッピング or Shopify (Shopify
+already has its scaffold). Both Amazon (SP-API) and 楽天市場 (RMS API) have official,
+public seller APIs suitable for the same `client.ts`-against-public-docs treatment
+`packages/adapters/shopify` already got.
 
 ## Step 0: implement the adapter
 
