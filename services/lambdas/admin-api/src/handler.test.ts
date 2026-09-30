@@ -105,6 +105,21 @@ vi.mock("@ai-ec/db", () => ({
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
+  DEFAULT_NOTIFICATION_PREFERENCES: {
+    inventoryDiffAlert: true,
+    aiDraftCompleted: true,
+    billingNotice: true,
+    oauthExpiryNotice: true,
+    importantNotice: true,
+  },
+  resolveNotificationPreferences: (stored: Record<string, boolean> | null | undefined) => ({
+    inventoryDiffAlert: true,
+    aiDraftCompleted: true,
+    billingNotice: true,
+    oauthExpiryNotice: true,
+    importantNotice: true,
+    ...(stored ?? {}),
+  }),
 }));
 
 const createAIModelClientMock = vi.fn().mockReturnValue({ generateJson: vi.fn() });

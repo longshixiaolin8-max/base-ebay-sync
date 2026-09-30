@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tenantSyncCapabilities } from "./tenants.js";
+import { DEFAULT_NOTIFICATION_PREFERENCES, resolveNotificationPreferences, tenantSyncCapabilities } from "./tenants.js";
 
 describe("tenantSyncCapabilities", () => {
   it("active: normal sync, including onboarding new products", () => {
@@ -50,5 +50,19 @@ describe("tenantSyncCapabilities", () => {
       expect(tenantSyncCapabilities({ status, marketplaceOffboardedAt: null }).onboardNewProducts).toBe(false);
       expect(tenantSyncCapabilities({ status, marketplaceOffboardedAt: new Date() }).onboardNewProducts).toBe(false);
     }
+  });
+});
+
+describe("resolveNotificationPreferences", () => {
+  it("returns every default (all true) when nothing is stored", () => {
+    expect(resolveNotificationPreferences(null)).toEqual(DEFAULT_NOTIFICATION_PREFERENCES);
+    expect(resolveNotificationPreferences(undefined)).toEqual(DEFAULT_NOTIFICATION_PREFERENCES);
+  });
+
+  it("merges a partial stored value over the defaults, leaving unset keys at their default", () => {
+    expect(resolveNotificationPreferences({ billingNotice: false })).toEqual({
+      ...DEFAULT_NOTIFICATION_PREFERENCES,
+      billingNotice: false,
+    });
   });
 });

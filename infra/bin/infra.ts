@@ -34,6 +34,10 @@ const apiEntrypoint = app.node.tryGetContext("apiEntrypoint") as string | undefi
 const ebayPlatformNotificationThrottleEnabled = app.node.tryGetContext("ebayPlatformNotificationThrottleEnabled") as
   | string
   | undefined;
+// See PlatformConfig.sesFromEmail's own doc comment: unset by default (billing-notice emails
+// stay a caught, logged no-op) until an address/domain has been verified in the SES console
+// for this account/region and passed here via `--context sesFromEmail=notifications@yourdomain`.
+const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
 
 const config = loadConfig(
   envName,
@@ -42,6 +46,7 @@ const config = loadConfig(
   monthlyBudgetUsd,
   apiEntrypoint,
   ebayPlatformNotificationThrottleEnabled,
+  sesFromEmail,
 );
 
 // Region is read from CDK context (`--context region=...`), not from

@@ -30,6 +30,7 @@ import {
   countChannelListingsByStatus,
   countProducts,
   countProductsByStatus,
+  DEFAULT_NOTIFICATION_PREFERENCES,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
@@ -48,6 +49,7 @@ import {
   productMaster,
   reconstructInventory,
   releaseMonthlyAiGenerationReservation,
+  resolveNotificationPreferences,
   syncErrors,
   syncJobs,
   tenants,
@@ -367,20 +369,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, updated);
     }
 
-    // 通知設定タブ。トグル自体は実際に保存・復元されるが、このプラットフォームは現時点で
-    // メールなどの通知配信基盤を一切持たない(SES/SNS等の送信経路が存在しない) -- フロント
-    // エンドはこの事実を明示し、「保存はされるが配信は行われない」ことを利用者に伝える。
-    const DEFAULT_NOTIFICATION_PREFERENCES = {
-      inventoryDiffAlert: true,
-      aiDraftCompleted: true,
-      billingNotice: true,
-      oauthExpiryNotice: true,
-      importantNotice: true,
-    };
+    // 通知設定タブ。billingNoticeは請求状態変化時にstripe-webhookが実際にSES経由でメール送信
+    // する(本番化レビューで実装)。他の4項目は今のところトリガーとなる仕組み自体が存在しない
+    // ため、保存はされるが配信は行われない -- フロントエンドはこの区別を明示する。
     if (method === "GET" && path === "/admin/tenant/notification-preferences") {
       const [row] = await db.select({ notificationPreferences: tenants.notificationPreferences }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
       if (!row) return json(404, { error: "not_found" });
-      return json(200, { ...DEFAULT_NOTIFICATION_PREFERENCES, ...(row.notificationPreferences ?? {}) });
+      return json(200, resolveNotificationPreferences(row.notificationPreferences));
     }
 
     if (method === "PATCH" && path === "/admin/tenant/notification-preferences") {
@@ -392,7 +387,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       const [existing] = await db.select({ notificationPreferences: tenants.notificationPreferences }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
       if (!existing) return json(404, { error: "not_found" });
-      const merged = { ...DEFAULT_NOTIFICATION_PREFERENCES, ...(existing.notificationPreferences ?? {}), ...patch };
+      const merged = { ...resolveNotificationPreferences(existing.notificationPreferences), ...patch };
       await db.update(tenants).set({ notificationPreferences: merged }).where(eq(tenants.id, tenantId));
       return json(200, merged);
     }

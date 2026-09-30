@@ -1,7 +1,48 @@
-import { and, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { TenantStatus } from "./billing.js";
 import type { Database } from "./client.js";
 import { tenants } from "./schema.js";
+
+export type NotificationPreferenceKey = "inventoryDiffAlert" | "aiDraftCompleted" | "billingNotice" | "oauthExpiryNotice" | "importantNotice";
+export type NotificationPreferences = Record<NotificationPreferenceKey, boolean>;
+
+/** Every toggle defaults to on, matching 請求・設定 > 通知設定's own design -- a JSONB
+ *  column's own DB-level "default" can't express per-key defaults cleanly, so this is applied
+ *  in code, at every place that reads notificationPreferences (see resolveNotificationPreferences
+ *  below), not the schema. Previously duplicated as an inline object in admin-api's handler.ts;
+ *  centralized here once stripe-webhook needed the exact same defaults for real email sends. */
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  inventoryDiffAlert: true,
+  aiDraftCompleted: true,
+  billingNotice: true,
+  oauthExpiryNotice: true,
+  importantNotice: true,
+};
+
+/** Merges a tenant's stored (possibly partial, possibly null) preferences over the defaults
+ *  above -- the one place "is notification X actually on for this tenant" gets decided. */
+export function resolveNotificationPreferences(stored: Partial<NotificationPreferences> | null | undefined): NotificationPreferences {
+  return { ...DEFAULT_NOTIFICATION_PREFERENCES, ...(stored ?? {}) };
+}
+
+export interface TenantContact {
+  name: string;
+  contactEmail: string | null;
+  notificationPreferences: NotificationPreferences;
+}
+
+/** Small, focused query for callers (stripe-webhook's billing-notice email, in particular)
+ *  that only need "who do we email, and do they want this kind of notification" -- not the
+ *  full getTenantBillingStatus row. */
+export async function getTenantContact(db: Database, tenantId: string): Promise<TenantContact | undefined> {
+  const [row] = await db
+    .select({ name: tenants.name, contactEmail: tenants.contactEmail, notificationPreferences: tenants.notificationPreferences })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
+  if (!row) return undefined;
+  return { name: row.name, contactEmail: row.contactEmail, notificationPreferences: resolveNotificationPreferences(row.notificationPreferences) };
+}
 
 /**
  * The one real business this platform served before multi-tenancy existed. Fixed rather

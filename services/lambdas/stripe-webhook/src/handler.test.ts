@@ -7,6 +7,7 @@ const findTenantByStripeCustomerIdMock = vi.fn();
 const claimWebhookEventMock = vi.fn();
 const completeWebhookEventMock = vi.fn().mockResolvedValue(undefined);
 const failWebhookEventMock = vi.fn().mockResolvedValue(undefined);
+const getTenantContactMock = vi.fn();
 vi.mock("@ai-ec/db", () => ({
   markTenantActive: (...args: unknown[]) => markTenantActiveMock(...args),
   markTenantPastDue: (...args: unknown[]) => markTenantPastDueMock(...args),
@@ -15,6 +16,7 @@ vi.mock("@ai-ec/db", () => ({
   claimWebhookEvent: (...args: unknown[]) => claimWebhookEventMock(...args),
   completeWebhookEvent: (...args: unknown[]) => completeWebhookEventMock(...args),
   failWebhookEvent: (...args: unknown[]) => failWebhookEventMock(...args),
+  getTenantContact: (...args: unknown[]) => getTenantContactMock(...args),
 }));
 
 const getAppCredentialsMock = vi.fn().mockResolvedValue({
@@ -30,11 +32,13 @@ const fakeDb = { transaction: async (fn: (tx: unknown) => unknown) => fn(fakeDb)
 const getDbMock = vi.fn(() => fakeDb);
 const constructEventMock = vi.fn();
 const createStripeClientMock = vi.fn(() => ({ webhooks: { constructEvent: constructEventMock } }));
+const sendEmailMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: () => getAppCredentialsMock(),
   getDb: () => getDbMock(),
   createStripeClient: () => createStripeClientMock(),
   requireCloudFrontOrigin: () => null,
+  sendEmail: (...args: unknown[]) => sendEmailMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -65,6 +69,13 @@ describe("POST /webhooks/stripe", () => {
     claimWebhookEventMock.mockResolvedValue({ claimed: true });
     completeWebhookEventMock.mockClear();
     failWebhookEventMock.mockClear();
+    getTenantContactMock.mockReset();
+    getTenantContactMock.mockResolvedValue({
+      name: "Demo Store",
+      contactEmail: "owner@example.com",
+      notificationPreferences: { inventoryDiffAlert: true, aiDraftCompleted: true, billingNotice: true, oauthExpiryNotice: true, importantNotice: true },
+    });
+    sendEmailMock.mockReset().mockResolvedValue(undefined);
   });
 
   it("rejects a delivery with no Stripe-Signature header", async () => {
@@ -306,5 +317,130 @@ describe("POST /webhooks/stripe", () => {
     expect(res.statusCode).toBe(200);
     expect(completeWebhookEventMock).toHaveBeenCalledWith(expect.anything(), "stripe", "evt_1");
     expect(failWebhookEventMock).not.toHaveBeenCalled();
+  });
+
+  describe("billing notice emails", () => {
+    it("sends a past_due email once the mutation actually applies (invoice.payment_failed)", async () => {
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "invoice.payment_failed",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(getTenantContactMock).toHaveBeenCalledWith(expect.anything(), "tenant-a");
+      expect(sendEmailMock).toHaveBeenCalledTimes(1);
+      const call = sendEmailMock.mock.calls[0]![0] as { to: string; subject: string; bodyText: string };
+      expect(call.to).toBe("owner@example.com");
+      expect(call.subject).toContain("お支払い");
+    });
+
+    it("sends a canceled_grace email mentioning the grace period end (customer.subscription.deleted)", async () => {
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "customer.subscription.deleted",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(sendEmailMock).toHaveBeenCalledTimes(1);
+      const call = sendEmailMock.mock.calls[0]![0] as { to: string; subject: string; bodyText: string };
+      expect(call.subject).toContain("解約");
+      expect(call.bodyText).toContain("2026-02-01");
+    });
+
+    it("does not send an email when the tenant has billingNotice notifications turned off", async () => {
+      getTenantContactMock.mockResolvedValue({
+        name: "Demo Store",
+        contactEmail: "owner@example.com",
+        notificationPreferences: { inventoryDiffAlert: true, aiDraftCompleted: true, billingNotice: false, oauthExpiryNotice: true, importantNotice: true },
+      });
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "invoice.payment_failed",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("does not send an email when the tenant has no contactEmail on file", async () => {
+      getTenantContactMock.mockResolvedValue({
+        name: "Demo Store",
+        contactEmail: null,
+        notificationPreferences: { inventoryDiffAlert: true, aiDraftCompleted: true, billingNotice: true, oauthExpiryNotice: true, importantNotice: true },
+      });
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "invoice.payment_failed",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("does not send an email when the out-of-order guard declines to apply the mutation (stale event)", async () => {
+      markTenantPastDueMock.mockResolvedValueOnce(false);
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "invoice.payment_failed",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("never sends a billing notice for markTenantActive transitions (reactivation is out of this round's scope)", async () => {
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "checkout.session.completed",
+        data: { object: { metadata: { tenantId: "tenant-new" }, customer: "cus_1", subscription: "sub_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("still returns 200 (the billing mutation already committed) when sending the email itself throws", async () => {
+      sendEmailMock.mockRejectedValueOnce(new Error("SES_FROM_EMAIL is not configured"));
+      findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+      constructEventMock.mockReturnValue({
+        id: "evt_1",
+        created: EVENT_CREATED_UNIX,
+        type: "invoice.payment_failed",
+        data: { object: { customer: "cus_1" } },
+      });
+
+      const res = await callHandler("{}", "sig_valid");
+
+      expect(res.statusCode).toBe(200);
+      expect(completeWebhookEventMock).toHaveBeenCalledWith(expect.anything(), "stripe", "evt_1");
+    });
   });
 });

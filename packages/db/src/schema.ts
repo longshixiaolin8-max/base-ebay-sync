@@ -75,11 +75,14 @@ export const tenants = pgTable("tenants", {
 
   /**
    * 通知設定 tab. Each key defaults to true (matching the design's toggles-on-by-default) via
-   * the application layer, not a DB default, since a JSONB column's "default" can't express
-   * per-key defaults cleanly. IMPORTANT: this platform sends no email today (grepped the
-   * whole repo for SES/nodemailer/any outbound-email client -- none exists) -- these toggles
-   * are genuinely persisted, but flipping one currently changes no actual delivery behavior.
-   * The settings page must disclose this, not imply working email delivery.
+   * the application layer, not a DB default -- see resolveNotificationPreferences in
+   * tenants.ts. Production-readiness pass: billingNotice now genuinely gates a real SES
+   * email (stripe-webhook, on past_due/canceled_grace transitions) -- the other 4 keys
+   * (inventoryDiffAlert/aiDraftCompleted/oauthExpiryNotice/importantNotice) are still
+   * persisted-but-undelivered, since none of their trigger points exist yet (no periodic
+   * OAuth-expiry check, no natural single trigger for aiDraftCompleted, importantNotice is
+   * an operator-broadcast tool that doesn't exist). NotificationsTab must keep disclosing
+   * that distinction precisely, not blanket-claim everything works or nothing does.
    */
   notificationPreferences: jsonb("notification_preferences").$type<{
     inventoryDiffAlert?: boolean;

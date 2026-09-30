@@ -39,6 +39,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 5. Amplify Hostingとこのリポジトリの接続(コンソールから、GitHub Appトークンはコードに置かない)。
 6. `packages/db` のAurora実インスタンスに対するマイグレーション適用・統合テスト追加。
 7. Amazon/楽天市場/Yahoo!ショッピング/Shopify Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Shopify・Amazon・楽天市場は`packages/adapters/{shopify,amazon,rakuten}`に実アカウント未接続・未検証のテンプレート実装を用意済み(いずれも`IMPLEMENTED_CHANNELS`には未登録)。Yahoo!ショッピングのみ未着手。
+8. SESの送信元アドレス/ドメイン検証と`--context sesFromEmail=...`の設定(詳細は下の「請求関連メール通知(SES)」参照)。これをやらない限り`billingNotice`のメールは送信されない(エラーはキャッチ・ログのみでwebhook自体は正常応答する)。
 
 ## アーキテクチャ
 
@@ -71,6 +72,14 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - **WAF**: round 15でCloudFrontを実際の本番経路として使えるようにした(下の「WAF/CloudFrontの本番適用」参照)。デフォルトはまだ直接execute-apiのままで、切り替えは明示的な運用手順が必要。
 - **既存のeBay Platform Notification購読への影響**: ルートが`{token}`必須になったため、**このデプロイ前に登録された(トークンなしの)購読はeBayからの配信が404になる**。該当テナントで`POST /admin/ebay/platform-notification-setup`を再実行し、新しいトークン付きURLで再登録すること。
 - REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)も、本番化レビューで同じ`{token}`パターンを追加適用した: `POST /admin/ebay/webhook-setup`がテナントごとの署名付きトークンを埋め込んだ`.../notifications/{token}`という宛先URLを登録するようになり、`ebay-webhook`のchallenge応答・notification処理の両方がそのトークンから実テナントIDを復元する(eBayのchallenge-response仕様上、ハッシュ計算に使う`endpoint`文字列は実際に呼ばれたURLと完全一致している必要があるため、`{token}`付きの場合は`handleChallenge`もそれを含めて計算する)。トークンなし(素のパス)のルートは残してあるため、この修正より前に登録済みの1件(BOOTSTRAP_TENANT_ID宛)は無停止でそのまま動き続ける — 破壊的な切り替えではなく、新規テナント向けの追加のみ。
+
+### 請求関連メール通知(SES)
+
+「本番ようにしてすべて」レビューで、管理画面の通知設定タブにあった5つのトグルのうち`billingNotice`(請求関連のお知らせ)だけ、実際にメール配信されるようにした。他の4つ(`inventoryDiffAlert`/`aiDraftCompleted`/`oauthExpiryNotice`/`importantNotice`)は引き続き保存のみで配信基盤自体が未実装 — 詳細はNotificationsTab自身のUI表示(項目ごとに「配信対応済み」/「保存のみ」バッジ)を参照。
+
+- **送信経路**: `services/lambdas/shared/src/email.ts`の`sendEmail()`(SES v2、`@aws-sdk/client-sesv2`)。`stripe-webhook`が`markTenantPastDue`/`markTenantCanceledWithGrace`の実際の状態遷移(out-of-orderガードで実際に適用された場合のみ、リプレイ/古いイベントでは送らない)を検知した後、`db.transaction()`のコミット後・かつwebhookのレスポンスとは独立に(失敗してもStripeへの200応答やイベント完了マークには一切影響しない)送信する。宛先は`getTenantContact()`(`packages/db/src/tenants.ts`)が返す`tenants.contactEmail`で、`notificationPreferences.billingNotice`がfalseか`contactEmail`が未設定なら送信自体をスキップする。
+- **CDK側の配線**: `infra/lib/lambda-stack.ts`の`StripeWebhook` Lambdaに`ses:SendEmail`/`ses:SendRawEmail`のIAM権限(`arn:aws:ses:<region>:<account>:identity/*`)を付与済み。送信元アドレスは`PlatformConfig.sesFromEmail`(既定未設定)経由で`SES_FROM_EMAIL`環境変数として渡す。
+- **デプロイ後に人間が行う手作業(このセッションでは完了できない)**: (1) SESコンソールで送信元アドレス、または独自ドメインを検証する(ドメイン検証はDNSレコード追加が必要 — SESがサンドボックスモードのままだと検証済みの宛先にしか送れない点にも注意。本番送信するには別途サンドボックス解除のリクエストが必要)。(2) `cdk deploy --context sesFromEmail=notifications@yourdomain.example ...`(または`deploy.yml`のworkflow_dispatch入力に追加)で`sesFromEmail`を設定して再デプロイ。この設定が入るまでは`sendEmail()`が明確なエラー(`SES_FROM_EMAIL is not configured`)を投げ、`stripe-webhook`側はそれをキャッチしてログに残すだけ(webhook自体の処理・応答には影響しない)。
 
 ### WAF/CloudFrontの本番適用と、direct execute-api URLの制限
 

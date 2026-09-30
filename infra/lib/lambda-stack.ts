@@ -373,10 +373,23 @@ export class LambdaStack extends cdk.Stack {
       "StripeWebhook",
       "services/lambdas/stripe-webhook/src/handler.ts",
       "handler",
-      {},
+      // Unset by default -- see PlatformConfig.sesFromEmail's own doc comment. sendEmail()
+      // (services/lambdas/shared/src/email.ts) throws a clear, caught-and-logged error
+      // instead of silently no-op'ing until this is actually configured post-deploy.
+      props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {},
       cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.stripe.grantRead(this.stripeWebhookFn);
+    // SES v2 has no per-secret-style resource to scope down to; identity/* is the narrowest
+    // this grants (every verified sending identity in this account/region), matching this
+    // stack's existing precedent of a wildcard-within-service grant where finer scoping isn't
+    // possible (see the Bedrock InvokeModel grant above).
+    this.stripeWebhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+      }),
+    );
 
     // --- Database migrations ---
     // No environment has ever had a script or CI step that actually applies

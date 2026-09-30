@@ -43,6 +43,17 @@ export interface PlatformConfig {
    * See README's "eBay Platform Notification abuse対策" section for the exact steps.
    */
   ebayPlatformNotificationThrottleEnabled: boolean;
+  /**
+   * The "From" address stripe-webhook's billing-notice emails (payment failed, subscription
+   * canceled) are sent from via SES v2 -- see services/lambdas/shared/src/email.ts. Left
+   * unset by default: sendEmail() throws (caught, logged, never fails the webhook response)
+   * until this is both set here AND the address/domain has been verified in the SES console
+   * for this account/region -- a manual, outside-this-codebase step (DNS records for domain
+   * verification, or a one-click confirmation for single-address verification) that mirrors
+   * every other "CDK provisions capability, a human fills in config after deploy" credential
+   * in this stack (see README's SES setup notes).
+   */
+  sesFromEmail?: string;
 }
 
 export function loadConfig(
@@ -52,6 +63,7 @@ export function loadConfig(
   monthlyBudgetUsd?: string,
   apiEntrypoint?: string,
   ebayPlatformNotificationThrottleEnabled?: string,
+  sesFromEmail?: string,
 ): PlatformConfig {
   return {
     envName,
@@ -60,5 +72,6 @@ export function loadConfig(
     monthlyBudgetUsd: monthlyBudgetUsd ? Number(monthlyBudgetUsd) : 50,
     apiEntrypoint: apiEntrypoint === "cloudfront" ? "cloudfront" : "direct",
     ebayPlatformNotificationThrottleEnabled: ebayPlatformNotificationThrottleEnabled === "true",
+    sesFromEmail,
   };
 }
