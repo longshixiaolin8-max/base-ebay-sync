@@ -54,6 +54,22 @@ export interface PlatformConfig {
    * in this stack (see README's SES setup notes).
    */
   sesFromEmail?: string;
+  /**
+   * Confirmed live (a failed dev deploy): this account's Lambda "Concurrent executions"
+   * quota is NOT the AWS default of 1000 -- it was 10, the lowest AWS allows, most likely
+   * because a fresh/lightly-used account hasn't yet had it auto-raised. AWS enforces a hard
+   * floor of 10 *unreserved* executions account-wide, so on an account capped at 10 total,
+   * reserving even a single unit for one function is mathematically impossible ("decreases
+   * account's UnreservedConcurrentExecution below its minimum value of [10]"). makeFn's own
+   * reservedConcurrency argument (lambda-stack.ts) is therefore only actually applied when
+   * this is true -- false (default) leaves every Lambda unreserved, exactly like before that
+   * feature existed, so a low-quota account can still deploy everything else. A quota
+   * increase request to 1000 was filed via Service Quotas (RequestServiceQuotaIncrease,
+   * lambda/L-B99A9384) but isn't guaranteed to be approved automatically or quickly -- flip
+   * this to true only after confirming (GetServiceQuota) the account's live quota is
+   * comfortably above the sum of every reservedConcurrency value this stack sets.
+   */
+  lambdaConcurrencyLimitsEnabled: boolean;
 }
 
 export function loadConfig(
@@ -64,6 +80,7 @@ export function loadConfig(
   apiEntrypoint?: string,
   ebayPlatformNotificationThrottleEnabled?: string,
   sesFromEmail?: string,
+  lambdaConcurrencyLimitsEnabled?: string,
 ): PlatformConfig {
   return {
     envName,
@@ -73,5 +90,6 @@ export function loadConfig(
     apiEntrypoint: apiEntrypoint === "cloudfront" ? "cloudfront" : "direct",
     ebayPlatformNotificationThrottleEnabled: ebayPlatformNotificationThrottleEnabled === "true",
     sesFromEmail,
+    lambdaConcurrencyLimitsEnabled: lambdaConcurrencyLimitsEnabled === "true",
   };
 }

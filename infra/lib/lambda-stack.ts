@@ -139,6 +139,11 @@ export class LambdaStack extends cdk.Stack {
       // BASE/eBay's own account-level API rate limits, which are not published precisely
       // enough here to size exactly) -- tune upward via CloudWatch Throttles/Duration once
       // real traffic is observed.
+      //
+      // Only actually applied when props.config.lambdaConcurrencyLimitsEnabled is true (see
+      // its own doc comment) -- confirmed live that this account's account-wide Concurrent
+      // executions quota was AWS's minimum (10), not the usual 1000, making ANY
+      // reservedConcurrentExecutions value on ANY function fail deployment outright.
       reservedConcurrency?: number,
     ): nodejs.NodejsFunction => {
       const fn = new nodejs.NodejsFunction(this, id, {
@@ -152,7 +157,7 @@ export class LambdaStack extends cdk.Stack {
         logRetention: logs.RetentionDays.ONE_MONTH,
         environment: { ...commonEnv, ...extraEnv },
         bundling: ESM_BUNDLING,
-        reservedConcurrentExecutions: reservedConcurrency,
+        reservedConcurrentExecutions: props.config.lambdaConcurrencyLimitsEnabled ? reservedConcurrency : undefined,
       });
 
       props.cluster.grantDataApiAccess(fn);

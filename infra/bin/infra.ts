@@ -38,6 +38,12 @@ const ebayPlatformNotificationThrottleEnabled = app.node.tryGetContext("ebayPlat
 // stay a caught, logged no-op) until an address/domain has been verified in the SES console
 // for this account/region and passed here via `--context sesFromEmail=notifications@yourdomain`.
 const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
+// See PlatformConfig.lambdaConcurrencyLimitsEnabled's own doc comment: false (default) until
+// this account's Lambda "Concurrent executions" quota is confirmed (GetServiceQuota,
+// lambda/L-B99A9384) to be comfortably above the sum of every reservedConcurrency value
+// makeFn sets -- an account still on AWS's low starting quota (as low as 10) cannot reserve
+// concurrency for even one function without violating AWS's own 10-unit unreserved floor.
+const lambdaConcurrencyLimitsEnabled = app.node.tryGetContext("lambdaConcurrencyLimitsEnabled") as string | undefined;
 
 const config = loadConfig(
   envName,
@@ -47,6 +53,7 @@ const config = loadConfig(
   apiEntrypoint,
   ebayPlatformNotificationThrottleEnabled,
   sesFromEmail,
+  lambdaConcurrencyLimitsEnabled,
 );
 
 // Region is read from CDK context (`--context region=...`), not from
