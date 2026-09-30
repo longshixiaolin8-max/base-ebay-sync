@@ -185,6 +185,7 @@ const getApproximateMessageCountMock = vi.fn().mockResolvedValue(0);
 const signStateMock = vi.fn().mockReturnValue("signed-state");
 const signWebhookDestinationTokenMock = vi.fn().mockReturnValue("webhook-token");
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
+const deleteOAuthConnectionsForTenantMock = vi.fn().mockResolvedValue([]);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
@@ -202,6 +203,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
+  deleteOAuthConnectionsForTenant: (...args: unknown[]) => deleteOAuthConnectionsForTenantMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -2473,12 +2475,16 @@ describe("admin-api handler", () => {
       expect(recordAuditLogMock).toHaveBeenCalledWith(fakeDb, expect.objectContaining({ action: "pricing_defaults_updated", entityType: "tenant" }));
     });
 
-    it("POST /admin/oauth/{channel}/disconnect deletes the connection row and records an audit log entry", async () => {
+    it("POST /admin/oauth/{channel}/disconnect deletes the connection row AND its Secrets Manager token, and records an audit log entry", async () => {
       fakeDb = createFakeDb([]);
+      deleteOAuthConnectionsForTenantMock.mockClear();
       const res = await callHandler(makeEvent("POST", "/admin/oauth/ebay/disconnect"));
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", disconnected: true });
-      expect((fakeDb as { delete: ReturnType<typeof vi.fn> }).delete).toHaveBeenCalledWith(expect.anything());
+      // Must go through deleteOAuthConnectionsForTenant (which deletes the underlying
+      // Secrets Manager secret too), never a bare db.delete() that would silently orphan a
+      // still-live OAuth token the tenant believes it has revoked.
+      expect(deleteOAuthConnectionsForTenantMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "ebay");
       expect(recordAuditLogMock).toHaveBeenCalledWith(
         fakeDb,
         expect.objectContaining({ actor: "admin@example.com", action: "oauth_disconnected", entityType: "oauth_connection", entityId: "ebay" }),
@@ -2487,10 +2493,11 @@ describe("admin-api handler", () => {
 
     it("POST /admin/oauth/{channel}/disconnect returns 400 for a channel that isn't implemented yet", async () => {
       fakeDb = createFakeDb([]);
+      deleteOAuthConnectionsForTenantMock.mockClear();
       const res = await callHandler(makeEvent("POST", "/admin/oauth/amazon/disconnect"));
       expect(res.statusCode).toBe(400);
       expect(JSON.parse(res.body!)).toEqual({ error: "unknown_channel" });
-      expect((fakeDb as { delete: ReturnType<typeof vi.fn> }).delete).not.toHaveBeenCalled();
+      expect(deleteOAuthConnectionsForTenantMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/billing/portal-session is reachable even when the tenant is inactive, and returns the Stripe portal URL", async () => {

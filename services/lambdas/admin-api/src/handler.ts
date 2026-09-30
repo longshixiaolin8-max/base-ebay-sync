@@ -60,6 +60,7 @@ import {
 import {
   createEbayAdapter,
   createStripeClient,
+  deleteOAuthConnectionsForTenant,
   enqueue,
   fetchFxRate,
   getAppCredentials,
@@ -2785,15 +2786,18 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, Object.fromEntries(entries));
     }
 
-    // 請求・設定ページの「接続解除」ボタン。oauth_connections の行を削除するのみ -- Secrets
-    // Managerに保存された実トークン自体はここでは失効させない(この基盤にトークン revoke
-    // 呼び出しの仕組みがまだないため)。削除後は isChannelIsolated/getValidAccessToken が
-    // 「接続なし」を real に検知し、次回同期は自然にスキップされる。
+    // 請求・設定ページの「接続解除」ボタン。deleteOAuthConnectionsForTenant が
+    // oauth_connections の行と、それが指すSecrets Manager上の実トークン(access/refresh
+    // token)の両方を削除する -- DB行だけを消してSecrets Manager側のトークンを孤立させたまま
+    // 残すと、テナントが「解除した」と思っていても有効な認証情報がAWS上に残り続けることに
+    // なるため(セキュリティレビューで発見・修正: 以前はdb.delete()のみでSecrets Manager側
+    // を呼んでいなかった)。削除後は isChannelIsolated/getValidAccessToken が「接続なし」を
+    // real に検知し、次回同期は自然にスキップされる。
     if (method === "POST" && /^\/admin\/oauth\/[^/]+\/disconnect$/.test(path)) {
       const channelParsed = ChannelType.safeParse(path.split("/")[3]);
       if (!channelParsed.success || !IMPLEMENTED_CHANNELS.includes(channelParsed.data)) return json(400, { error: "unknown_channel" });
       const channel = channelParsed.data;
-      await db.delete(oauthConnections).where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)));
+      await deleteOAuthConnectionsForTenant(db, tenantId, channel);
       await recordAuditLog(db, {
         tenantId,
         actor: actorFromEvent(event),
