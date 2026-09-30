@@ -81,6 +81,12 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - **CDK側の配線**: `infra/lib/lambda-stack.ts`の`StripeWebhook` Lambdaに`ses:SendEmail`/`ses:SendRawEmail`のIAM権限(`arn:aws:ses:<region>:<account>:identity/*`)を付与済み。送信元アドレスは`PlatformConfig.sesFromEmail`(既定未設定)経由で`SES_FROM_EMAIL`環境変数として渡す。
 - **デプロイ後に人間が行う手作業(このセッションでは完了できない)**: (1) SESコンソールで送信元アドレス、または独自ドメインを検証する(ドメイン検証はDNSレコード追加が必要 — SESがサンドボックスモードのままだと検証済みの宛先にしか送れない点にも注意。本番送信するには別途サンドボックス解除のリクエストが必要)。(2) `cdk deploy --context sesFromEmail=notifications@yourdomain.example ...`(または`deploy.yml`のworkflow_dispatch入力に追加)で`sesFromEmail`を設定して再デプロイ。この設定が入るまでは`sendEmail()`が明確なエラー(`SES_FROM_EMAIL is not configured`)を投げ、`stripe-webhook`側はそれをキャッチしてログに残すだけ(webhook自体の処理・応答には影響しない)。
 
+### CORS・レート制限・Lambda同時実行数(本番化レビュー)
+
+- **CORSにPATCHが漏れていたバグを修正**: `infra/lib/api-core-stack.ts`のHttpApi `corsPreflight.allowMethods`が長らくGET/POSTのみで、`apps/admin/lib/api-client.ts`の`apiPatch`(通知設定・テナント設定・価格デフォルトなど複数の設定タブが使用)は実際にPATCHメソッドで呼んでいた。ブラウザからの実デプロイ環境向けアクセスでは、これらの設定保存がすべてCORSプリフライト段階でブロックされていたはず(このセッションには実AWS疎通ができないため、これまで気づけなかった)。`allowMethods`にPATCHを追加して修正済み。
+- **レート制限**: `ApiCoreStack`の全ルート共通デフォルト(50 req/s, burst 100)に加え、署名検証を持たない`POST /webhooks/ebay/platform-notifications/{token}`のみ個別に絞ってある(5 req/s, burst 10 — 詳細は上の「eBay Platform Notification abuse対策」)。署名/HMAC検証がある他の公開ルート(REST Notification API、Stripe webhook)はデフォルトの共通スロットルのみで十分と判断(悪用の実害が「無駄なLambda起動」程度に収まるため)。`/signup`は共有招待コードでゲートされておりレート制限は共通デフォルトのみ — ブルートフォース対策として招待コードのローテーションは運用側の手作業。
+- **Lambda同時実行数の上限**: 従来、全Lambdaが予約なし(アカウント共有プール、デフォルト1000)だった。SQSキューの深さに応じて並列度が跳ね上がる4つのワーカー(`AiGenerateWorker`/`EbaySyncWorker`/`InventorySyncWorker`/`EbayPlatformNotificationDispatcher`)だけ`reservedConcurrentExecutions`を明示的に設定(それぞれ10・10・10・5)。理由は二つ: (1) BASE/eBay/Bedrock・OpenAI側のアカウント単位レート制限を超えて無駄にLambda起動→即429を繰り返すのを防ぐ、(2) 想定外のバーストが起きても、admin-apiや各webhookが使うアカウント共有の同時実行プールを食い潰さないようにする。値は正確なAPI制限から逆算したものではなく保守的な初期値 — 実トラフィックが乗った後、CloudWatchの新設`*ThrottleAlarm`(`infra/lib/monitoring-stack.ts`)の発火状況を見て調整する前提。
+
 ### WAF/CloudFrontの本番適用と、direct execute-api URLの制限
 
 **現状(round 15完了時点)**: `infra/lib/cloudfront-stack.ts`のWAF付きCloudFrontディストリビューションは技術的に完成している(`CACHING_DISABLED` + `OriginRequestPolicy.ALL_VIEWER`で認証ヘッダ・生bodyともに素通し確認済み)が、**デフォルトでは何もこれを使っていない**。`PlatformConfig.apiEntrypoint`(`infra/lib/config.ts`)が`"direct"`(既定)か`"cloudfront"`かを1箇所で決める:
@@ -189,6 +195,8 @@ pnpm -r run test
 ```
 
 ## デプロイ
+
+**実際にゼロから本番稼働まで持っていく際は、`docs/deployment-runbook.md`を上から順にチェックリストとして使うこと** — 以下のセクションと、SES設定・WAF/CloudFront切替・スモークテストなど本README各所に散らばった手順を実行順に1本化したもの。以下の2セクションはその中のブートストラップ部分の抜粋。
 
 ### 1. 一度きりの人手によるブートストラップ
 

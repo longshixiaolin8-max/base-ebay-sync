@@ -184,4 +184,11 @@ new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
     lambdas.tenantOffboardingFn,
     lambdas.ebayPlatformNotificationDispatcherFn,
   ],
+  // Must match exactly the functions makeFn gave a reservedConcurrency cap to (lambda-stack.ts).
+  concurrencyCappedFns: [
+    lambdas.aiGenerateWorkerFn,
+    lambdas.ebaySyncWorkerFn,
+    lambdas.inventorySyncWorkerFn,
+    lambdas.ebayPlatformNotificationDispatcherFn,
+  ],
 });

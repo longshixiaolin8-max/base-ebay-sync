@@ -129,6 +129,17 @@ export class LambdaStack extends cdk.Stack {
       handlerName: string,
       extraEnv: Record<string, string> = {},
       timeout = cdk.Duration.seconds(30),
+      // Production-readiness pass: unset (Lambda's own account-wide unreserved pool, default
+      // 1000 concurrent executions region-wide) for every function EXCEPT the SQS-driven
+      // workers below, which pass an explicit cap. Those four scale with queue depth, not a
+      // fixed schedule -- a burst (a webhook flood, a large CSV-driven product-fetch cycle)
+      // could otherwise spike their concurrency high enough to exhaust the account's shared
+      // pool and starve admin-api/the public webhooks of capacity. The caps chosen are a
+      // deliberately conservative starting point (bounding worst-case parallel calls against
+      // BASE/eBay's own account-level API rate limits, which are not published precisely
+      // enough here to size exactly) -- tune upward via CloudWatch Throttles/Duration once
+      // real traffic is observed.
+      reservedConcurrency?: number,
     ): nodejs.NodejsFunction => {
       const fn = new nodejs.NodejsFunction(this, id, {
         entry: path.join(REPO_ROOT, entry),
@@ -141,6 +152,7 @@ export class LambdaStack extends cdk.Stack {
         logRetention: logs.RetentionDays.ONE_MONTH,
         environment: { ...commonEnv, ...extraEnv },
         bundling: ESM_BUNDLING,
+        reservedConcurrentExecutions: reservedConcurrency,
       });
 
       props.cluster.grantDataApiAccess(fn);
@@ -190,6 +202,10 @@ export class LambdaStack extends cdk.Stack {
       "dispatchPoll",
       {},
       cdk.Duration.minutes(2),
+      // Matches this route's own API Gateway throttle intent (5 req/s, see api-stack.ts) --
+      // even a fully coalesced flood shouldn't fan out into more than a handful of parallel
+      // eBay poll calls at once.
+      5,
     );
     props.appCredentialSecrets.ebay.grantRead(this.ebayPlatformNotificationDispatcherFn);
     props.queues.inventorySync.grantSendMessages(this.ebayPlatformNotificationDispatcherFn);
@@ -219,6 +235,11 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       props.config.aiProvider === "openai" ? {} : {},
       cdk.Duration.minutes(2),
+      // Bedrock/OpenAI both apply their own per-account TPM/RPM quotas well below Lambda's
+      // shared 1000-concurrency pool -- capping here fails fast into this queue's own
+      // redrive/DLQ instead of every invocation past the provider's real limit burning a
+      // Lambda invocation just to immediately 429.
+      10,
     );
     if (props.config.aiProvider === "openai") {
       props.appCredentialSecrets.openai.grantRead(this.aiGenerateWorkerFn);
@@ -240,6 +261,7 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       {},
       cdk.Duration.minutes(2),
+      10,
     );
     props.appCredentialSecrets.ebay.grantRead(this.ebaySyncWorkerFn);
     this.ebaySyncWorkerFn.addEventSource(
@@ -275,6 +297,7 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       {},
       cdk.Duration.minutes(2),
+      10,
     );
     props.appCredentialSecrets.base.grantRead(this.inventorySyncWorkerFn);
     props.appCredentialSecrets.ebay.grantRead(this.inventorySyncWorkerFn);

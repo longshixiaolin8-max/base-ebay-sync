@@ -14,6 +14,12 @@ export interface MonitoringStackProps extends cdk.StackProps {
   config: PlatformConfig;
   dlqs: sqs.Queue[];
   workerFns: nodejs.NodejsFunction[];
+  /** The subset of workerFns given an explicit reservedConcurrentExecutions cap (see
+   *  lambda-stack.ts's makeFn) -- a throttled invocation here isn't a Lambda "Error" (it
+   *  never even starts), so it would otherwise be invisible until SQS's own DLQ eventually
+   *  catches the resulting backlog. Alarmed separately so hitting the ceiling itself surfaces
+   *  immediately, before it becomes a DLQ depth alert. */
+  concurrencyCappedFns: nodejs.NodejsFunction[];
 }
 
 export class MonitoringStack extends cdk.Stack {
@@ -108,6 +114,20 @@ export class MonitoringStack extends cdk.Stack {
           width: 12,
         }),
       );
+    }
+
+    for (const fn of props.concurrencyCappedFns) {
+      const throttleMetric = fn.metricThrottles({ period: cdk.Duration.minutes(5) });
+      const alarm = new cloudwatch.Alarm(this, `${fn.node.id}ThrottleAlarm`, {
+        metric: throttleMetric,
+        threshold: 1,
+        evaluationPeriods: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: `${fn.node.id} has been hitting its reservedConcurrentExecutions cap for 15+ minutes straight -- SQS is retrying, not failing outright, but sustained throttling means the cap (see lambda-stack.ts's makeFn) needs raising for the real traffic this is seeing.`,
+      });
+      alarm.addAlarmAction(new cwActions.SnsAction(alarmTopic));
+      dashboard.addWidgets(new cloudwatch.GraphWidget({ title: `${fn.node.id} throttles`, left: [throttleMetric], width: 12 }));
     }
 
     // Direct-notification gap (user's follow-up ask): a caught-and-retried failure like the
