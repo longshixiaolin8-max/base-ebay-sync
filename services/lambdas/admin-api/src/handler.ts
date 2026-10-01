@@ -1102,6 +1102,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(202, { status: "retry_queued" });
     }
 
+    // Ops diagnostic, no frontend UI: when a SKU fails to publish with an opaque eBay error,
+    // this surfaces the raw inventory_item/offer lookups createListing() itself makes, so
+    // which specific call is failing (and eBay's exact response) is visible without guessing
+    // from the adapter's single bundled error message.
+    if (method === "GET" && path === "/admin/ebay/debug/offer-state") {
+      const sku = event.queryStringParameters?.sku;
+      if (!sku) return json(400, { error: "sku_required" });
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+      const state = await adapter.debugOfferState(accessToken, sku);
+      return json(200, state);
+    }
+
     if (method === "GET" && path === "/admin/ebay/location") {
       // Confirmed live: a seller who already registered their ship-from address directly
       // in eBay's own Seller Hub has a real location sitting on their account already --

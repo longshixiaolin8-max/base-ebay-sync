@@ -468,6 +468,30 @@ export class EbayAdapter implements ChannelAdapter {
     return res.json();
   }
 
+  /**
+   * Diagnostic-only: runs the same inventory_item/offer lookups createListing() does, but
+   * never throws on a non-2xx response -- captures the status and body of each step instead,
+   * so a "why won't this SKU publish" investigation can see exactly which eBay call is
+   * failing and with what, rather than only the first error swallowing the rest.
+   */
+  async debugOfferState(accessToken: string, sku: string): Promise<Record<string, unknown>> {
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "Content-Language": "en-US",
+      "Accept-Language": "en-US",
+    };
+    const step = async (path: string) => {
+      const res = await fetch(`${this.apiBaseUrl}${path}`, { headers });
+      const body = await res.text();
+      return { status: res.status, body };
+    };
+    return {
+      inventoryItem: await step(`/sell/inventory/v1/inventory_item/${sku}`),
+      offersBySku: await step(`/sell/inventory/v1/offer?sku=${sku}`),
+    };
+  }
+
   async createListing(accessToken: string, input: CreateListingInput): Promise<{ externalId: string }> {
     await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${input.sku}`, {
       method: "PUT",
