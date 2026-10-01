@@ -383,6 +383,38 @@ describe("admin-api handler", () => {
       expect(parsed.kpi).toEqual({ total: 1245, published: 892, draft: 176, soldOut: 98, needsAttention: 79 });
     });
 
+    it("reports the eBay listing's last_error alongside its status, so a failed publish is diagnosable without querying sync_errors directly", async () => {
+      const updatedAt = new Date("2024-04-30T13:47:00.000Z");
+      fakeDb = createFakeDb([
+        [], // unresolvedDrift
+        [], // unresolvedDoubleSale
+        [], // safetyStockBySourceChannel
+        [
+          {
+            product: { id: "p1", sku: "SKU-1", title: "SEKIRO", sourceChannel: "base", status: "ai_generated", images: [], priceJpy: 3000, costJpy: 1000, updatedAt },
+            ebayListing: { channel: "ebay", status: "error", lastSyncedAt: null, lastError: "eBay API error 404: This Offer is not available." },
+            inventoryRow: { safetyStockBuffer: 0, soldOut: false },
+          },
+        ], // rows
+        [{ count: 1 }], // totalRows
+        [], // draftCountRows
+        [], // trendRows
+      ]);
+      getInventoryBreakdownMock.mockResolvedValueOnce({ onHand: 1, reserved: 0, available: 1, safetyBuffer: 0, sellableByChannel: {} });
+      countChannelListingsByStatusMock.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+      countProductsByStatusMock.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      countProductsMock.mockResolvedValueOnce(1);
+
+      const res = await callHandler(makeEvent("GET", "/admin/products/list"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.products[0]).toEqual(
+        expect.objectContaining({
+          ebayListingStatus: "error",
+          ebayListingError: "eBay API error 404: This Offer is not available.",
+        }),
+      );
+    });
+
     it("reports ebayListingStatus null and aiDraftCount 0 for a product with neither, and skips the draft-count query entirely when the page is empty", async () => {
       fakeDb = createFakeDb([[], [], [], [], [{ count: 0 }], []]);
       const res = await callHandler(makeEvent("GET", "/admin/products/list"));

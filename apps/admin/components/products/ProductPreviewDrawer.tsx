@@ -29,6 +29,7 @@ interface ChannelListingRow {
   status: string;
   externalId: string | null;
   lastSyncedAt: string | null;
+  lastError: string | null;
 }
 
 interface AiListingDraftRow {
@@ -133,7 +134,10 @@ export function ProductPreviewDrawer({ productId, onClose }: { productId: string
             </Badge>
             {baseListing && <Badge tone="neutral">BASE</Badge>}
             {ebayListing && (
-              <Badge tone={ebayListing.status === "published" ? "ok" : ebayListing.status === "error" ? "error" : "warn"}>
+              <Badge
+                tone={ebayListing.status === "published" ? "ok" : ebayListing.status === "error" ? "error" : "warn"}
+                title={ebayListing.status === "error" ? (ebayListing.lastError ?? undefined) : undefined}
+              >
                 eBay: {CHANNEL_LISTING_LABEL[ebayListing.status] ?? ebayListing.status}
               </Badge>
             )}
@@ -250,6 +254,12 @@ export function ProductPreviewDrawer({ productId, onClose }: { productId: string
                   <dt>eBay同期</dt>
                   <dd>{ebayListing?.lastSyncedAt ? new Date(ebayListing.lastSyncedAt).toLocaleString("ja-JP") : "—"}</dd>
                 </div>
+                {ebayListing?.status === "error" && ebayListing.lastError && (
+                  <div>
+                    <dt>eBayエラー内容</dt>
+                    <dd style={{ color: "var(--color-error, #d33)", whiteSpace: "pre-wrap" }}>{ebayListing.lastError}</dd>
+                  </div>
+                )}
               </dl>
             )}
           </div>

@@ -664,6 +664,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           priceJpy: r.product.priceJpy,
           costJpy: r.product.costJpy,
           ebayListingStatus: r.ebayListing?.status ?? null,
+          ebayListingError: r.ebayListing?.lastError ?? null,
           inventory: inventories[i],
           safetyStockBuffer: r.inventoryRow?.safetyStockBuffer ?? 0,
           diffStatus: diffStatusForProduct(r.product.id),

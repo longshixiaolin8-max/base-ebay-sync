@@ -6,13 +6,20 @@ export type BadgeTone = "neutral" | "ok" | "warn" | "error" | "info" | "ai";
 interface BadgeProps {
   tone?: BadgeTone;
   children: ReactNode;
+  /** Native tooltip -- e.g. the full error message behind an "error" tone badge, too long
+   *  to fit in the badge itself. */
+  title?: string;
 }
 
 /** Thin wrapper around the existing `.badge` utility class (see globals.css) -- kept as a
  *  component so every caller picks a tone from this fixed set instead of hand-writing
  *  className strings, and so the tone→color mapping lives in exactly one place. */
-export function Badge({ tone = "neutral", children }: BadgeProps) {
-  return <span className={`badge${tone === "neutral" ? "" : ` ${tone}`}`}>{children}</span>;
+export function Badge({ tone = "neutral", children, title }: BadgeProps) {
+  return (
+    <span className={`badge${tone === "neutral" ? "" : ` ${tone}`}`} title={title}>
+      {children}
+    </span>
+  );
 }
 
 const SYNC_STATE_LABEL: Record<ChannelSyncState, string> = {

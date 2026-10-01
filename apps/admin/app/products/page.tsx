@@ -38,6 +38,7 @@ interface ProductListRow {
   priceJpy: number;
   costJpy: number | null;
   ebayListingStatus: string | null;
+  ebayListingError: string | null;
   inventory: InventoryBreakdown | null;
   aiDraftCount: number;
   updatedAt: string;
@@ -314,7 +315,10 @@ function ProductsPageInner() {
                           <td>{r.inventory ? r.inventory.available.toLocaleString() : "—"}</td>
                           <td>
                             {r.ebayListingStatus ? (
-                              <Badge tone={EBAY_STATUS_TONE[r.ebayListingStatus] ?? "neutral"}>
+                              <Badge
+                                tone={EBAY_STATUS_TONE[r.ebayListingStatus] ?? "neutral"}
+                                title={r.ebayListingStatus === "error" ? (r.ebayListingError ?? undefined) : undefined}
+                              >
                                 {EBAY_STATUS_LABEL[r.ebayListingStatus] ?? r.ebayListingStatus}
                               </Badge>
                             ) : (
