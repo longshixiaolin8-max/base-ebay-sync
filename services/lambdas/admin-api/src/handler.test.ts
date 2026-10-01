@@ -162,6 +162,7 @@ const createStripeClientMock = vi.fn(() => ({
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
+const listInventoryLocationsMock = vi.fn().mockResolvedValue([]);
 const getApplicationAccessTokenMock = vi.fn().mockResolvedValue("app-token");
 const suggestCategoriesMock = vi.fn().mockResolvedValue([{ ebayCategoryId: "10364", label: "Bracelets" }]);
 const optInToBusinessPoliciesMock = vi.fn().mockResolvedValue(undefined);
@@ -177,6 +178,7 @@ const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
 const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://ebay.example/oauth?state=signed-state");
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
+  listInventoryLocations: listInventoryLocationsMock,
   getAuthorizationUrl: getAuthorizationUrlMock,
   getApplicationAccessToken: getApplicationAccessTokenMock,
   suggestCategories: suggestCategoriesMock,
@@ -890,6 +892,29 @@ describe("admin-api handler", () => {
         },
       ],
     });
+  });
+
+  it("GET /admin/ebay/location returns the seller's existing eBay inventory locations", async () => {
+    fakeDb = createFakeDb([]);
+    listInventoryLocationsMock.mockResolvedValueOnce([
+      { merchantLocationKey: "osaka-main", merchantLocationStatus: "ENABLED" },
+    ]);
+    const res = await callHandler(makeEvent("GET", "/admin/ebay/location", {}));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({
+      locations: [{ merchantLocationKey: "osaka-main", merchantLocationStatus: "ENABLED" }],
+    });
+  });
+
+  it("POST /admin/ebay/location reuses an existing ENABLED location instead of creating a duplicate", async () => {
+    fakeDb = createFakeDb([]);
+    listInventoryLocationsMock.mockResolvedValueOnce([
+      { merchantLocationKey: "osaka-main", merchantLocationStatus: "ENABLED" },
+    ]);
+    const res = await callHandler(makeEvent("POST", "/admin/ebay/location", {}, {}));
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ merchantLocationKey: "osaka-main", reused: true });
+    expect(createInventoryLocationMock).not.toHaveBeenCalled();
   });
 
   it("POST /admin/ebay/location creates the location and records an audit log entry", async () => {

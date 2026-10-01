@@ -1102,14 +1102,28 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(202, { status: "retry_queued" });
     }
 
+    if (method === "GET" && path === "/admin/ebay/location") {
+      // Confirmed live: a seller who already registered their ship-from address directly
+      // in eBay's own Seller Hub has a real location sitting on their account already --
+      // this platform has no way to know that short of asking eBay, and re-collecting the
+      // address through onboarding would just create a redundant second one. Always check
+      // here first; only fall back to collecting an address (POST, below) when eBay itself
+      // reports none.
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+      const locations = await adapter.listInventoryLocations(accessToken);
+      return json(200, { locations });
+    }
+
     if (method === "POST" && path === "/admin/ebay/location") {
       const body = JSON.parse(event.body ?? "{}") as {
         merchantLocationKey?: string;
         address?: EbayInventoryLocationAddress;
       };
-      if (!body.merchantLocationKey || !body.address) {
-        return json(400, { error: "merchantLocationKey_and_address_required" });
-      }
 
       const creds = await getAppCredentials<EbayAppCredentials>("ebay");
       const adapter = createEbayAdapter(creds);
@@ -1117,6 +1131,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
 
       const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+
+      // Reuse an existing enabled location on the seller's eBay account instead of ever
+      // creating a duplicate -- same reasoning as the GET handler above.
+      const existing = (await adapter.listInventoryLocations(accessToken)).find(
+        (l) => l.merchantLocationStatus === "ENABLED",
+      );
+      if (existing) {
+        return json(200, { merchantLocationKey: existing.merchantLocationKey, reused: true });
+      }
+
+      if (!body.merchantLocationKey || !body.address) {
+        return json(400, { error: "merchantLocationKey_and_address_required" });
+      }
+
       await adapter.createInventoryLocation(accessToken, body.merchantLocationKey, body.address);
 
       await recordAuditLog(db, {
@@ -1127,7 +1155,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         entityId: body.merchantLocationKey,
       });
 
-      return json(201, { merchantLocationKey: body.merchantLocationKey });
+      return json(201, { merchantLocationKey: body.merchantLocationKey, reused: false });
     }
 
     if (method === "POST" && path === "/admin/ebay/policies") {

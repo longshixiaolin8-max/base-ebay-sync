@@ -46,6 +46,12 @@ export interface EbayInventoryLocationAddress {
   country: string;
 }
 
+export interface EbayInventoryLocation {
+  merchantLocationKey: string;
+  merchantLocationStatus?: string;
+  location?: { address?: EbayInventoryLocationAddress };
+}
+
 /**
  * Verified against an independently-generated eBay Fulfillment API SDK (not eBay's own
  * developer.ebay.com docs, which this environment's network policy blocks fetching directly
@@ -681,6 +687,19 @@ export class EbayAdapter implements ChannelAdapter {
         merchantLocationStatus: "ENABLED",
       }),
     });
+  }
+
+  /**
+   * Lists ship-from locations already registered on this eBay seller account --
+   * confirmed live: a seller who set theirs up directly in eBay's own Seller Hub (rather
+   * than through this platform's onboarding) already has one, and re-asking them for an
+   * address to create a *second* one would just produce a duplicate. Callers should prefer
+   * reusing an existing ENABLED location's key over creating a new one.
+   */
+  async listInventoryLocations(accessToken: string): Promise<EbayInventoryLocation[]> {
+    const res = await this.authedFetch(accessToken, `/sell/inventory/v1/location?limit=100`);
+    const json = (await res.json()) as { locations?: EbayInventoryLocation[] };
+    return json.locations ?? [];
   }
 
   /**
