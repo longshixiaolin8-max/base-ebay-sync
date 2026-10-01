@@ -484,7 +484,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const statusParsed = ProductStatus.safeParse(event.queryStringParameters?.status);
       const channelParsed = ChannelType.safeParse(event.queryStringParameters?.channel);
       const syncStatusRaw = event.queryStringParameters?.syncStatus;
-      const syncStatus = (["pending", "published", "update_pending", "error", "delisted"] as const).find((s) => s === syncStatusRaw);
+      const syncStatus = (["pending", "pending_approval", "published", "update_pending", "error", "delisted"] as const).find(
+        (s) => s === syncStatusRaw,
+      );
       const q = event.queryStringParameters?.q?.trim();
       // 在庫監視 page's filter dimension -- distinct from `status` (product lifecycle) above.
       // possible_double_sale/inventory_drift are never a persisted column (see the sets built

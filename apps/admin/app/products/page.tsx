@@ -60,6 +60,7 @@ const STATUS_LABEL: Record<string, string> = {
 
 const EBAY_STATUS_LABEL: Record<string, string> = {
   pending: "下書き",
+  pending_approval: "承認待ち",
   published: "公開中",
   update_pending: "更新中",
   error: "エラー(要修正)",
@@ -68,6 +69,7 @@ const EBAY_STATUS_LABEL: Record<string, string> = {
 
 const EBAY_STATUS_TONE: Record<string, "neutral" | "ok" | "warn" | "error"> = {
   pending: "warn",
+  pending_approval: "warn",
   published: "ok",
   update_pending: "warn",
   error: "error",

@@ -58,6 +58,7 @@ const PRODUCT_STATUS_LABEL: Record<string, string> = {
 const CHANNEL_LISTING_LABEL: Record<string, string> = {
   published: "公開中",
   pending: "準備中",
+  pending_approval: "承認待ち",
   update_pending: "更新中",
   error: "要確認",
   delisted: "削除済み",
