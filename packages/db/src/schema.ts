@@ -48,6 +48,14 @@ export const tenants = pgTable("tenants", {
   ebayFulfillmentPolicyId: text("ebay_fulfillment_policy_id"),
   ebayPaymentPolicyId: text("ebay_payment_policy_id"),
   ebayReturnPolicyId: text("ebay_return_policy_id"),
+  /**
+   * The eBay merchantLocationKey this tenant's offers publish against, set once
+   * POST /admin/ebay/location has either reused an existing eBay-side location or created a
+   * new one. Same reasoning as the policy ids above: lets onboarding's status check tell
+   * this step is already done without re-asking eBay or re-prompting for an address on
+   * every page load.
+   */
+  ebayLocationKey: text("ebay_location_key"),
 
   /**
    * 請求・設定 page's テナント情報 card (item added for that redesign). All nullable and

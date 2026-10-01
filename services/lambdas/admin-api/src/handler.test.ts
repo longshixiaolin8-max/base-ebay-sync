@@ -1928,7 +1928,12 @@ describe("admin-api handler", () => {
       listConnectedAccountIdsMock.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
       const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ base: false, ebay: false, ebayPoliciesConfigured: false });
+      expect(JSON.parse(res.body!)).toEqual({
+        base: false,
+        ebay: false,
+        ebayPoliciesConfigured: false,
+        ebayLocationConfigured: false,
+      });
     });
 
     it("GET /admin/oauth/status reports a channel connected once an account id exists for it", async () => {
@@ -1936,15 +1941,38 @@ describe("admin-api handler", () => {
       listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce([]);
       const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: false, ebayPoliciesConfigured: false });
+      expect(JSON.parse(res.body!)).toEqual({
+        base: true,
+        ebay: false,
+        ebayPoliciesConfigured: false,
+        ebayLocationConfigured: false,
+      });
     });
 
     it("GET /admin/oauth/status reports ebayPoliciesConfigured once the onboarding policies step has run", async () => {
-      fakeDb = createFakeDb([[{ ebayFulfillmentPolicyId: "fp-1" }]]);
+      fakeDb = createFakeDb([[{ ebayFulfillmentPolicyId: "fp-1", ebayLocationKey: null }]]);
       listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce(["ebay-acct-1"]);
       const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body!)).toEqual({ base: true, ebay: true, ebayPoliciesConfigured: true });
+      expect(JSON.parse(res.body!)).toEqual({
+        base: true,
+        ebay: true,
+        ebayPoliciesConfigured: true,
+        ebayLocationConfigured: false,
+      });
+    });
+
+    it("GET /admin/oauth/status reports ebayLocationConfigured once the onboarding location step has run", async () => {
+      fakeDb = createFakeDb([[{ ebayFulfillmentPolicyId: "fp-1", ebayLocationKey: "osaka-main" }]]);
+      listConnectedAccountIdsMock.mockResolvedValueOnce(["base-acct-1"]).mockResolvedValueOnce(["ebay-acct-1"]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/status"));
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({
+        base: true,
+        ebay: true,
+        ebayPoliciesConfigured: true,
+        ebayLocationConfigured: true,
+      });
     });
 
     it("GET /admin/slo aggregates sync confidence, drift count, AI failure rate, and recent auto-recovery events", async () => {

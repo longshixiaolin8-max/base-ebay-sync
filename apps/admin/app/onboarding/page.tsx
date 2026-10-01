@@ -14,6 +14,12 @@ interface OAuthStatus {
   base: boolean;
   ebay: boolean;
   ebayPoliciesConfigured: boolean;
+  ebayLocationConfigured: boolean;
+}
+
+interface EbayInventoryLocation {
+  merchantLocationKey: string;
+  merchantLocationStatus?: string;
 }
 
 /**
@@ -32,9 +38,12 @@ export default function OnboardingPage() {
   const [status, setStatus] = useState<OAuthStatus | null>(null);
   const [tenantName, setTenantName] = useState<string | null>(null);
   const [policiesDone, setPoliciesDone] = useState(false);
+  const [locationDone, setLocationDone] = useState(false);
+  const [existingLocations, setExistingLocations] = useState<EbayInventoryLocation[] | null>(null);
+  const [locationForm, setLocationForm] = useState({ addressLine1: "", city: "大阪市", stateOrProvince: "大阪府", postalCode: "", country: "JP" });
   const [unmanagedCount, setUnmanagedCount] = useState<number | null>(null);
   const [pendingApprovalCount, setPendingApprovalCount] = useState<number | null>(null);
-  const [busy, setBusy] = useState<"base" | "ebay" | "policies" | "ebayNotifications" | null>(null);
+  const [busy, setBusy] = useState<"base" | "ebay" | "policies" | "ebayNotifications" | "location" | null>(null);
   const [ebayNotificationsEnabled, setEbayNotificationsEnabled] = useState(false);
   const [step, setStep] = useState(0);
   const [stepInitialized, setStepInitialized] = useState(false);
@@ -69,26 +78,42 @@ export default function OnboardingPage() {
   // otherwise a page reload after completing this step forgot it was done and let this
   // step's own "重複して作成される" warning actually happen, since nothing stopped a second click.
   const policiesConfigured = (status?.ebayPoliciesConfigured ?? false) || policiesDone;
+  // Same reasoning as policiesConfigured above -- persisted server-side (tenants.ebayLocationKey)
+  // so a reload or a brand-new browser/URL lands past this step instead of asking again.
+  const locationConfigured = (status?.ebayLocationConfigured ?? false) || locationDone;
 
   // Land on the first step that still needs attention, based on real backend state --
-  // computed once the connection status has actually loaded, not before.
+  // computed once the connection status has actually loaded, not before. This is what makes
+  // opening onboarding from a fresh tab/URL resume where setup actually left off instead of
+  // always restarting at step 0 -- confirmed live as a real complaint ("毎回最初から").
   useEffect(() => {
     if (stepInitialized || !status) return;
     if (!baseDone || !ebayDone) setStep(0);
     else if (!policiesConfigured) setStep(1);
-    else setStep(2);
+    else if (!locationConfigured) setStep(2);
+    else setStep(3);
     setStepInitialized(true);
-  }, [status, baseDone, ebayDone, policiesConfigured, stepInitialized]);
+  }, [status, baseDone, ebayDone, policiesConfigured, locationConfigured, stepInitialized]);
+
+  // Always check what eBay itself already has before ever asking for an address -- a seller
+  // who registered their ship-from location directly in eBay's own Seller Hub already has
+  // one on their account, and re-asking would just risk creating a duplicate.
+  useEffect(() => {
+    if (step !== 2 || !ready || locationConfigured) return;
+    apiGet<{ locations: EbayInventoryLocation[] }>("/admin/ebay/location")
+      .then((res) => setExistingLocations(res.locations))
+      .catch(() => setExistingLocations([]));
+  }, [step, ready, locationConfigured]);
 
   useEffect(() => {
-    if (step !== 2 || !ready) return;
+    if (step !== 3 || !ready) return;
     apiGet<{ unmanagedListings: unknown[] }>("/admin/ebay/unmanaged-listings")
       .then((res) => setUnmanagedCount(res.unmanagedListings.length))
       .catch(() => setUnmanagedCount(null));
   }, [step, ready]);
 
   useEffect(() => {
-    if (step !== 3 || !ready) return;
+    if (step !== 4 || !ready) return;
     apiGet<{ products: Array<{ status: string }> }>("/admin/products")
       .then((res) => setPendingApprovalCount(res.products.filter((p) => p.status === "ai_generated").length))
       .catch(() => setPendingApprovalCount(null));
@@ -115,6 +140,41 @@ export default function OnboardingPage() {
       notify("eBayの事業者ポリシー(配送・支払い・返品)を作成しました。", "success");
     } catch (err) {
       notify(`ポリシーの作成に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Reuses a location eBay itself already reports for this seller (set up directly in
+   *  eBay's own Seller Hub) -- no address needed, since one already exists there. */
+  async function useExistingLocation(merchantLocationKey: string) {
+    setBusy("location");
+    try {
+      await apiPost("/admin/ebay/location", { merchantLocationKey });
+      setLocationDone(true);
+      notify(`eBayに登録済みの出荷元(${merchantLocationKey})を使用します。`, "success");
+    } catch (err) {
+      notify(`出荷元の設定に失敗しました: ${(err as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function createLocation() {
+    if (!locationForm.addressLine1 || !locationForm.postalCode) {
+      notify("郵便番号と住所を入力してください。");
+      return;
+    }
+    setBusy("location");
+    try {
+      await apiPost("/admin/ebay/location", {
+        merchantLocationKey: "warehouse-1",
+        address: locationForm,
+      });
+      setLocationDone(true);
+      notify("eBayに出荷元ロケーションを登録しました。", "success");
+    } catch (err) {
+      notify(`出荷元の登録に失敗しました: ${(err as Error).message}`);
     } finally {
       setBusy(null);
     }
@@ -293,6 +353,88 @@ export default function OnboardingPage() {
           {step === 2 && (
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div className="card card-pad">
+                <h3 style={{ margin: 0 }}>eBayの出荷元ロケーションを設定する</h3>
+                <p style={{ margin: "0.4rem 0 0.8rem", color: "var(--fg-muted)", fontSize: "0.85rem", lineHeight: 1.6 }}>
+                  eBayは出品を公開する際、出荷元のロケーション登録を必須としています。一度登録すれば以降は不要です。
+                  買い手に番地まで公開されるわけではありません。
+                </p>
+                {locationConfigured ? (
+                  <span className="badge ok">完了</span>
+                ) : existingLocations === null ? (
+                  <p style={{ fontSize: "0.85rem", color: "var(--fg-subtle)" }}>eBay側の設定を確認中...</p>
+                ) : existingLocations.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                    <p style={{ fontSize: "0.85rem", color: "var(--fg-muted)" }}>
+                      eBay側に既に登録済みのロケーションが見つかりました。これを使用します。
+                    </p>
+                    {existingLocations.map((loc) => (
+                      <div key={loc.merchantLocationKey} className="card card-pad" style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                        <span style={{ flex: 1, fontSize: "0.85rem" }}>{loc.merchantLocationKey}</span>
+                        <button type="button" onClick={() => useExistingLocation(loc.merchantLocationKey)} disabled={busy === "location"}>
+                          {busy === "location" ? "処理中..." : "この設定を使う"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                    <p style={{ fontSize: "0.85rem", color: "var(--fg-muted)" }}>
+                      eBay側にロケーションが見つかりませんでした。出荷元の住所を入力してください。
+                    </p>
+                    <label style={{ fontSize: "0.8rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      郵便番号
+                      <input
+                        type="text"
+                        value={locationForm.postalCode}
+                        onChange={(e) => setLocationForm((f) => ({ ...f, postalCode: e.target.value }))}
+                        placeholder="536-0022"
+                      />
+                    </label>
+                    <label style={{ fontSize: "0.8rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      都道府県
+                      <input
+                        type="text"
+                        value={locationForm.stateOrProvince}
+                        onChange={(e) => setLocationForm((f) => ({ ...f, stateOrProvince: e.target.value }))}
+                      />
+                    </label>
+                    <label style={{ fontSize: "0.8rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      市区町村
+                      <input
+                        type="text"
+                        value={locationForm.city}
+                        onChange={(e) => setLocationForm((f) => ({ ...f, city: e.target.value }))}
+                      />
+                    </label>
+                    <label style={{ fontSize: "0.8rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                      住所(建物名・番地)
+                      <input
+                        type="text"
+                        value={locationForm.addressLine1}
+                        onChange={(e) => setLocationForm((f) => ({ ...f, addressLine1: e.target.value }))}
+                        placeholder="Nagata 3-8-15"
+                      />
+                    </label>
+                    <button type="button" onClick={createLocation} disabled={busy === "location"}>
+                      {busy === "location" ? "処理中..." : "登録する"}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="page-actions" style={{ position: "static", background: "none", border: "none", padding: 0 }}>
+                <button type="button" className="secondary" onClick={() => setStep(1)}>
+                  ← 戻る
+                </button>
+                <button type="button" onClick={() => setStep(3)} disabled={!locationConfigured}>
+                  次へ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div className="card card-pad">
                 <h3 style={{ margin: 0 }}>既存のeBay出品を紐付ける</h3>
                 <p style={{ margin: "0.4rem 0 0.8rem", color: "var(--fg-muted)", fontSize: "0.85rem", lineHeight: 1.6 }}>
                   導入前からeBayに出品していた商品がある場合、紐付けないまま出品を進めると重複して新規出品される可能性があります。
@@ -311,17 +453,17 @@ export default function OnboardingPage() {
                 )}
               </div>
               <div className="page-actions" style={{ position: "static", background: "none", border: "none", padding: 0 }}>
-                <button type="button" className="secondary" onClick={() => setStep(1)}>
+                <button type="button" className="secondary" onClick={() => setStep(2)}>
                   ← 戻る
                 </button>
-                <button type="button" onClick={() => setStep(3)}>
+                <button type="button" onClick={() => setStep(4)}>
                   次へ
                 </button>
               </div>
             </div>
           )}
 
-          {step === 3 && (
+          {step === 4 && (
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div className="card card-pad">
                 <h3 style={{ margin: 0 }}>初回出品</h3>
@@ -337,7 +479,7 @@ export default function OnboardingPage() {
                 </Link>
               </div>
               <div className="page-actions" style={{ position: "static", background: "none", border: "none", padding: 0 }}>
-                <button type="button" className="secondary" onClick={() => setStep(2)}>
+                <button type="button" className="secondary" onClick={() => setStep(3)}>
                   ← 戻る
                 </button>
               </div>

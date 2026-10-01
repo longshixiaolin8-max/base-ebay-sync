@@ -1,0 +1,1 @@
+ALTER TABLE "tenants" ADD COLUMN "ebay_location_key" text;

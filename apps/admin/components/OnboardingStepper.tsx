@@ -2,7 +2,7 @@
 
 import { CheckIcon } from "@/components/icons";
 
-export const ONBOARDING_STEPS = ["接続", "設定", "紐付け", "初回出品"];
+export const ONBOARDING_STEPS = ["接続", "事業者設定", "出荷元", "紐付け", "初回出品"];
 
 export function OnboardingStepper({ current }: { current: number }) {
   return (

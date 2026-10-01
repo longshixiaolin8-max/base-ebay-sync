@@ -1138,6 +1138,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         (l) => l.merchantLocationStatus === "ENABLED",
       );
       if (existing) {
+        await db.update(tenants).set({ ebayLocationKey: existing.merchantLocationKey }).where(eq(tenants.id, tenantId));
         return json(200, { merchantLocationKey: existing.merchantLocationKey, reused: true });
       }
 
@@ -1146,6 +1147,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
 
       await adapter.createInventoryLocation(accessToken, body.merchantLocationKey, body.address);
+      await db.update(tenants).set({ ebayLocationKey: body.merchantLocationKey }).where(eq(tenants.id, tenantId));
 
       await recordAuditLog(db, {
         tenantId,
@@ -2684,7 +2686,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // so a page reload can tell this step is already done instead of resetting to
       // "not configured" (previously a client-only flag lost on every remount).
       const [tenantRow] = await db
-        .select({ ebayFulfillmentPolicyId: tenants.ebayFulfillmentPolicyId })
+        .select({ ebayFulfillmentPolicyId: tenants.ebayFulfillmentPolicyId, ebayLocationKey: tenants.ebayLocationKey })
         .from(tenants)
         .where(eq(tenants.id, tenantId))
         .limit(1);
@@ -2692,6 +2694,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         base: Boolean(baseAccountId),
         ebay: Boolean(ebayAccountId),
         ebayPoliciesConfigured: Boolean(tenantRow?.ebayFulfillmentPolicyId),
+        ebayLocationConfigured: Boolean(tenantRow?.ebayLocationKey),
       });
     }
 
