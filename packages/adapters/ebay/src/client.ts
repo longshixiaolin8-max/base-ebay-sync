@@ -800,9 +800,20 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   private async findOfferId(accessToken: string, sku: string): Promise<string | null> {
-    const res = await this.authedFetch(accessToken, `/sell/inventory/v1/offer?sku=${sku}`);
-    const json = (await res.json()) as EbayOffersResponse;
-    return json.offers[0]?.offerId ?? null;
+    try {
+      const res = await this.authedFetch(accessToken, `/sell/inventory/v1/offer?sku=${sku}`);
+      const json = (await res.json()) as EbayOffersResponse;
+      return json.offers[0]?.offerId ?? null;
+    } catch (err) {
+      // Confirmed live: eBay's own getOffers call returns a bare 404 ("This Offer is not
+      // available.", errorId 25713) for a SKU that has never had an offer created, not a
+      // 200 with an empty offers array as its own docs imply. Every caller here treats a
+      // null return as "no offer yet, go create one" -- without this, a brand-new SKU's
+      // very first publish attempt crashed here before it ever reached the create-offer
+      // step, every single time.
+      if (err instanceof EbayApiError && err.status === 404) return null;
+      throw err;
+    }
   }
 }
 

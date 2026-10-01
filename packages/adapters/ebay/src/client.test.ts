@@ -75,6 +75,37 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("creates a new offer when eBay's getOffers 404s for a SKU with no offer yet (confirmed live behavior, not an empty array)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({})) // PUT inventory_item
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ errorId: 25713, message: "This Offer is not available." }] }, 404)) // GET offer?sku=
+      .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" })) // POST offer
+      .mockResolvedValueOnce(jsonResponse({})); // POST publish
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const result = await adapter.createListing("token", {
+      productId: "p1",
+      sku: "SKU-1",
+      titleEn: "Vintage Jacket",
+      descriptionHtmlEn: "<p>desc</p>",
+      priceUsd: 49.99,
+      quantity: 2,
+      images: [],
+      categoryId: "12345",
+      itemSpecifics: {},
+      condition: "NEW",
+    });
+
+    expect(result.externalId).toBe("SKU-1");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://api.example-ebay.test/sell/inventory/v1/offer",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("reuses an existing offer instead of creating a duplicate", async () => {
     const fetchMock = vi
       .fn()
