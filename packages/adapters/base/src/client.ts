@@ -8,6 +8,7 @@ import type {
   SaleEvent,
   UpdateListingInput,
 } from "@ai-ec/core";
+import { fetchWithRetry } from "@ai-ec/core";
 import { BASE_API_DEFAULT_HOST, BASE_OAUTH_SCOPES, type BaseAdapterConfig } from "./config.js";
 
 interface BaseTokenResponse {
@@ -174,7 +175,7 @@ export class BaseAdapter implements ChannelAdapter {
   }
 
   private async authedFetch(accessToken: string, path: string, init?: RequestInit): Promise<Response> {
-    const res = await fetch(`${this.apiBaseUrl}${path}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${accessToken}`,
