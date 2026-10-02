@@ -1,1 +1,1 @@
-ALTER TABLE "tenants" ADD COLUMN "ebay_location_key" text;
+ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "ebay_location_key" text;
