@@ -809,7 +809,10 @@ describe("EbayAdapter", () => {
       .mockResolvedValueOnce(
         jsonResponse({ orders: Array.from({ length: 200 }, (_, i) => makeOrder(i + 1)), total: 201, limit: 200, offset: 0, next: "p2" }),
       )
-      .mockResolvedValue(new Response("temporary failure", { status: 503 }));
+      // Each real fetch attempt returns a fresh Response object. Reusing one Response
+      // instance here would make its body unusable after the retry helper discards the
+      // first 503 response body.
+      .mockImplementation(async () => new Response("temporary failure", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const adapter = new EbayAdapter(config);
