@@ -809,7 +809,7 @@ describe("EbayAdapter", () => {
       .mockResolvedValueOnce(
         jsonResponse({ orders: Array.from({ length: 200 }, (_, i) => makeOrder(i + 1)), total: 201, limit: 200, offset: 0, next: "p2" }),
       )
-      .mockResolvedValueOnce(new Response("temporary failure", { status: 503 }));
+      .mockResolvedValue(new Response("temporary failure", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const adapter = new EbayAdapter(config);
