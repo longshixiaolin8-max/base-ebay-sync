@@ -274,7 +274,7 @@ export default function DashboardPage() {
 
   return (
     <>
-      <Topbar searchPlaceholder="商品・注文・SKUなどを検索..." />
+      <Topbar />
       <div className="page page-wide">
         <PageHeader
           title="ダッシュボード"
@@ -312,8 +312,8 @@ export default function DashboardPage() {
               <KpiCard
                 icon={CoinIcon}
                 color="orange"
-                value={formatUsd(summary.last24h.revenueUsdCents)}
-                label="24時間売上"
+                value={formatUsd(summary.currentMonth.revenueUsdCents)}
+                label="今月売上"
                 sub={
                   revenueTrendPct === null ? undefined : (
                     <span className={`kpi-trend ${revenueTrendPct >= 0 ? "up" : "down"}`}>
