@@ -102,9 +102,14 @@ describe("fetchWithRetry", () => {
       { method: "POST", headers: { Authorization: "Bearer super-secret-token" } },
       { timeoutMs: 100 },
     );
+    // Attach the rejection handler before advancing fake time; otherwise the promise can
+    // reject in the timer turn before Vitest has observed it, producing a false
+    // unhandled-rejection failure even though the assertion later succeeds.
+    const caught = promise.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(100);
 
-    await expect(promise).rejects.toBeInstanceOf(HttpRequestTimeoutError);
-    await expect(promise).rejects.not.toThrow(/super-secret-token/);
+    const error = await caught;
+    expect(error).toBeInstanceOf(HttpRequestTimeoutError);
+    expect((error as Error).message).not.toContain("super-secret-token");
   });
 });
