@@ -75,6 +75,11 @@ interface EbayOrder {
 }
 interface EbayOrdersResponse {
   orders: EbayOrder[];
+  /** Pagination metadata returned by Fulfillment getOrders. */
+  total?: number;
+  limit?: number;
+  offset?: number;
+  next?: string;
 }
 
 class EbayApiError extends Error {
@@ -670,10 +675,56 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async listRecentSales(accessToken: string, since: Date): Promise<SaleEvent[]> {
+    // Fulfillment getOrders uses offset pagination. eBay raised the documented maximum
+    // page size to 200 (Fulfillment API 1.19.10), so use that maximum to minimise API
+    // calls while still exhausting every page. The API may return `total` and `next`;
+    // we use `total` when present and fall back to page fullness for defensive
+    // compatibility with older/simplified responses (including Sandbox fixtures).
+    const pageLimit = 200;
+    const maxPages = 100; // safety guard: at most 20,000 orders in one poll invocation
     const filter = encodeURIComponent(`creationdate:[${since.toISOString()}..]`);
-    const res = await this.authedFetch(accessToken, `/sell/fulfillment/v1/order?filter=${filter}`);
-    const json = (await res.json()) as EbayOrdersResponse;
-    return json.orders.flatMap((order) =>
+    const seenOrderIds = new Set<string>();
+    const orders: EbayOrder[] = [];
+    let offset = 0;
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const res = await this.authedFetch(
+        accessToken,
+        `/sell/fulfillment/v1/order?filter=${filter}&limit=${pageLimit}&offset=${offset}`,
+      );
+      const json = (await res.json()) as EbayOrdersResponse;
+      const pageOrders = json.orders ?? [];
+
+      for (const order of pageOrders) {
+        if (seenOrderIds.has(order.orderId)) continue;
+        seenOrderIds.add(order.orderId);
+        orders.push(order);
+      }
+
+      const responseOffset = Number.isFinite(json.offset) ? Number(json.offset) : offset;
+      const responseLimit = Number.isFinite(json.limit) && Number(json.limit) > 0 ? Number(json.limit) : pageLimit;
+      const nextOffset = responseOffset + responseLimit;
+
+      // Prefer eBay's total count when supplied. If it is absent, a short page is the
+      // standard end-of-collection signal. `next` is advisory only; offset remains the
+      // source of truth so we never follow an unexpected cross-host URL.
+      if (typeof json.total === "number") {
+        if (nextOffset >= json.total) break;
+      } else if (!json.next && pageOrders.length < responseLimit) {
+        break;
+      }
+
+      if (nextOffset <= offset) {
+        throw new Error("eBay getOrders pagination did not advance the offset");
+      }
+      offset = nextOffset;
+
+      if (page === maxPages - 1) {
+        throw new Error(`eBay getOrders pagination exceeded safety limit of ${maxPages} pages`);
+      }
+    }
+
+    return orders.flatMap((order) =>
       order.lineItems.map((lineItem) => {
         // USD is this platform's only supported eBay marketplace currency today (see
         // pricing.ts) -- a line item settled in another currency is left unpriced here
