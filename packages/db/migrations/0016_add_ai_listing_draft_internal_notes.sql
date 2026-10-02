@@ -1,1 +1,1 @@
-ALTER TABLE "ai_listing_draft" ADD COLUMN "internal_notes" text;
+ALTER TABLE "ai_listing_draft" ADD COLUMN IF NOT EXISTS "internal_notes" text;

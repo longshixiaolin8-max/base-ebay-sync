@@ -43,10 +43,10 @@ CREATE TABLE IF NOT EXISTS "sns_content" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "ai_listing_draft" ADD COLUMN "prompt_version" text;--> statement-breakpoint
-ALTER TABLE "ai_listing_draft" ADD COLUMN "human_corrected_fields" jsonb;--> statement-breakpoint
-ALTER TABLE "product_master" ADD COLUMN "cost_jpy" integer;--> statement-breakpoint
-ALTER TABLE "product_master" ADD COLUMN "purchased_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "ai_listing_draft" ADD COLUMN IF NOT EXISTS "prompt_version" text;--> statement-breakpoint
+ALTER TABLE "ai_listing_draft" ADD COLUMN IF NOT EXISTS "human_corrected_fields" jsonb;--> statement-breakpoint
+ALTER TABLE "product_master" ADD COLUMN IF NOT EXISTS "cost_jpy" integer;--> statement-breakpoint
+ALTER TABLE "product_master" ADD COLUMN IF NOT EXISTS "purchased_at" timestamp with time zone;--> statement-breakpoint
 DO $$ BEGIN
  ALTER TABLE "orders" ADD CONSTRAINT "orders_product_id_product_master_id_fk" FOREIGN KEY ("product_id") REFERENCES "public"."product_master"("id") ON DELETE cascade ON UPDATE no action;
 EXCEPTION

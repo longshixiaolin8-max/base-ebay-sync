@@ -9,8 +9,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Applies every pending packages/db/migrations/*.sql file (drizzle's own aws-data-api
- * migrator, which tracks what's already applied in its own __drizzle_migrations table --
- * safe to invoke repeatedly, including against an already-migrated database), then seeds
+ * migrator, which tracks what's already applied in its own __drizzle_migrations table.
+ * Legacy migrations 0001-0018 are deliberately replay-safe because early environments had
+ * some schema changes applied manually before this ledger was consistently maintained.
+ * That lets a missing ledger row converge on the existing schema instead of failing on an
+ * already-present column/constraint. After migration, this handler seeds
  * the platform's fixed bootstrap tenant row.
  *
  * No environment (dev or prod) has ever had a script or CI step that actually runs these

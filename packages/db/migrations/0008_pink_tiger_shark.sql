@@ -4,21 +4,21 @@ CREATE TABLE IF NOT EXISTS "tenants" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "product_master" DROP CONSTRAINT "product_master_sku_unique";--> statement-breakpoint
-ALTER TABLE "sync_jobs" DROP CONSTRAINT "sync_jobs_idempotency_key_unique";--> statement-breakpoint
+ALTER TABLE "product_master" DROP CONSTRAINT IF EXISTS "product_master_sku_unique";--> statement-breakpoint
+ALTER TABLE "sync_jobs" DROP CONSTRAINT IF EXISTS "sync_jobs_idempotency_key_unique";--> statement-breakpoint
 DROP INDEX IF EXISTS "oauth_connections_channel_account_unique";--> statement-breakpoint
-ALTER TABLE "ai_listing_draft" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "audit_log" ADD COLUMN "tenant_id" uuid;--> statement-breakpoint
-ALTER TABLE "channel_listings" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "idempotency_keys" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "inventory_events" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "inventory_master" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "oauth_connections" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "orders" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "product_master" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "sns_content" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "sync_errors" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "sync_jobs" ADD COLUMN "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "ai_listing_draft" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "audit_log" ADD COLUMN IF NOT EXISTS "tenant_id" uuid;--> statement-breakpoint
+ALTER TABLE "channel_listings" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "idempotency_keys" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "inventory_events" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "inventory_master" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "oauth_connections" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "product_master" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "sns_content" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "sync_errors" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
+ALTER TABLE "sync_jobs" ADD COLUMN IF NOT EXISTS "tenant_id" uuid NOT NULL;--> statement-breakpoint
 DO $$ BEGIN
  ALTER TABLE "ai_listing_draft" ADD CONSTRAINT "ai_listing_draft_tenant_id_tenants_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id") ON DELETE no action ON UPDATE no action;
 EXCEPTION

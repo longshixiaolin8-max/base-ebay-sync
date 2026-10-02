@@ -1,4 +1,4 @@
-ALTER TABLE "ai_listing_draft" ADD COLUMN "source_content_hash" text;--> statement-breakpoint
+ALTER TABLE "ai_listing_draft" ADD COLUMN IF NOT EXISTS "source_content_hash" text;--> statement-breakpoint
 -- Backfill pre-existing draft rows (from before this column existed) with the product's
 -- *current* content_hash. This is a deliberate assumption that pre-existing drafts are
 -- still fresh as of migration time -- the AI mis-listing gate (item #5) will correctly

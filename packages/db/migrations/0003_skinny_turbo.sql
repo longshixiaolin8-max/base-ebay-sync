@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS "inventory_events" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "inventory_master" ADD COLUMN "last_base_seq" timestamp with time zone;--> statement-breakpoint
-ALTER TABLE "inventory_master" ADD COLUMN "ebay_sold_since_base_sync" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "inventory_master" ADD COLUMN IF NOT EXISTS "last_base_seq" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "inventory_master" ADD COLUMN IF NOT EXISTS "ebay_sold_since_base_sync" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
 DO $$ BEGIN
  ALTER TABLE "inventory_events" ADD CONSTRAINT "inventory_events_product_id_product_master_id_fk" FOREIGN KEY ("product_id") REFERENCES "public"."product_master"("id") ON DELETE cascade ON UPDATE no action;
 EXCEPTION
