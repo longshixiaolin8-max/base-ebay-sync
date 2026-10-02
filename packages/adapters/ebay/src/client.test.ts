@@ -730,6 +730,105 @@ describe("EbayAdapter", () => {
     expect(sales[0]?.salePriceUsdCents).toBeUndefined();
   });
 
+  it("listRecentSales follows Fulfillment offset pagination until all orders are collected", async () => {
+    const makeOrder = (n: number) => ({
+      orderId: `order-${n}`,
+      creationDate: "2026-08-01T00:00:00.000Z",
+      lineItems: [{ sku: `SKU-${n}`, quantity: 1, total: { value: "10.00", currency: "USD" } }],
+    });
+    const first = Array.from({ length: 200 }, (_, i) => makeOrder(i + 1));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ orders: first, total: 201, limit: 200, offset: 0, next: "next-page" }))
+      .mockResolvedValueOnce(jsonResponse({ orders: [makeOrder(201)], total: 201, limit: 200, offset: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"));
+
+    expect(sales).toHaveLength(201);
+    expect(sales[0]?.externalOrderId).toBe("order-1");
+    expect(sales[200]?.externalOrderId).toBe("order-201");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("limit=200&offset=0");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("limit=200&offset=200");
+  });
+
+  it("listRecentSales handles three pages and a short final page", async () => {
+    const makeOrder = (n: number) => ({
+      orderId: `order-${n}`,
+      creationDate: "2026-08-01T00:00:00.000Z",
+      lineItems: [{ sku: `SKU-${n}`, quantity: 1 }],
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ orders: Array.from({ length: 200 }, (_, i) => makeOrder(i + 1)), total: 401, limit: 200, offset: 0, next: "p2" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ orders: Array.from({ length: 200 }, (_, i) => makeOrder(i + 201)), total: 401, limit: 200, offset: 200, next: "p3" }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ orders: [makeOrder(401)], total: 401, limit: 200, offset: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"));
+
+    expect(sales).toHaveLength(401);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("listRecentSales de-duplicates an order repeated across adjacent pages", async () => {
+    const makeOrder = (n: number) => ({
+      orderId: `order-${n}`,
+      creationDate: "2026-08-01T00:00:00.000Z",
+      lineItems: [{ sku: `SKU-${n}`, quantity: 1 }],
+    });
+    const first = Array.from({ length: 200 }, (_, i) => makeOrder(i + 1));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ orders: first, total: 201, limit: 200, offset: 0, next: "p2" }))
+      .mockResolvedValueOnce(jsonResponse({ orders: [makeOrder(200), makeOrder(201)], total: 201, limit: 200, offset: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const sales = await adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"));
+
+    expect(sales.filter((sale) => sale.externalOrderId === "order-200")).toHaveLength(1);
+    expect(sales).toHaveLength(201);
+  });
+
+  it("listRecentSales surfaces a later-page API failure instead of returning an incomplete sale set", async () => {
+    const makeOrder = (n: number) => ({
+      orderId: `order-${n}`,
+      creationDate: "2026-08-01T00:00:00.000Z",
+      lineItems: [{ sku: `SKU-${n}`, quantity: 1 }],
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ orders: Array.from({ length: 200 }, (_, i) => makeOrder(i + 1)), total: 201, limit: 200, offset: 0, next: "p2" }),
+      )
+      .mockResolvedValueOnce(new Response("temporary failure", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"))).rejects.toThrow("eBay API error 503");
+  });
+
+  it("listRecentSales fails closed when pagination exceeds its safety guard", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ orders: [], total: 20_001, limit: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.listRecentSales("token", new Date("2026-08-01T00:00:00Z"))).rejects.toThrow(
+      "pagination exceeded safety limit",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+  });
+
   describe("refreshToken", () => {
     it("preserves the original refresh token when eBay's refresh response omits one (eBay's real, documented behavior)", async () => {
       const fetchMock = vi.fn().mockResolvedValueOnce(
