@@ -8,6 +8,7 @@ import type {
   SaleEvent,
   UpdateListingInput,
 } from "@ai-ec/core";
+import { fetchWithRetry } from "@ai-ec/core";
 import {
   EBAY_API_DEFAULT_HOST,
   EBAY_AUTH_DEFAULT_HOST,
@@ -424,7 +425,7 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   private async authedFetch(accessToken: string, path: string, init?: RequestInit): Promise<Response> {
-    const res = await fetch(`${this.apiBaseUrl}${path}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -453,7 +454,7 @@ export class EbayAdapter implements ChannelAdapter {
   }
 
   async getProduct(accessToken: string, externalId: string): Promise<ExternalProduct | null> {
-    const res = await fetch(`${this.apiBaseUrl}/sell/inventory/v1/inventory_item/${externalId}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/sell/inventory/v1/inventory_item/${externalId}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (res.status === 404) return null;
