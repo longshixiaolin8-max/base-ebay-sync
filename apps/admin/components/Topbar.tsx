@@ -73,7 +73,7 @@ export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
         <div className="topbar-search">
           <SearchIcon />
           <input
-            type="search"
+            type="text"
             placeholder={searchPlaceholder ?? "商品名・SKUで検索..."}
             onChange={(e) => onSearch(e.target.value)}
             aria-label={searchPlaceholder ?? "商品名・SKUで検索"}
