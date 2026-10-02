@@ -69,15 +69,17 @@ export function Topbar({ onSearch, searchPlaceholder }: TopbarProps) {
         <span className="topbar-breadcrumb-prefix">ワークスペース / </span>
         <strong>{title}</strong>
       </div>
-      <div className="topbar-search">
-        <SearchIcon />
-        <input
-          type="text"
-          placeholder={searchPlaceholder ?? "商品名・SKUで検索..."}
-          onChange={(e) => onSearch?.(e.target.value)}
-          disabled={!onSearch}
-        />
-      </div>
+      {onSearch && (
+        <div className="topbar-search">
+          <SearchIcon />
+          <input
+            type="text"
+            placeholder={searchPlaceholder ?? "商品名・SKUで検索..."}
+            onChange={(e) => onSearch(e.target.value)}
+            aria-label={searchPlaceholder ?? "商品名・SKUで検索"}
+          />
+        </div>
+      )}
       <div className="topbar-actions">
         <Link href="/sync-errors" className="icon-button" aria-label="同期エラー通知">
           <BellIcon />
