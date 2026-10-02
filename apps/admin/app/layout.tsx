@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
 import { MobileNavProvider } from "@/components/MobileNav";
+import { MobileBottomNav } from "@/components/MobileBottomNav";
 import { Sidebar } from "@/components/Sidebar";
 import { SidebarBackdrop } from "@/components/SidebarBackdrop";
 import { ToastProvider } from "@/components/Toast";
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <Sidebar />
               <SidebarBackdrop />
               <div className="app-main">{children}</div>
+              <MobileBottomNav />
             </div>
           </MobileNavProvider>
         </ToastProvider>
