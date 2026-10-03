@@ -24,7 +24,8 @@
   },
   "pnpm": {
     "overrides": {
-      "postcss": "8.5.18"
+      "postcss": "8.5.18",
+      "drizzle-orm": "0.45.2"
     }
   }
 }
