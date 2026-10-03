@@ -21,6 +21,10 @@ export interface PaymentMethod {
 export interface Invoice {
   id: string;
   number: string | null;
+  /** Stripe minor-unit amount. Kept separately from currency so JPY is never treated as cents. */
+  amountMinorUnits: number;
+  currency: string;
+  /** @deprecated compatibility field for older clients; use amountMinorUnits + currency. */
   amountUsdCents: number;
   createdAt: string;
   status: string | null;
