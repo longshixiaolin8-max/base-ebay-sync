@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type FormEvent, useEffect, useState } from "react";
 import { ApiError, publicApiGet, publicApiPost } from "@/lib/api-client";
+import { formatStripeAmount } from "@/lib/format";
 import { EyeIcon, EyeOffIcon } from "@/components/icons";
 import { OtpInput } from "@/components/OtpInput";
 
@@ -48,12 +49,7 @@ function Stepper({ stage }: { stage: Stage }) {
 
 function formatPrice(pricing: PublicPricing | null): string {
   if (!pricing) return "料金を確認中";
-  const amount = pricing.unitAmount / 100;
-  const label = new Intl.NumberFormat("ja-JP", {
-    style: "currency",
-    currency: pricing.currency.toUpperCase(),
-    maximumFractionDigits: pricing.currency.toLowerCase() === "jpy" ? 0 : 2,
-  }).format(amount);
+  const label = formatStripeAmount(pricing.unitAmount, pricing.currency);
   return `${label} / ${pricing.interval === "month" ? "月" : pricing.interval}`;
 }
 
