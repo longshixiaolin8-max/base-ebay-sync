@@ -111,8 +111,10 @@ export default function SignupPage() {
     try {
       const { checkoutUrl } = await publicApiPost<{ checkoutUrl: string }>("/signup", {
         action: "confirm",
+        companyName,
         email,
         confirmationCode: value,
+        acceptedTerms,
       });
       window.location.href = checkoutUrl;
     } catch (err) {
