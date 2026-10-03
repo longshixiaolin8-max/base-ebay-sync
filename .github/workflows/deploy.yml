@@ -77,16 +77,74 @@ jobs:
           LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
           LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
           SES_FROM_EMAIL: ${{ vars.SES_FROM_EMAIL }}
+          ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
         run: |
           set -euo pipefail
           missing=0
-          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL; do
+          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL ALARM_EMAIL; do
             if [ -z "${!name:-}" ]; then
               echo "::error::prod environment variable $name is required before the public SaaS frontend can be released."
               missing=1
             fi
           done
           test "$missing" -eq 0
+
+          # Fail closed on placeholder/non-production credentials. Values are never echoed.
+          read_secret() {
+            aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text
+          }
+
+          STRIPE_JSON=$(read_secret "ai-ec-platform/prod/app-credentials/stripe")
+          echo "$STRIPE_JSON" | jq -e '
+            (.secretKey | type == "string" and startswith("sk_live_")) and
+            (.priceId | type == "string" and length > 0) and
+            (.webhookSigningSecret | type == "string" and startswith("whsec_"))
+          ' >/dev/null || {
+            echo "::error::Production Stripe credentials are incomplete or not live-mode."
+            exit 1
+          }
+
+          BASE_JSON=$(read_secret "ai-ec-platform/prod/app-credentials/base")
+          echo "$BASE_JSON" | jq -e '
+            (.clientId | type == "string" and length > 0) and
+            (.clientSecret | type == "string" and length > 0)
+          ' >/dev/null || {
+            echo "::error::Production BASE OAuth app credentials are incomplete."
+            exit 1
+          }
+
+          EBAY_JSON=$(read_secret "ai-ec-platform/prod/app-credentials/ebay")
+          echo "$EBAY_JSON" | jq -e '
+            (.clientId | type == "string" and length > 0) and
+            (.clientSecret | type == "string" and length > 0) and
+            (.ruName | type == "string" and length > 0)
+          ' >/dev/null || {
+            echo "::error::Production eBay OAuth app credentials are incomplete."
+            exit 1
+          }
+
+          # Public signup and billing notices require SES production access and a verified
+          # sender identity. Support either an exact email identity or its domain identity.
+          PROD_ACCESS=$(aws sesv2 get-account --query ProductionAccessEnabled --output text)
+          if [ "$PROD_ACCESS" != "True" ] && [ "$PROD_ACCESS" != "true" ]; then
+            echo "::error::Amazon SES is still in sandbox / production access is disabled."
+            exit 1
+          fi
+
+          verify_identity() {
+            aws sesv2 get-email-identity --email-identity "$1"               --query 'VerifiedForSendingStatus' --output text 2>/dev/null || true
+          }
+          VERIFIED=$(verify_identity "$SES_FROM_EMAIL")
+          if [ "$VERIFIED" != "True" ] && [ "$VERIFIED" != "true" ]; then
+            DOMAIN="${SES_FROM_EMAIL#*@}"
+            VERIFIED=$(verify_identity "$DOMAIN")
+          fi
+          if [ "$VERIFIED" != "True" ] && [ "$VERIFIED" != "true" ]; then
+            echo "::error::SES_FROM_EMAIL (or its domain) is not verified for sending."
+            exit 1
+          fi
+
+          echo "Production public-SaaS configuration preflight passed."
 
       - name: Refresh GitHub OIDC deploy role
         working-directory: infra
