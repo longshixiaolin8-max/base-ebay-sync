@@ -299,8 +299,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const invoices = invoicesRes.data.map((inv) => ({
         id: inv.id,
         // Stripe's own human-facing invoice number (e.g. "INV-202404"), distinct from the
-        // internal `id` above -- not previously returned, additive only.
+        // internal `id` above.
         number: inv.number ?? null,
+        // Stripe amounts are minor units, but currencies such as JPY are zero-decimal.
+        // Return the currency explicitly so the UI never assumes "cents == USD".
+        amountMinorUnits: inv.amount_paid,
+        currency: inv.currency,
+        // Backward-compatible alias for older admin clients. New UI ignores this field.
         amountUsdCents: inv.amount_paid,
         createdAt: new Date(inv.created * 1000).toISOString(),
         status: inv.status,
