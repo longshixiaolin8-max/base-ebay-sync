@@ -36,10 +36,9 @@ export interface LambdaStackProps extends cdk.StackProps {
   /** Only actually read (as CLOUDFRONT_SHARED_SECRET) when config.apiEntrypoint is
    *  "cloudfront" -- see requireCloudFrontOrigin in services/lambdas/shared/src. */
   cloudFrontSharedSecret: secretsmanager.Secret;
-  /** Scoped Cognito identifiers used by the public verified-signup saga. */
+  /** Scoped Cognito identifiers used after our own SES OTP has verified email ownership. */
   userPoolArn: string;
   userPoolId: string;
-  userPoolClientId: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
@@ -380,24 +379,35 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
-    // Public SaaS acquisition: native Cognito SignUp sends/verifies the email code before
-    // Stripe Checkout is created. AdminGetUser reads the tenant claim after confirmation.
+    // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
+    // email ownership first, then and only then do we create the Cognito identity + tenant.
     this.signupHandlerFn = makeFn(
       "SignupHandler",
       "services/lambdas/signup/src/handler.ts",
       "handler",
       {
         COGNITO_USER_POOL_ID: props.userPoolId,
-        COGNITO_USER_POOL_CLIENT_ID: props.userPoolClientId,
         ADMIN_APP_URL: props.adminAppUrl,
+        ...(props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {}),
       },
       cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
+    props.appCredentialSecrets.signup.grantRead(this.signupHandlerFn);
     this.signupHandlerFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["cognito-idp:AdminGetUser"],
+        actions: [
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminSetUserPassword",
+          "cognito-idp:AdminDeleteUser",
+        ],
         resources: [props.userPoolArn],
+      }),
+    );
+    this.signupHandlerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
       }),
     );
 
