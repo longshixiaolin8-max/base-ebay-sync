@@ -91,7 +91,7 @@ function validSignupPassword(password: string): boolean {
 }
 
 async function otpPepper(): Promise<string> {
-  const creds = await getAppCredentials<SignupCredentials>("signup");
+  const creds = await getAppCredentials<SignupCredentials>("signup-otp");
   if (!creds.otpPepper || creds.otpPepper.length < 24) {
     throw new Error("signup otpPepper is not configured");
   }
