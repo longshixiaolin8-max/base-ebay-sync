@@ -134,6 +134,13 @@
       "when": 1790837563441,
       "tag": "0018_high_sage",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791020444980,
+      "tag": "0019_last_ben_grimm",
+      "breakpoints": true
     }
   ]
 }
