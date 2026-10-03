@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 class UsernameExistsExceptionFake extends Error {}
 class NotAuthorizedExceptionFake extends Error {}
 
+let cognitoUserStatus = "CONFIRMED";
 const cognitoSendMock = vi.fn();
 vi.mock("@aws-sdk/client-cognito-identity-provider", () => ({
   CognitoIdentityProviderClient: vi.fn().mockImplementation(() => ({ send: cognitoSendMock })),
@@ -10,7 +11,6 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => ({
   ConfirmSignUpCommand: vi.fn((input: unknown) => ({ kind: "ConfirmSignUp", input })),
   ResendConfirmationCodeCommand: vi.fn((input: unknown) => ({ kind: "ResendConfirmationCode", input })),
   AdminGetUserCommand: vi.fn((input: unknown) => ({ kind: "AdminGetUser", input })),
-  AdminDeleteUserCommand: vi.fn((input: unknown) => ({ kind: "AdminDeleteUser", input })),
   UsernameExistsException: UsernameExistsExceptionFake,
   NotAuthorizedException: NotAuthorizedExceptionFake,
 }));
@@ -70,34 +70,40 @@ function commandKind(callIndex: number): string {
   return cognitoSendMock.mock.calls[callIndex]?.[0]?.kind;
 }
 
+const pendingBilling = {
+  plan: "standard",
+  status: "pending_payment",
+  stripeCustomerId: null,
+  stripeSubscriptionId: null,
+  name: "Acme",
+  gracePeriodEndsAt: null,
+  lastBillingEventAt: null,
+};
+
 describe("public signup", () => {
   beforeEach(() => {
     process.env.PLATFORM_ENV = "dev";
+    cognitoUserStatus = "CONFIRMED";
     cognitoSendMock.mockReset();
     cognitoSendMock.mockImplementation(async (command: { kind: string }) => {
       if (command.kind === "AdminGetUser") {
         return {
-          UserStatus: "CONFIRMED",
+          UserStatus: cognitoUserStatus,
           UserAttributes: [{ Name: "custom:tenant_id", Value: "tenant-new" }],
         };
       }
       return {};
     });
+
     createPendingTenantMock.mockReset();
-    createPendingTenantMock.mockImplementation(async (_db: unknown, _name: string, options: { id: string }) => ({ id: options.id }));
+    createPendingTenantMock.mockResolvedValue({ id: "tenant-new" });
     deletePendingTenantMock.mockReset();
+    deletePendingTenantMock.mockResolvedValue(undefined);
     getTenantBillingStatusMock.mockReset();
-    getTenantBillingStatusMock.mockResolvedValue({
-      plan: "standard",
-      status: "pending_payment",
-      stripeCustomerId: null,
-      stripeSubscriptionId: null,
-      name: "Acme",
-      gracePeriodEndsAt: null,
-      lastBillingEventAt: null,
-    });
     setPendingTenantStripeCustomerIdMock.mockReset();
     recordAuditLogMock.mockReset();
+    recordAuditLogMock.mockResolvedValue(undefined);
+
     getAppCredentialsMock.mockReset();
     getAppCredentialsMock.mockResolvedValue({
       secretKey: "sk_test_123",
@@ -105,6 +111,7 @@ describe("public signup", () => {
       priceId: "price_1",
       webhookSigningSecret: "whsec_1",
     });
+
     customersCreateMock.mockReset();
     customersCreateMock.mockResolvedValue({ id: "cus_new" });
     checkoutSessionsCreateMock.mockReset();
@@ -129,7 +136,7 @@ describe("public signup", () => {
     expect(cognitoSendMock).not.toHaveBeenCalled();
   });
 
-  it("starts native Cognito signup, creates the matching pending tenant, and records consent", async () => {
+  it("starts Cognito verification without creating Aurora or Stripe data", async () => {
     const res = await callHandler({
       action: "start",
       companyName: "Acme",
@@ -147,28 +154,54 @@ describe("public signup", () => {
       Username: "a@example.com",
       Password: "Password!123",
     });
-    const tenantAttr = signUpInput.UserAttributes.find((a: { Name: string }) => a.Name === "custom:tenant_id");
-    expect(tenantAttr?.Value).toBeTruthy();
     expect(signUpInput.UserAttributes).toContainEqual({ Name: "name", Value: "Yamada Taro" });
-
-    expect(createPendingTenantMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "Acme",
-      expect.objectContaining({ id: tenantAttr.Value, contactEmail: "a@example.com" }),
-    );
-    expect(recordAuditLogMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tenantId: tenantAttr.Value,
-        action: "terms_accepted",
-        after: { termsVersion: "2026-10-03", privacyVersion: "2026-10-03" },
-      }),
-    );
+    expect(signUpInput.UserAttributes.find((a: { Name: string }) => a.Name === "custom:tenant_id")?.Value).toBeTruthy();
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
+    expect(customersCreateMock).not.toHaveBeenCalled();
+    expect(recordAuditLogMock).not.toHaveBeenCalled();
     expect(JSON.parse(res.body!)).toEqual({ confirmationRequired: true, email: "a@example.com" });
   });
 
-  it("does not create a DB tenant when Cognito says the email already exists", async () => {
-    cognitoSendMock.mockRejectedValueOnce(new UsernameExistsExceptionFake("exists"));
+  it("recovers an unconfirmed duplicate signup by resending the verification code", async () => {
+    cognitoUserStatus = "UNCONFIRMED";
+    cognitoSendMock.mockImplementation(async (command: { kind: string }) => {
+      if (command.kind === "SignUp") throw new UsernameExistsExceptionFake("exists");
+      if (command.kind === "AdminGetUser") {
+        return {
+          UserStatus: "UNCONFIRMED",
+          UserAttributes: [{ Name: "custom:tenant_id", Value: "tenant-new" }],
+        };
+      }
+      return {};
+    });
+
+    const res = await callHandler({
+      action: "start",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      acceptedTerms: true,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(commandKind(0)).toBe("SignUp");
+    expect(commandKind(1)).toBe("AdminGetUser");
+    expect(commandKind(2)).toBe("ResendConfirmationCode");
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
+    expect(JSON.parse(res.body!)).toMatchObject({ confirmationRequired: true, resumed: true });
+  });
+
+  it("returns 409 for an already-confirmed account", async () => {
+    cognitoSendMock.mockImplementation(async (command: { kind: string }) => {
+      if (command.kind === "SignUp") throw new UsernameExistsExceptionFake("exists");
+      if (command.kind === "AdminGetUser") {
+        return {
+          UserStatus: "CONFIRMED",
+          UserAttributes: [{ Name: "custom:tenant_id", Value: "tenant-new" }],
+        };
+      }
+      return {};
+    });
 
     const res = await callHandler({
       action: "start",
@@ -182,33 +215,38 @@ describe("public signup", () => {
     expect(createPendingTenantMock).not.toHaveBeenCalled();
   });
 
-  it("compensates Cognito if tenant creation fails", async () => {
-    createPendingTenantMock.mockRejectedValueOnce(new Error("db down"));
+  it("creates the tenant only after email confirmation, records consent, then creates Checkout", async () => {
+    getTenantBillingStatusMock
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(pendingBilling);
 
-    const res = await callHandler({
-      action: "start",
-      companyName: "Acme",
-      email: "a@example.com",
-      password: "Password!123",
-      acceptedTerms: true,
-    });
-
-    expect(res.statusCode).toBe(500);
-    expect(commandKind(0)).toBe("SignUp");
-    expect(commandKind(1)).toBe("AdminDeleteUser");
-    expect(deletePendingTenantMock).toHaveBeenCalled();
-  });
-
-  it("confirms the email, reuses tenant claim, and creates Stripe checkout", async () => {
     const res = await callHandler({
       action: "confirm",
+      companyName: "Acme",
       email: "a@example.com",
       confirmationCode: "123456",
+      acceptedTerms: true,
     });
 
     expect(commandKind(0)).toBe("ConfirmSignUp");
     expect(commandKind(1)).toBe("AdminGetUser");
-    expect(customersCreateMock).toHaveBeenCalledWith({ email: "a@example.com", metadata: { tenantId: "tenant-new" } });
+    expect(createPendingTenantMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "Acme",
+      { id: "tenant-new", contactEmail: "a@example.com" },
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tenantId: "tenant-new",
+        action: "terms_accepted",
+        after: { termsVersion: "2026-10-03", privacyVersion: "2026-10-03" },
+      }),
+    );
+    expect(customersCreateMock).toHaveBeenCalledWith({
+      email: "a@example.com",
+      metadata: { tenantId: "tenant-new" },
+    });
     expect(setPendingTenantStripeCustomerIdMock).toHaveBeenCalledWith(expect.anything(), "tenant-new", "cus_new");
     expect(checkoutSessionsCreateMock).toHaveBeenCalledWith({
       mode: "subscription",
@@ -220,24 +258,55 @@ describe("public signup", () => {
       subscription_data: { trial_period_days: 30 },
     });
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body!)).toEqual({ checkoutUrl: "https://checkout.stripe.example/session" });
   });
 
-  it("reuses an already-created Stripe customer on confirmation retry", async () => {
-    getTenantBillingStatusMock.mockResolvedValueOnce({
-      plan: "standard",
-      status: "pending_payment",
-      stripeCustomerId: "cus_existing",
-      stripeSubscriptionId: null,
-      name: "Acme",
-      gracePeriodEndsAt: null,
-      lastBillingEventAt: null,
+  it("rolls back an unpaid tenant if consent audit persistence fails", async () => {
+    getTenantBillingStatusMock.mockResolvedValueOnce(undefined);
+    recordAuditLogMock.mockRejectedValueOnce(new Error("audit db error"));
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      confirmationCode: "123456",
+      acceptedTerms: true,
     });
 
-    await callHandler({ action: "confirm", email: "a@example.com", confirmationCode: "123456" });
-
+    expect(res.statusCode).toBe(500);
+    expect(deletePendingTenantMock).toHaveBeenCalledWith(expect.anything(), "tenant-new");
     expect(customersCreateMock).not.toHaveBeenCalled();
-    expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ customer: "cus_existing" }));
+  });
+
+  it("can recreate Checkout after confirmation already happened", async () => {
+    cognitoSendMock.mockImplementation(async (command: { kind: string }) => {
+      if (command.kind === "ConfirmSignUp") throw new NotAuthorizedExceptionFake("already confirmed");
+      if (command.kind === "AdminGetUser") {
+        return {
+          UserStatus: "CONFIRMED",
+          UserAttributes: [{ Name: "custom:tenant_id", Value: "tenant-new" }],
+        };
+      }
+      return {};
+    });
+    getTenantBillingStatusMock.mockResolvedValue({
+      ...pendingBilling,
+      stripeCustomerId: "cus_existing",
+    });
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
+    expect(customersCreateMock).not.toHaveBeenCalled();
+    expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ customer: "cus_existing" }),
+    );
   });
 
   it("supports resending the Cognito verification code", async () => {
