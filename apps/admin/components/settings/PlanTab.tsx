@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
-import { planLabel } from "@/lib/format";
+import { formatStripeAmount, planLabel } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -27,13 +27,8 @@ const STATUS_MESSAGE: Record<BillingStatus["status"], string | null> = {
 };
 
 function formatPrice(amount: number, currency: string, interval: string | null): string {
-  const major = amount / 100;
-  const formatted = new Intl.NumberFormat("ja-JP", { style: "currency", currency: currency.toUpperCase() }).format(major);
+  const formatted = formatStripeAmount(amount, currency);
   return interval ? `${formatted} / ${interval === "month" ? "月" : interval === "year" ? "年" : interval}` : formatted;
-}
-
-function usdFromCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function UsageRow({ label, used, limit }: { label: string; used: number; limit: number }) {
@@ -326,7 +321,7 @@ export default function PlanTab() {
                   <tr key={inv.id}>
                     <td>{inv.number ?? inv.id}</td>
                     <td>{new Date(inv.createdAt).toLocaleDateString("ja-JP")}</td>
-                    <td>{usdFromCents(inv.amountUsdCents)}</td>
+                    <td>{formatStripeAmount(inv.amountMinorUnits, inv.currency)}</td>
                     <td>
                       <Badge tone={inv.status === "paid" ? "ok" : "neutral"}>{inv.status ?? "—"}</Badge>
                     </td>
