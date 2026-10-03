@@ -17,14 +17,12 @@ jobs:
         with:
           ref: codex/public-saas-readiness-20261003
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10.34.0
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "pnpm"
+
+      - name: Install pnpm 10
+        run: npm install --global pnpm@10.34.0
 
       - name: Upgrade security-sensitive dependencies
         run: |
