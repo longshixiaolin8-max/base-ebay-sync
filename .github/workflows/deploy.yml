@@ -39,6 +39,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      API_ENTRYPOINT: ${{ vars.API_ENTRYPOINT }}
     # GitHub Environment protection rules (configured in repo Settings > Environments)
     # gate this job: "prod" requires a human reviewer's approval before the job runs at
     # all, satisfying "本番デプロイは人間承認必須". "dev" has no required reviewers.
@@ -122,6 +124,7 @@ jobs:
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           else
@@ -131,9 +134,31 @@ jobs:
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           fi
+
+      - name: Resolve public API URL
+        run: |
+          set -euo pipefail
+          if [ "${API_ENTRYPOINT:-direct}" = "cloudfront" ]; then
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-CloudFrontApi" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+              --output text)
+          else
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+              --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+              --output text)
+          fi
+          if [ -z "$PUBLIC_API_URL" ] || [ "$PUBLIC_API_URL" = "None" ]; then
+            echo "::error::Could not resolve the selected public API URL."
+            exit 1
+          fi
+          echo "PUBLIC_API_URL=$PUBLIC_API_URL" >> "$GITHUB_ENV"
+          echo "Using public API entry point: ${API_ENTRYPOINT:-direct}"
 
       # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
       # easy-to-forget post-deploy step (see README's old bootstrap notes) -- a new Lambda
@@ -187,11 +212,7 @@ jobs:
         working-directory: infra
         run: |
           set -euo pipefail
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${API_URL}/webhooks/ebay/notifications")
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${PUBLIC_API_URL}/webhooks/ebay/notifications")
           echo "GET /webhooks/ebay/notifications (no challenge_code) -> HTTP $STATUS"
           if [ "$STATUS" != "400" ]; then
             echo "::error::Smoke test failed: expected HTTP 400, got $STATUS. The API may not be responding correctly post-deploy."
@@ -203,11 +224,7 @@ jobs:
         working-directory: infra
         run: |
           set -euo pipefail
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
-          HTTP_CODE=$(curl -sS --max-time 20 -o /tmp/public-pricing.json -w "%{http_code}" "${API_URL}/public/pricing")
+          HTTP_CODE=$(curl -sS --max-time 20 -o /tmp/public-pricing.json -w "%{http_code}" "${PUBLIC_API_URL}/public/pricing")
           cat /tmp/public-pricing.json
           echo ""
           if [ "$HTTP_CODE" != "200" ]; then
@@ -227,10 +244,6 @@ jobs:
           NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
         run: |
           set -euo pipefail
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
           USER_POOL_ID=$(aws cloudformation describe-stacks \
             --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
             --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
@@ -239,10 +252,10 @@ jobs:
             --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
             --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
             --output text)
-          test -n "$API_URL" && test "$API_URL" != "None"
+          test -n "$PUBLIC_API_URL" && test "$PUBLIC_API_URL" != "None"
           test -n "$USER_POOL_ID" && test "$USER_POOL_ID" != "None"
           test -n "$USER_POOL_CLIENT_ID" && test "$USER_POOL_CLIENT_ID" != "None"
-          NEXT_PUBLIC_API_BASE_URL="$API_URL" \
+          NEXT_PUBLIC_API_BASE_URL="$PUBLIC_API_URL" \
           NEXT_PUBLIC_COGNITO_USER_POOL_ID="$USER_POOL_ID" \
           NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID="$USER_POOL_CLIENT_ID" \
           pnpm --filter @ai-ec/admin build
