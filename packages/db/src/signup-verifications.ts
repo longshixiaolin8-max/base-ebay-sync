@@ -81,6 +81,13 @@ export async function claimSignupVerification(
   return rows.length === 1;
 }
 
+export async function deleteExpiredSignupVerifications(
+  db: Database,
+  before = new Date(),
+): Promise<void> {
+  await db.delete(signupVerifications).where(lt(signupVerifications.expiresAt, before));
+}
+
 export async function deleteSignupVerification(db: Database, email: string): Promise<void> {
   await db.delete(signupVerifications).where(eq(signupVerifications.email, email));
 }
