@@ -1,18 +1,20 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import {
-  AdminGetUserCommand,
+  AdminCreateUserCommand,
+  AdminDeleteUserCommand,
+  AdminSetUserPasswordCommand,
   CognitoIdentityProviderClient,
-  ConfirmSignUpCommand,
-  NotAuthorizedException,
-  ResendConfirmationCodeCommand,
-  SignUpCommand,
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
 import {
+  claimSignupVerification,
   createPendingTenant,
   deletePendingTenant,
-  getTenantBillingStatus,
+  deleteSignupVerification,
+  getSignupVerification,
+  incrementSignupVerificationAttempt,
   setPendingTenantStripeCustomerId,
+  upsertSignupVerification,
 } from "@ai-ec/db";
 import {
   createStripeClient,
@@ -21,9 +23,14 @@ import {
   recordAuditLog,
   requireCloudFrontOrigin,
   requireEnv,
+  sendEmail,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
+
+interface SignupCredentials {
+  otpPepper?: string;
+}
 
 interface SignupRequestBody {
   action?: "start" | "confirm" | "resend";
@@ -35,19 +42,25 @@ interface SignupRequestBody {
   acceptedTerms?: boolean;
 }
 
-interface CognitoSignupState {
-  status: string | undefined;
-  tenantId: string | null;
-}
-
-function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
-  return { statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+function json(
+  statusCode: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>,
+): APIGatewayProxyResultV2 {
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json", ...extraHeaders },
+    body: JSON.stringify(body),
+  };
 }
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 const FREE_TRIAL_DAYS = 30;
 const TERMS_VERSION = "2026-10-03";
 const PRIVACY_VERSION = "2026-10-03";
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
 
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
@@ -61,146 +74,243 @@ function assertLiveBillingInProd(creds: StripeAppCredentials): APIGatewayProxyRe
   return null;
 }
 
-async function getCognitoSignupState(email: string): Promise<CognitoSignupState> {
-  const user = await cognitoClient.send(
-    new AdminGetUserCommand({ UserPoolId: requireEnv("COGNITO_USER_POOL_ID"), Username: email }),
+function validSignupPassword(password: string): boolean {
+  return (
+    password.length >= 12 &&
+    /[a-z]/.test(password) &&
+    /[A-Z]/.test(password) &&
+    /[0-9]/.test(password) &&
+    /[^A-Za-z0-9]/.test(password)
   );
-  return {
-    status: user.UserStatus,
-    tenantId: user.UserAttributes?.find((attr) => attr.Name === "custom:tenant_id")?.Value ?? null,
-  };
 }
 
-async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
-  const companyName = body.companyName?.trim();
-  const name = body.name?.trim();
-  const password = body.password;
-  const email = body.email ? normalizeEmail(body.email) : "";
+async function otpPepper(): Promise<string> {
+  const creds = await getAppCredentials<SignupCredentials>("signup");
+  if (!creds.otpPepper || creds.otpPepper.length < 24) {
+    throw new Error("signup otpPepper is not configured");
+  }
+  return creds.otpPepper;
+}
 
-  if (!companyName || !email || !password || body.acceptedTerms !== true) {
-    return json(400, { error: "missing_fields_or_terms" });
+function hashOtp(email: string, code: string, pepper: string): string {
+  return createHmac("sha256", pepper).update(`${email}:${code}`).digest("hex");
+}
+
+function hashesEqual(left: string, right: string): boolean {
+  try {
+    const a = Buffer.from(left, "hex");
+    const b = Buffer.from(right, "hex");
+    return a.length === b.length && timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+async function issueVerificationCode(email: string): Promise<APIGatewayProxyResultV2> {
+  const db = getDb();
+  const now = new Date();
+  const existing = await getSignupVerification(db, email);
+  if (existing && existing.resendAvailableAt.getTime() > now.getTime()) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil((existing.resendAvailableAt.getTime() - now.getTime()) / 1000),
+    );
+    return json(
+      429,
+      { error: "verification_rate_limited", retryAfterSeconds },
+      { "Retry-After": String(retryAfterSeconds) },
+    );
   }
 
-  // The tenant id is reserved inside Cognito first but NO Aurora row or Stripe Customer is
-  // created until the email code is actually confirmed. That prevents arbitrary public
-  // requests from filling the commercial DB/Stripe account with unverified signups.
-  const tenantId = randomUUID();
-  const clientId = requireEnv("COGNITO_USER_POOL_CLIENT_ID");
+  const code = String(randomInt(100000, 1_000_000));
+  const pepper = await otpPepper();
+  await upsertSignupVerification(db, {
+    email,
+    codeHash: hashOtp(email, code, pepper),
+    expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+    resendAvailableAt: new Date(now.getTime() + OTP_RESEND_COOLDOWN_MS),
+  });
 
   try {
-    await cognitoClient.send(
-      new SignUpCommand({
-        ClientId: clientId,
-        Username: email,
-        Password: password,
-        UserAttributes: [
-          { Name: "email", Value: email },
-          { Name: "custom:tenant_id", Value: tenantId },
-          ...(name ? [{ Name: "name", Value: name }] : []),
-        ],
-      }),
-    );
+    await sendEmail({
+      to: email,
+      subject: "BASE eBay Sync メール確認コード",
+      bodyText: [
+        "BASE eBay Sync の新規登録確認コードです。",
+        "",
+        `確認コード: ${code}`,
+        "",
+        "このコードは10分間有効です。",
+        "心当たりがない場合は、このメールを無視してください。",
+      ].join("\n"),
+    });
   } catch (err) {
-    if (!(err instanceof UsernameExistsException)) throw err;
-
-    // Recover a browser refresh during email verification. If this address is still
-    // UNCONFIRMED, re-send the code and continue instead of stranding the user behind a
-    // duplicate-email error. A confirmed account must sign in instead.
-    const existing = await getCognitoSignupState(email);
-    if (existing.status !== "UNCONFIRMED") {
-      return json(409, { error: "already_registered" });
-    }
-    await cognitoClient.send(new ResendConfirmationCodeCommand({ ClientId: clientId, Username: email }));
-    return json(200, { confirmationRequired: true, email, resumed: true });
+    await deleteSignupVerification(db, email).catch(() => {});
+    console.error("signup: SES verification email failed", (err as Error).message);
+    return json(503, { error: "verification_email_unavailable" });
   }
 
   return json(200, { confirmationRequired: true, email });
 }
 
+async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
+  const companyName = body.companyName?.trim();
+  const email = body.email ? normalizeEmail(body.email) : "";
+  const password = body.password ?? "";
+
+  if (!companyName || !email || !validSignupPassword(password) || body.acceptedTerms !== true) {
+    return json(400, { error: "missing_fields_or_terms" });
+  }
+
+  // No tenant, Cognito identity, Stripe Customer, or password is persisted before email
+  // ownership is proven. This keeps arbitrary anonymous traffic out of all durable
+  // commercial/customer stores.
+  return issueVerificationCode(email);
+}
+
 async function resendConfirmation(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
   const email = body.email ? normalizeEmail(body.email) : "";
   if (!email) return json(400, { error: "email_required" });
-  await cognitoClient.send(
-    new ResendConfirmationCodeCommand({ ClientId: requireEnv("COGNITO_USER_POOL_CLIENT_ID"), Username: email }),
-  );
-  return json(200, { resent: true });
+  const response = await issueVerificationCode(email);
+  if (response.statusCode === 200) {
+    return json(200, { resent: true, email });
+  }
+  return response;
 }
 
 async function confirmSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
   const companyName = body.companyName?.trim();
+  const name = body.name?.trim();
   const email = body.email ? normalizeEmail(body.email) : "";
-  const code = body.confirmationCode?.trim();
-  if (!companyName || !email || !code || body.acceptedTerms !== true) {
+  const password = body.password ?? "";
+  const code = body.confirmationCode?.trim() ?? "";
+
+  if (
+    !companyName ||
+    !email ||
+    !/^\d{6}$/.test(code) ||
+    !validSignupPassword(password) ||
+    body.acceptedTerms !== true
+  ) {
     return json(400, { error: "confirmation_required" });
   }
 
-  const clientId = requireEnv("COGNITO_USER_POOL_CLIENT_ID");
+  const db = getDb();
+  const verification = await getSignupVerification(db, email);
+  if (!verification) return json(400, { error: "confirmation_invalid_or_expired" });
+
+  const now = new Date();
+  if (verification.expiresAt.getTime() <= now.getTime()) {
+    await deleteSignupVerification(db, email);
+    return json(400, { error: "confirmation_invalid_or_expired" });
+  }
+  if (verification.attempts >= OTP_MAX_ATTEMPTS) {
+    return json(429, { error: "confirmation_locked" });
+  }
+
+  const expectedHash = hashOtp(email, code, await otpPepper());
+  if (!hashesEqual(expectedHash, verification.codeHash)) {
+    await incrementSignupVerificationAttempt(db, email);
+    const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - verification.attempts - 1);
+    return json(400, { error: "confirmation_invalid_or_expired", remainingAttempts });
+  }
+
+  const claimed = await claimSignupVerification(db, {
+    email,
+    codeHash: expectedHash,
+    now,
+    maxAttempts: OTP_MAX_ATTEMPTS,
+  });
+  if (!claimed) return json(409, { error: "confirmation_already_used" });
+
+  const tenantId = randomUUID();
+  const userPoolId = requireEnv("COGNITO_USER_POOL_ID");
+  let cognitoUserCreated = false;
 
   try {
     await cognitoClient.send(
-      new ConfirmSignUpCommand({ ClientId: clientId, Username: email, ConfirmationCode: code }),
+      new AdminCreateUserCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        UserAttributes: [
+          { Name: "email", Value: email },
+          // This flag is safe here because the address was just verified by our own SES OTP.
+          { Name: "email_verified", Value: "true" },
+          { Name: "custom:tenant_id", Value: tenantId },
+          ...(name ? [{ Name: "name", Value: name }] : []),
+        ],
+        TemporaryPassword: password,
+        MessageAction: "SUPPRESS",
+      }),
+    );
+    cognitoUserCreated = true;
+    await cognitoClient.send(
+      new AdminSetUserPasswordCommand({
+        UserPoolId: userPoolId,
+        Username: email,
+        Password: password,
+        Permanent: true,
+      }),
     );
   } catch (err) {
-    // Re-running confirmation after the first confirmation already succeeded is intentional:
-    // it lets an interrupted Stripe redirect be recreated without a support ticket.
-    if (!(err instanceof NotAuthorizedException)) throw err;
-    const state = await getCognitoSignupState(email);
-    if (state.status !== "CONFIRMED") throw err;
-  }
-
-  const state = await getCognitoSignupState(email);
-  if (state.status !== "CONFIRMED" || !state.tenantId) {
-    return json(409, { error: "signup_state_missing" });
-  }
-  const tenantId = state.tenantId;
-  const db = getDb();
-
-  let billing = await getTenantBillingStatus(db, tenantId);
-  if (!billing) {
-    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email });
-    try {
-      await recordAuditLog(db, {
-        tenantId,
-        actor: `signup:${email}`,
-        action: "terms_accepted",
-        entityType: "tenant",
-        entityId: tenantId,
-        after: { termsVersion: TERMS_VERSION, privacyVersion: PRIVACY_VERSION },
-      });
-    } catch (err) {
-      // Keep the confirmed Cognito identity, but roll back the unpaid tenant so the same
-      // confirmation request can cleanly retry if audit persistence had a transient error.
-      await deletePendingTenant(db, tenantId).catch(() => {});
-      throw err;
+    if (cognitoUserCreated) {
+      await cognitoClient
+        .send(new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: email }))
+        .catch(() => {});
     }
-    billing = await getTenantBillingStatus(db, tenantId);
+    if (err instanceof UsernameExistsException) {
+      return json(409, { error: "already_registered" });
+    }
+    throw err;
   }
-  if (!billing) return json(409, { error: "signup_state_missing" });
+
+  try {
+    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email });
+    await recordAuditLog(db, {
+      tenantId,
+      actor: `signup:${email}`,
+      action: "terms_accepted",
+      entityType: "tenant",
+      entityId: tenantId,
+      after: { termsVersion: TERMS_VERSION, privacyVersion: PRIVACY_VERSION },
+    });
+  } catch (err) {
+    await deletePendingTenant(db, tenantId).catch(() => {});
+    await cognitoClient
+      .send(new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: email }))
+      .catch(() => {});
+    throw err;
+  }
 
   const stripeCreds = await getAppCredentials<StripeAppCredentials>("stripe");
   const liveBillingError = assertLiveBillingInProd(stripeCreds);
-  if (liveBillingError) return liveBillingError;
-
-  const stripe = createStripeClient(stripeCreds);
-  let customerId = billing.stripeCustomerId;
-  if (!customerId) {
-    const customer = await stripe.customers.create({ email, metadata: { tenantId } });
-    customerId = customer.id;
-    await setPendingTenantStripeCustomerId(db, tenantId, customerId);
+  if (liveBillingError) {
+    return json(503, { error: "billing_not_live", accountCreated: true });
   }
 
-  const adminAppUrl = requireEnv("ADMIN_APP_URL");
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: customerId,
-    line_items: [{ price: stripeCreds.priceId, quantity: 1 }],
-    success_url: `${adminAppUrl}/login?checkout=success`,
-    cancel_url: `${adminAppUrl}/signup?checkout=cancelled`,
-    metadata: { tenantId },
-    subscription_data: { trial_period_days: FREE_TRIAL_DAYS },
-  });
+  try {
+    const stripe = createStripeClient(stripeCreds);
+    const customer = await stripe.customers.create({ email, metadata: { tenantId } });
+    await setPendingTenantStripeCustomerId(db, tenantId, customer.id);
 
-  return json(200, { checkoutUrl: session.url });
+    const adminAppUrl = requireEnv("ADMIN_APP_URL");
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customer.id,
+      line_items: [{ price: stripeCreds.priceId, quantity: 1 }],
+      success_url: `${adminAppUrl}/login?checkout=success`,
+      cancel_url: `${adminAppUrl}/login?signup=pending-payment`,
+      metadata: { tenantId },
+      subscription_data: { trial_period_days: FREE_TRIAL_DAYS },
+    });
+
+    return json(200, { checkoutUrl: session.url });
+  } catch (err) {
+    // The verified account remains intentionally usable so the operator can sign in and
+    // resume payment setup through POST /admin/billing/checkout-session.
+    console.error("signup: Stripe checkout creation failed after account creation", (err as Error).message);
+    return json(503, { error: "checkout_unavailable", accountCreated: true });
+  }
 }
 
 async function publicPricing(): Promise<APIGatewayProxyResultV2> {
@@ -224,11 +334,11 @@ async function publicPricing(): Promise<APIGatewayProxyResultV2> {
 }
 
 /**
- * Public acquisition endpoint.
- * GET /public/pricing exposes only Stripe's non-secret price metadata.
- * POST /signup action=start sends Cognito's ownership-verification code without writing to
- * Aurora/Stripe. action=confirm verifies ownership, creates the pending tenant, then creates
- * or reuses the Stripe Customer and redirects to Checkout. action=resend re-sends the code.
+ * Public acquisition endpoint. Cognito self-signup is deliberately disabled.
+ *
+ * start/resend: issue a short-lived SES OTP and persist only its HMAC.
+ * confirm: atomically consumes the valid OTP, then creates Cognito + tenant + Stripe.
+ * GET /public/pricing: returns non-secret Stripe recurring-price metadata.
  */
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const cloudFrontRejection = requireCloudFrontOrigin(event);
