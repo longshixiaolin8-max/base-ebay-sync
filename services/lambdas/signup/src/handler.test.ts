@@ -14,6 +14,7 @@ vi.mock("@aws-sdk/client-cognito-identity-provider", () => ({
 
 const claimSignupVerificationMock = vi.fn();
 const createPendingTenantMock = vi.fn();
+const deleteExpiredSignupVerificationsMock = vi.fn();
 const deletePendingTenantMock = vi.fn();
 const deleteSignupVerificationMock = vi.fn();
 const getSignupVerificationMock = vi.fn();
@@ -23,6 +24,7 @@ const upsertSignupVerificationMock = vi.fn();
 vi.mock("@ai-ec/db", () => ({
   claimSignupVerification: (...args: unknown[]) => claimSignupVerificationMock(...args),
   createPendingTenant: (...args: unknown[]) => createPendingTenantMock(...args),
+  deleteExpiredSignupVerifications: (...args: unknown[]) => deleteExpiredSignupVerificationsMock(...args),
   deletePendingTenant: (...args: unknown[]) => deletePendingTenantMock(...args),
   deleteSignupVerification: (...args: unknown[]) => deleteSignupVerificationMock(...args),
   getSignupVerification: (...args: unknown[]) => getSignupVerificationMock(...args),
@@ -105,6 +107,8 @@ describe("public signup", () => {
     claimSignupVerificationMock.mockResolvedValue(true);
     createPendingTenantMock.mockReset();
     createPendingTenantMock.mockImplementation(async (_db: unknown, _name: string, options: { id: string }) => ({ id: options.id }));
+    deleteExpiredSignupVerificationsMock.mockReset();
+    deleteExpiredSignupVerificationsMock.mockResolvedValue(undefined);
     deletePendingTenantMock.mockReset();
     deletePendingTenantMock.mockResolvedValue(undefined);
     deleteSignupVerificationMock.mockReset();
