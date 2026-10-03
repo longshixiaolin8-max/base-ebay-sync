@@ -167,15 +167,12 @@ export class ApiStack extends cdk.Stack {
       };
     }
 
-    // Public: this is what creates a Cognito session in the first place, so no session can
-    // exist yet. Gated instead by a shared invite code checked inside the handler.
-    addRoute(
-      "Signup",
-      apigwv2.HttpMethod.POST,
-      "/signup",
-      new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn),
-      false,
-    );
+    // Public acquisition endpoints. POST /signup uses Cognito's native verification
+    // code flow before Stripe Checkout; GET /public/pricing returns only non-secret Stripe
+    // price metadata so the landing/signup UI never hardcodes a price that can drift.
+    const signupIntegration = new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn);
+    addRoute("Signup", apigwv2.HttpMethod.POST, "/signup", signupIntegration, false);
+    addRoute("PublicPricing", apigwv2.HttpMethod.GET, "/public/pricing", signupIntegration, false);
 
     // Public: hit directly by Stripe, which carries no Cognito session either -- authenticity
     // relies on the Stripe-Signature verification inside the handler, same pattern as the
