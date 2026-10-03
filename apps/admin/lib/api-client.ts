@@ -52,6 +52,15 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export async function publicApiGet<T>(path: string): Promise<T> {
+  const res = await fetch(`${getApiBaseUrl()}${path}`, { method: "GET" });
+  if (!res.ok) {
+    const responseBody = await res.text();
+    throw new ApiError(res.status, responseBody || res.statusText);
+  }
+  return res.json() as Promise<T>;
+}
+
 /** For /signup, the one route with no Cognito session to attach -- it's what creates one. */
 export async function publicApiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${getApiBaseUrl()}${path}`, {
