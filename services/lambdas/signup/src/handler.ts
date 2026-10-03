@@ -42,11 +42,17 @@ interface SignupRequestBody {
   acceptedTerms?: boolean;
 }
 
+type JsonResult = {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+};
+
 function json(
   statusCode: number,
   body: unknown,
   extraHeaders?: Record<string, string>,
-): APIGatewayProxyResultV2 {
+): JsonResult {
   return {
     statusCode,
     headers: { "Content-Type": "application/json", ...extraHeaders },
@@ -106,7 +112,7 @@ function hashesEqual(left: string, right: string): boolean {
   }
 }
 
-async function issueVerificationCode(email: string): Promise<APIGatewayProxyResultV2> {
+async function issueVerificationCode(email: string): Promise<JsonResult> {
   const db = getDb();
   const now = new Date();
   const existing = await getSignupVerification(db, email);
@@ -153,7 +159,7 @@ async function issueVerificationCode(email: string): Promise<APIGatewayProxyResu
   return json(200, { confirmationRequired: true, email });
 }
 
-async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
+async function startSignup(body: SignupRequestBody): Promise<JsonResult> {
   const companyName = body.companyName?.trim();
   const email = body.email ? normalizeEmail(body.email) : "";
   const password = body.password ?? "";
@@ -168,7 +174,7 @@ async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResu
   return issueVerificationCode(email);
 }
 
-async function resendConfirmation(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
+async function resendConfirmation(body: SignupRequestBody): Promise<JsonResult> {
   const email = body.email ? normalizeEmail(body.email) : "";
   if (!email) return json(400, { error: "email_required" });
   const response = await issueVerificationCode(email);
@@ -178,7 +184,7 @@ async function resendConfirmation(body: SignupRequestBody): Promise<APIGatewayPr
   return response;
 }
 
-async function confirmSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
+async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
   const companyName = body.companyName?.trim();
   const name = body.name?.trim();
   const email = body.email ? normalizeEmail(body.email) : "";
@@ -313,7 +319,7 @@ async function confirmSignup(body: SignupRequestBody): Promise<APIGatewayProxyRe
   }
 }
 
-async function publicPricing(): Promise<APIGatewayProxyResultV2> {
+async function publicPricing(): Promise<JsonResult> {
   const stripeCreds = await getAppCredentials<StripeAppCredentials>("stripe");
   const liveBillingError = assertLiveBillingInProd(stripeCreds);
   if (liveBillingError) return liveBillingError;
