@@ -72,7 +72,7 @@ function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function assertLiveBillingInProd(creds: StripeAppCredentials): APIGatewayProxyResultV2 | null {
+function assertLiveBillingInProd(creds: StripeAppCredentials): JsonResult | null {
   if (process.env.PLATFORM_ENV === "prod" && !creds.secretKey.startsWith("sk_live_")) {
     console.error("signup: production signup blocked because Stripe is not using a live secret key");
     return json(503, { error: "billing_not_live" });
