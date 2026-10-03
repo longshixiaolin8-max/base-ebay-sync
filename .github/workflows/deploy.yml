@@ -85,6 +85,22 @@ jobs:
           done
           test "$missing" -eq 0
 
+      - name: Refresh GitHub OIDC deploy role
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          # The role already exists (this workflow is running under it), so unlike the
+          # one-time initial bootstrap it can now safely update its own source-managed
+          # policy through the CDK bootstrap CloudFormation execution role. This keeps new
+          # deploy-time capabilities such as Amplify manual publishing reproducible instead
+          # of requiring an out-of-band IAM console edit.
+          npx cdk deploy "AiEcPlatform-${{ inputs.environment }}-GithubOidc" \
+            --context bootstrapOidc=true \
+            --context env=${{ inputs.environment }} \
+            --context region=${{ vars.AWS_REGION }} \
+            --context githubRepo=${{ github.repository }} \
+            --require-approval never
+
       - name: CDK deploy
         working-directory: infra
         env:
