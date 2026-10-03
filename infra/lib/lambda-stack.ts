@@ -381,8 +381,7 @@ export class LambdaStack extends cdk.Stack {
     });
 
     // Public SaaS acquisition: native Cognito SignUp sends/verifies the email code before
-    // Stripe Checkout is created. AdminGetUser reads the tenant claim after confirmation;
-    // AdminDeleteUser is the compensating action if Aurora tenant creation fails.
+    // Stripe Checkout is created. AdminGetUser reads the tenant claim after confirmation.
     this.signupHandlerFn = makeFn(
       "SignupHandler",
       "services/lambdas/signup/src/handler.ts",
@@ -397,7 +396,7 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
     this.signupHandlerFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["cognito-idp:AdminGetUser", "cognito-idp:AdminDeleteUser"],
+        actions: ["cognito-idp:AdminGetUser"],
         resources: [props.userPoolArn],
       }),
     );
