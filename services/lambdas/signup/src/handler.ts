@@ -9,6 +9,7 @@ import {
 import {
   claimSignupVerification,
   createPendingTenant,
+  deleteExpiredSignupVerifications,
   deletePendingTenant,
   deleteSignupVerification,
   getSignupVerification,
@@ -67,6 +68,21 @@ const PRIVACY_VERSION = "2026-10-03";
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
+const PUBLIC_PRICING_CACHE_MS = 5 * 60 * 1000;
+
+let pricingCache:
+  | {
+      key: string;
+      expiresAt: number;
+      value: {
+        unitAmount: number;
+        currency: string;
+        interval: string;
+        trialDays: number;
+        live: boolean;
+      };
+    }
+  | undefined;
 
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
@@ -115,6 +131,7 @@ function hashesEqual(left: string, right: string): boolean {
 async function issueVerificationCode(email: string): Promise<JsonResult> {
   const db = getDb();
   const now = new Date();
+  await deleteExpiredSignupVerifications(db, now);
   const existing = await getSignupVerification(db, email);
   if (existing && existing.resendAvailableAt.getTime() > now.getTime()) {
     const retryAfterSeconds = Math.max(
@@ -324,19 +341,27 @@ async function publicPricing(): Promise<JsonResult> {
   const liveBillingError = assertLiveBillingInProd(stripeCreds);
   if (liveBillingError) return liveBillingError;
 
+  const live = stripeCreds.secretKey.startsWith("sk_live_");
+  const cacheKey = `${live ? "live" : "test"}:${stripeCreds.priceId}`;
+  if (pricingCache?.key === cacheKey && pricingCache.expiresAt > Date.now()) {
+    return json(200, pricingCache.value);
+  }
+
   const stripe = createStripeClient(stripeCreds);
   const price = await stripe.prices.retrieve(stripeCreds.priceId);
   if (price.unit_amount == null || !price.recurring) {
     return json(503, { error: "billing_price_invalid" });
   }
 
-  return json(200, {
+  const value = {
     unitAmount: price.unit_amount,
     currency: price.currency,
     interval: price.recurring.interval,
     trialDays: FREE_TRIAL_DAYS,
-    live: stripeCreds.secretKey.startsWith("sk_live_"),
-  });
+    live,
+  };
+  pricingCache = { key: cacheKey, expiresAt: Date.now() + PUBLIC_PRICING_CACHE_MS, value };
+  return json(200, value);
 }
 
 /**
