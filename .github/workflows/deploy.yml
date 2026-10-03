@@ -74,10 +74,11 @@ jobs:
           LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
           LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
           LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          SES_FROM_EMAIL: ${{ vars.SES_FROM_EMAIL }}
         run: |
           set -euo pipefail
           missing=0
-          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL; do
+          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL; do
             if [ -z "${!name:-}" ]; then
               echo "::error::prod environment variable $name is required before the public SaaS frontend can be released."
               missing=1
@@ -120,6 +121,7 @@ jobs:
               --context region=${{ vars.AWS_REGION }} \
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           else
@@ -128,6 +130,7 @@ jobs:
               --context region=${{ vars.AWS_REGION }} \
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           fi
