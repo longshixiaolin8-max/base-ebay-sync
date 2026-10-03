@@ -50,6 +50,7 @@ import {
   reconstructInventory,
   releaseMonthlyAiGenerationReservation,
   resolveNotificationPreferences,
+  setPendingTenantStripeCustomerId,
   syncErrors,
   syncJobs,
   tenants,
@@ -174,7 +175,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     // own data -- including every CSV export, which is built client-side from these same
     // GET responses -- until gracePeriodEndsAt, so canceling never locks a store out of its
     // own data with zero notice. Any write (POST/PUT/DELETE) still 402s immediately.
-    const billingExemptRoutes = new Set(["GET /admin/billing/status", "POST /admin/billing/portal-session"]);
+    const billingExemptRoutes = new Set([
+      "GET /admin/billing/status",
+      "POST /admin/billing/portal-session",
+      "POST /admin/billing/checkout-session",
+    ]);
     if (!billingExemptRoutes.has(`${method} ${path}`)) {
       const billing = await getTenantBillingStatus(db, tenantId);
       const inGracePeriod =
@@ -213,6 +218,47 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         testMode,
         gracePeriodEndsAt: billing.gracePeriodEndsAt?.toISOString() ?? null,
       });
+    }
+
+    if (method === "POST" && path === "/admin/billing/checkout-session") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      if (!billing) return json(404, { error: "not_found" });
+      if (billing.status !== "pending_payment") {
+        return json(409, { error: "checkout_not_required", status: billing.status });
+      }
+
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      if (process.env.PLATFORM_ENV === "prod" && !creds.secretKey.startsWith("sk_live_")) {
+        return json(503, { error: "billing_not_live" });
+      }
+      const stripe = createStripeClient(creds);
+
+      let customerId = billing.stripeCustomerId;
+      if (!customerId) {
+        const [tenant] = await db
+          .select({ contactEmail: tenants.contactEmail })
+          .from(tenants)
+          .where(eq(tenants.id, tenantId))
+          .limit(1);
+        if (!tenant?.contactEmail) return json(409, { error: "billing_email_missing" });
+        const customer = await stripe.customers.create({
+          email: tenant.contactEmail,
+          metadata: { tenantId },
+        });
+        customerId = customer.id;
+        await setPendingTenantStripeCustomerId(db, tenantId, customerId);
+      }
+
+      const session = await stripe.checkout.sessions.create({
+        mode: "subscription",
+        customer: customerId,
+        line_items: [{ price: creds.priceId, quantity: 1 }],
+        success_url: `${requireEnv("ADMIN_APP_URL")}/login?checkout=success`,
+        cancel_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
+        metadata: { tenantId },
+        subscription_data: { trial_period_days: 30 },
+      });
+      return json(200, { url: session.url });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
