@@ -35,9 +35,9 @@ jobs:
       - name: Validate upgraded dependency graph
         run: |
           pnpm -r --if-present run lint
+          pnpm -r --if-present run build
           pnpm -r --if-present run typecheck
           pnpm -r --if-present run test
-          pnpm -r --if-present run build
 
       - name: Commit refreshed lockfile
         run: |
