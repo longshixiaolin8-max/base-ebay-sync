@@ -150,21 +150,32 @@ export class ApiStack extends cdk.Stack {
     // Route already exists in AWS and the Stage update can reference it successfully. See
     // README's "eBay Platform Notification abuse対策" section for the exact steps.
     const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
-    if (cfnStage && props.enableEbayPlatformNotificationThrottle) {
-      // Unlike defaultRouteSettings (a plain typed property CDK's own mapper translates
-      // camelCase -> PascalCase for), routeSettings is a free-form
-      // { [routeKey]: RouteSettingsProperty } map that CDK passes through to CloudFormation
-      // without translating each value's keys -- the real API Gateway resource handler only
-      // accepts the PascalCase CloudFormation property names here ("Unrecognized field
-      // \"throttlingBurstLimit\"... 5 known properties: \"ThrottlingBurstLimit\",
-      // \"ThrottlingRateLimit\", ..."). Cast past the (misleadingly camelCase-typed)
-      // interface to use the names CloudFormation actually expects.
+    if (cfnStage) {
+      // /signup is already present in every deployed environment, so this can safely be
+      // enforced in one deploy (unlike the first-ever platform-notification route rollout).
+      // Global 2 rps / burst 5 is intentionally conservative for a human signup form and
+      // bounds SES/DB abuse before the per-email 60s cooldown in the Lambda is even reached.
+      const signupRouteSettings = {
+        "POST /signup": {
+          ThrottlingRateLimit: 2,
+          ThrottlingBurstLimit: 5,
+        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+      };
+      const ebayRouteSettings = props.enableEbayPlatformNotificationThrottle
+        ? {
+            "POST /webhooks/ebay/platform-notifications/{token}": {
+              ThrottlingRateLimit: 5,
+              ThrottlingBurstLimit: 10,
+            } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+          }
+        : {};
+
+      // routeSettings is a free-form map and CloudFormation expects PascalCase property
+      // names inside each value.
       cfnStage.routeSettings = {
         ...cfnStage.routeSettings,
-        "POST /webhooks/ebay/platform-notifications/{token}": {
-          ThrottlingRateLimit: 5,
-          ThrottlingBurstLimit: 10,
-        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+        ...signupRouteSettings,
+        ...ebayRouteSettings,
       };
     }
 
