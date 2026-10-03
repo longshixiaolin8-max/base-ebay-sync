@@ -135,7 +135,6 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   cloudFrontSharedSecret: secrets.cloudfrontSharedSecret,
   userPoolArn: auth.userPool.userPoolArn,
   userPoolId: auth.userPool.userPoolId,
-  userPoolClientId: auth.userPoolClient.userPoolClientId,
   queues: {
     aiGenerate: queues.aiGenerate.queue,
     ebaySync: queues.ebaySync.queue,
