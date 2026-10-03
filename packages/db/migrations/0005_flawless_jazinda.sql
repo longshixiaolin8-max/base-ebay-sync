@@ -1,0 +1,1 @@
+ALTER TABLE "channel_listings" ADD COLUMN IF NOT EXISTS "last_synced_price_jpy" integer;

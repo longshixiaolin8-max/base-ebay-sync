@@ -8,6 +8,7 @@ import type {
   SaleEvent,
   UpdateListingInput,
 } from "@ai-ec/core";
+import { fetchWithRetry } from "@ai-ec/core";
 import { BASE_API_DEFAULT_HOST, BASE_OAUTH_SCOPES, type BaseAdapterConfig } from "./config.js";
 
 interface BaseTokenResponse {
@@ -15,6 +16,13 @@ interface BaseTokenResponse {
   refresh_token: string;
   expires_in: number;
   scope?: string;
+}
+
+/** GET /1/users/me response -- verified against BASE's own reference
+ *  (gist.github.com/baseinc/9759577): shop_id is documented as "a unique string ID that
+ *  identifies the user" ("ユーザーを識別するユニークなID。文字列型"). */
+interface BaseUserResponse {
+  user: { shop_id: string };
 }
 
 /**
@@ -41,17 +49,37 @@ interface BaseItemsResponse {
   limit: number;
 }
 
-interface BaseOrderItem {
-  item_id: string;
-  amount: number;
-}
-interface BaseOrder {
-  ordered_id: string;
-  ordered: string;
-  order_items: BaseOrderItem[];
+/**
+ * BASE's real GET /1/orders (list) response has NO order_items at all -- verified against
+ * BASE's own gist-hosted reference (gist.github.com/baseinc/9760824). `ordered` is a Unix
+ * timestamp in seconds, same convention as items' `modified` field above.
+ */
+interface BaseOrderSummary {
+  unique_key: string;
+  ordered: number;
 }
 interface BaseOrdersResponse {
-  orders: BaseOrder[];
+  orders: BaseOrderSummary[];
+}
+
+/**
+ * GET /1/orders/detail/:unique_key is where order_items (with real per-item pricing)
+ * actually lives -- verified against BASE's own reference
+ * (gist.github.com/baseinc/9930892). `item_id`/`total` are JSON numbers there, not strings.
+ */
+interface BaseOrderDetailItem {
+  item_id: number;
+  amount: number;
+  /** price * amount, in whole JPY (BASE has no minor currency unit). */
+  total: number;
+}
+interface BaseOrderDetail {
+  unique_key: string;
+  ordered: number;
+  order_items: BaseOrderDetailItem[];
+}
+interface BaseOrderDetailResponse {
+  order: BaseOrderDetail;
 }
 
 class BaseApiError extends Error {
@@ -108,6 +136,23 @@ export class BaseAdapter implements ChannelAdapter {
     });
   }
 
+  /**
+   * The tenant-isolation fix that replaced oauth-base's "default" externalAccountId
+   * fallback: BASE has no shop id in the OAuth token response itself, but GET /1/users/me
+   * (authenticated with this connection's own access token) returns it as shop_id, which
+   * BASE's own reference documents as a unique per-user string id -- exactly what
+   * oauth_connections needs as a stable primary key instead of every BASE connection
+   * colliding on the literal string "default".
+   */
+  async getAuthenticatedShopId(accessToken: string): Promise<string> {
+    const res = await this.authedFetch(accessToken, "/1/users/me");
+    const json = (await res.json()) as BaseUserResponse;
+    if (!json.user?.shop_id) {
+      throw new BaseApiError(res.status, "BASE /1/users/me response had no user.shop_id field");
+    }
+    return json.user.shop_id;
+  }
+
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const body = new URLSearchParams({
       client_id: this.config.clientId,
@@ -130,7 +175,7 @@ export class BaseAdapter implements ChannelAdapter {
   }
 
   private async authedFetch(accessToken: string, path: string, init?: RequestInit): Promise<Response> {
-    const res = await fetch(`${this.apiBaseUrl}${path}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -158,7 +203,9 @@ export class BaseAdapter implements ChannelAdapter {
   }
 
   async getProduct(accessToken: string, externalId: string): Promise<ExternalProduct | null> {
-    const res = await this.authedFetch(accessToken, `/1/items/detail?item_id=${externalId}`);
+    // item_id is a path segment here, not a query param -- verified against BASE's own
+    // reference (docs.thebase.in/docs/api/items/detail): GET /1/items/detail/:item_id.
+    const res = await this.authedFetch(accessToken, `/1/items/detail/${externalId}`);
     const json = (await res.json()) as { item: BaseItem | null };
     return json.item ? mapBaseItem(json.item) : null;
   }
@@ -203,19 +250,43 @@ export class BaseAdapter implements ChannelAdapter {
   }
 
   async listRecentSales(accessToken: string, since: Date): Promise<SaleEvent[]> {
-    const search = new URLSearchParams({ start_ordered: since.toISOString() });
+    // BASE's own reference wants "yyyy-mm-dd hh:mm:ss", not full ISO 8601 -- but its
+    // timezone is undocumented anywhere found, so this is only a best-effort server-side
+    // prefilter (assuming JST, a Japan-only API); the client-side filter below against each
+    // order's own unambiguous Unix `ordered` timestamp is what actually guarantees
+    // correctness regardless of whether that assumption holds -- the same defense-in-depth
+    // pattern listProducts already uses for `modified` above.
+    const search = new URLSearchParams({ start_ordered: formatBaseDateTimeJst(since) });
     const res = await this.authedFetch(accessToken, `/1/orders?${search.toString()}`);
     const json = (await res.json()) as BaseOrdersResponse;
-    return json.orders.flatMap((order) =>
-      order.order_items.map((orderItem) => ({
-        channel: "base" as const,
-        externalProductId: orderItem.item_id,
-        externalOrderId: order.ordered_id,
-        quantitySold: orderItem.amount,
-        occurredAt: new Date(order.ordered),
-      })),
-    );
+    const recentOrders = json.orders.filter((order) => new Date(order.ordered * 1000) >= since);
+
+    // The list response has no order_items (see BaseOrderSummary above) -- same
+    // "list is thin, detail has the real data" shape already established for items
+    // (getProduct), so each order needs its own detail call.
+    const sales: SaleEvent[] = [];
+    for (const orderSummary of recentOrders) {
+      const detailRes = await this.authedFetch(accessToken, `/1/orders/detail/${orderSummary.unique_key}`);
+      const { order } = (await detailRes.json()) as BaseOrderDetailResponse;
+      for (const item of order.order_items) {
+        sales.push({
+          channel: "base",
+          externalProductId: String(item.item_id),
+          externalOrderId: order.unique_key,
+          quantitySold: item.amount,
+          occurredAt: new Date(order.ordered * 1000),
+          salePriceJpy: item.total,
+        });
+      }
+    }
+    return sales;
   }
+}
+
+function formatBaseDateTimeJst(date: Date): string {
+  const jst = new Date(date.getTime() + 9 * 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${jst.getUTCFullYear()}-${pad(jst.getUTCMonth() + 1)}-${pad(jst.getUTCDate())} ${pad(jst.getUTCHours())}:${pad(jst.getUTCMinutes())}:${pad(jst.getUTCSeconds())}`;
 }
 
 function extractImages(item: BaseItem): string[] {

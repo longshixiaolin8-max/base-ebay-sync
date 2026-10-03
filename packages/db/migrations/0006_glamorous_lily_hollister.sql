@@ -1,0 +1,2 @@
+ALTER TABLE "product_master" ADD COLUMN IF NOT EXISTS "shipping_cost_usd_cents" integer;--> statement-breakpoint
+ALTER TABLE "product_master" ADD COLUMN IF NOT EXISTS "target_margin_basis_points" integer;

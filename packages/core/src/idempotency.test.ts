@@ -26,10 +26,19 @@ function createInMemoryStore(): IdempotencyStore {
 }
 
 describe("buildIdempotencyKey", () => {
-  it("joins parts deterministically", () => {
-    expect(buildIdempotencyKey(["inventory_sync", "product-1", "order-9"])).toBe(
-      "inventory_sync:product-1:order-9",
+  it("joins tenantId and parts deterministically, tenantId always first", () => {
+    expect(buildIdempotencyKey("tenant-a", ["inventory_sync", "product-1", "order-9"])).toBe(
+      "tenant-a:inventory_sync:product-1:order-9",
     );
+  });
+
+  it("keeps two tenants' otherwise-identical parts from colliding on the same key", () => {
+    // The real case this guards: two independent tenants' BASE/eBay accounts can produce the
+    // exact same channel-native order/item id -- without tenantId in the key, the second
+    // tenant's real sale would look like an already-processed duplicate of the first's.
+    const keyA = buildIdempotencyKey("tenant-a", ["sale", "ebay", "order-9", "item-1"]);
+    const keyB = buildIdempotencyKey("tenant-b", ["sale", "ebay", "order-9", "item-1"]);
+    expect(keyA).not.toBe(keyB);
   });
 });
 

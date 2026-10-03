@@ -27,12 +27,12 @@ describe("pollChannelSales", () => {
       ]),
     };
 
-    await pollChannelSales(adapter as never, new Date(0), {} as never, "queue-url");
+    await pollChannelSales("tenant-a", adapter as never, new Date(0), {} as never, "queue-url");
 
     expect(enqueueMock).toHaveBeenCalledWith(
       "queue-url",
-      { type: "sale_detected", sale: expect.objectContaining({ externalOrderId: "order-1" }) },
-      "ebay:order-1:SKU-1",
+      { type: "sale_detected", tenantId: "tenant-a", sale: expect.objectContaining({ externalOrderId: "order-1" }) },
+      "tenant-a:ebay:order-1:SKU-1",
     );
   });
 
@@ -40,7 +40,7 @@ describe("pollChannelSales", () => {
     listConnectedAccountIdsMock.mockResolvedValueOnce([]);
     const adapter = { channel: "base" as const, listRecentSales: vi.fn() };
 
-    await pollChannelSales(adapter as never, new Date(0), {} as never, "queue-url");
+    await pollChannelSales("tenant-a", adapter as never, new Date(0), {} as never, "queue-url");
 
     expect(adapter.listRecentSales).not.toHaveBeenCalled();
     expect(enqueueMock).not.toHaveBeenCalled();

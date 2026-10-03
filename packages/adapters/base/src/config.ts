@@ -14,4 +14,9 @@ export const BASE_API_DEFAULT_HOST = "https://api.thebase.in";
  * covered by write_items). Confirmed live: BASE rejects an unknown scope as
  * "invalid_request" and expects the list space-separated, not comma-separated.
  */
-export const BASE_OAUTH_SCOPES = ["read_items", "write_items", "read_orders"] as const;
+// read_users added for getAuthenticatedShopId (GET /1/users/me) -- the tenant-isolation fix
+// that replaced oauth-base's "default" externalAccountId fallback with BASE's own real
+// shop_id. All four scope names (including read_users) were already confirmed against
+// BASE's real scope list per the comment above; read_users_mail is not requested since
+// nothing here needs the shop's email address.
+export const BASE_OAUTH_SCOPES = ["read_items", "write_items", "read_orders", "read_users"] as const;

@@ -13,10 +13,15 @@ export class AuthStack extends cdk.Stack {
 
     this.userPool = new cognito.UserPool(this, "AdminUserPool", {
       userPoolName: `ai-ec-platform-admin-${config.envName}`,
-      // No self-signup: operator accounts are provisioned by an administrator only.
+      // Public registration is brokered by our signup Lambda. Cognito self-signup stays
+      // disabled so an attacker cannot bypass our verified-email/tenant-creation gate and
+      // submit an arbitrary custom:tenant_id directly to Cognito.
       selfSignUpEnabled: false,
       signInAliases: { email: true },
       standardAttributes: { email: { required: true, mutable: false } },
+      customAttributes: {
+        tenant_id: new cognito.StringAttribute({ mutable: true }),
+      },
       passwordPolicy: {
         minLength: 12,
         requireLowercase: true,
@@ -28,6 +33,9 @@ export class AuthStack extends cdk.Stack {
       mfaSecondFactor: { otp: true, sms: false },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy: config.envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      featurePlan: config.envName === "prod" ? cognito.FeaturePlan.PLUS : undefined,
+      standardThreatProtectionMode:
+        config.envName === "prod" ? cognito.StandardThreatProtectionMode.FULL_FUNCTION : undefined,
     });
 
     this.userPoolClient = this.userPool.addClient("AdminUserPoolClient", {
@@ -37,5 +45,10 @@ export class AuthStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.hours(1),
       refreshTokenValidity: cdk.Duration.days(7),
     });
+
+    // Deployment workflow consumes these outputs to build the static admin application
+    // with the exact Cognito identifiers belonging to the target environment.
+    new cdk.CfnOutput(this, "UserPoolId", { value: this.userPool.userPoolId });
+    new cdk.CfnOutput(this, "UserPoolClientId", { value: this.userPoolClient.userPoolClientId });
   }
 }

@@ -11,7 +11,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
      (ChannelAdapter実装)          (ChannelAdapter実装)
 ```
 
-将来Shopify/Amazon/楽天を追加する場合は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。
+将来チャネルを追加する場合、候補は思いつきではなく実在の競合サービス(ネクストエンジン/CROSS MALL/GoQSystemなどのEC一元管理ツール)が実際に対応しているモールに絞ってある: Amazon・楽天市場・Yahoo!ショッピング(国内「御三家」、上記3ツール共通の標準対応)、Shopify(モールではなくBASE同様のカート型だが、CROSS MALL運営元がShopify Experts認定を受けるなど実需が確認できる)。アダプタ自体は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。接続管理まわり(OAuth接続/切断ルート・管理画面の接続カード・ワーカーのアダプタ生成)は`docs/adding-a-channel.md`の手順に沿えば自動的に拡張されるが、CDKインフラ(Secrets/Lambda/キュー)と、売却時の他チャネル反映(現状ちょうど1つの「他チャネル」を前提にした二重販売防止トランザクション)は依然として手作業での対応が必要 — 詳細と実装手順は`docs/adding-a-channel.md`を参照。
 
 ## 現在の完成度
 
@@ -38,7 +38,8 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 4. Cognito管理者ユーザーの作成(セルフサインアップ不可のため)。
 5. Amplify Hostingとこのリポジトリの接続(コンソールから、GitHub Appトークンはコードに置かない)。
 6. `packages/db` のAurora実インスタンスに対するマイグレーション適用・統合テスト追加。
-7. Shopify/Amazon/楽天 Adapter実装(将来タスク、`ChannelAdapter` を実装するだけ)。
+7. Amazon/楽天市場/Yahoo!ショッピング/Shopify Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Shopify・Amazon・楽天市場は`packages/adapters/{shopify,amazon,rakuten}`に実アカウント未接続・未検証のテンプレート実装を用意済み(いずれも`IMPLEMENTED_CHANNELS`には未登録)。Yahoo!ショッピングのみ未着手。
+8. SESの送信元アドレス/ドメイン検証と`--context sesFromEmail=...`の設定(詳細は下の「請求関連メール通知(SES)」参照)。これをやらない限り`billingNotice`のメールは送信されない(エラーはキャッチ・ログのみでwebhook自体は正常応答する)。
 
 ## アーキテクチャ
 
@@ -47,6 +48,117 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 - **AIガードレール**: `packages/ai/src/guardrail.ts` が、AIの出力に対して「ソースにない事実(ブランド/素材/サイズ)をconfirmedと主張していないか」「authenticity(真贋)をconfirmedと主張していないか(常に禁止)」をコードで強制検証する。プロンプトだけに頼らない。
 - **冪等性/二重販売対策**: `packages/core/src/idempotency.ts`(DB上の一意キーによるクレーム)+ `packages/db/src/inventory.ts` の`applySale`(在庫テーブルの`version`列によるCompare-And-Swap)の二重の仕組み。
 - **OAuthトークン**: DBには平文保存せず、Secrets Managerのシークレットへのポインタ(ARN)のみを保存(`oauth_connections`テーブル)。
+
+### テナントライフサイクルとscheduled worker(解約済みテナントの扱い)
+
+`tenants.status`(`pending_payment` / `active` / `past_due` / `canceled_grace` / `canceled`)は課金状態そのものであり、「scheduled workerが何をしてよいか」とは別の軸として扱う。理由: 支払いが止まった瞬間に同期を止めると、まだ生きているeBay/BASEの出品在庫が更新されなくなり、在庫切れなのに売れ続ける(oversell)実害が起きるため。
+
+- `packages/db/src/tenants.ts`の`tenantSyncCapabilities(status, marketplaceOffboardedAt)`が実際の権限を決める:
+  - `active` → 通常同期 + 新規商品のonboarding(AI生成含む)を許可。
+  - `past_due` / `canceled_grace` → **既存**の出品の在庫同期は継続(oversell防止)、新規onboardingのみ禁止。
+  - `canceled` → `marketplaceOffboardedAt`が未設定の間は`past_due`と同じ(offboarding完了を待つ)。設定済みなら何もしない。
+  - `pending_payment` → 何もしない(一度も課金が有効になっていない)。
+- `listWorkerEligibleTenants()`(旧`listActiveTenants` — 名前が実装(全テナント返却)と一致していなかったため改名)が`product-fetch`/`sales-poller`/`inventory-diff-check`共通のテナント一覧を返す。除外されるのは`pending_payment`と、offboarding確認済みの`canceled`のみ。
+- **offboarding**: 新設の`tenant-offboarding` Lambda(EventBridge、1時間毎)が`canceled_grace`/`canceled`かつ`marketplaceOffboardedAt`未設定のテナントを対象に、公開中の`channel_listings`を`ChannelAdapter.delistProduct()`で実際にmarketplaceからdelistし、`status: "delisted"`に更新する。**全リスティングのdelistが確認できてから初めて**OAuth接続(`oauth_connections`+Secrets Managerのトークン)を削除し、`tenants.marketplaceOffboardedAt`を設定する。1つでもdelistに失敗したテナントはOAuth revoke/offboarded確定を行わず、次回実行で再試行される(在庫が生きたまま放置されない設計)。
+
+### eBay Platform Notification abuse対策(`POST /webhooks/ebay/platform-notifications`)
+
+このエンドポイントはeBayの旧Trading API向け配信先で、X-EBAY-SIGNATURE等の署名検証手段が一切ない(REST Notification API側の`/webhooks/ebay/notifications`とは別物)。以前は「HTTP POST 1回 = eBay poll 1回」だったため、第三者が大量POSTするとeBay API呼び出し・Lambda・DB・SQSを増幅できた。
+
+- **エンドポイント自体に秘密トークンを埋め込む**: `POST /admin/ebay/platform-notification-setup`が登録時に`signWebhookDestinationToken`(HMAC、このアプリのeBay client secret、有効期限なし)でテナントごとのトークンを発行し、`/webhooks/ebay/platform-notifications/{token}`という形でeBayに登録する。これにより(1)完全に推測可能だった静的パスがなくなり、(2)eBayの通知ペイロード自体にはテナント情報が一切ないという問題も同時に解決する(トークンからtenantIdを復元)。
+- **debounce/coalescing**: `triggerCoalescedPoll`が`idempotency_keys`テーブルを純粋なrate-limitミューテックスとして再利用(`complete()`を呼ばず`tryClaim`のTTLだけを使う)し、同一tenant/channelへの通知は20秒間に1回しか実際のpollを起動しない。実際のpollは`ebayPlatformNotificationPoll` SQSキュー経由で別Lambda(`dispatchPoll`)が行うため、webhook自体のリクエストパス上では同期的なeBay API呼び出しが一切発生しない。
+- **API Gateway throttling**: このルートだけ`5 req/s, burst 10`に制限(他ルートの既定は`50 req/s, burst 100`)。**`PlatformConfig.ebayPlatformNotificationThrottleEnabled`(既定`false`)で明示的に有効化する必要がある** — 本番デプロイで2回連続して失敗した実際の障害(`AWS::ApiGatewayV2::Stage` UPDATE_FAILED: `Unable to find Route by key POST /webhooks/ebay/platform-notifications/{token} within the provided RouteSettings`)の根本原因は、このルート別throttle設定がHttpApiのStageリソース(`ApiCoreStack`所有)に対する更新である一方、そのルート自体(`AWS::ApiGatewayV2::Route`)は別スタック(`ApiStack`)が作るため — `ApiCoreStack`は`ApiStack`より必ず先にデプロイされる(`LambdaStack`がAPIエンドポイントを必要とするため)ので、**このルートを初めてデプロイする回**は、Stage更新がRoute作成より先に走ってしまい、存在しないルートキーを参照して必ず失敗する。CloudFormationのスタック依存は双方向にできない(`ApiStack`は既に`ApiCoreStack`に依存している)ため、順序を逆にする回避策もない。
+  - **手順**: (1) 該当環境でこのルートを初めてデプロイする回は、`enableEbayPlatformNotificationThrottle`をfalse(既定)のままデプロイ — throttleなしでRouteだけ作成される。(2) それが成功した後の**次回以降のデプロイ**で、`workflow_dispatch`の`enableEbayPlatformNotificationThrottle`入力をtrueにして再デプロイ — 今度はRouteが既に存在するのでStage更新が成功する。一度trueにして成功すれば、以降は毎回trueのままで問題ない。
+- **WAF**: round 15でCloudFrontを実際の本番経路として使えるようにした(下の「WAF/CloudFrontの本番適用」参照)。デフォルトはまだ直接execute-apiのままで、切り替えは明示的な運用手順が必要。
+- **既存のeBay Platform Notification購読への影響**: ルートが`{token}`必須になったため、**このデプロイ前に登録された(トークンなしの)購読はeBayからの配信が404になる**。該当テナントで`POST /admin/ebay/platform-notification-setup`を再実行し、新しいトークン付きURLで再登録すること。
+- REST Notification API側(`/webhooks/ebay/notifications`、X-EBAY-SIGNATURE検証あり)も、本番化レビューで同じ`{token}`パターンを追加適用した: `POST /admin/ebay/webhook-setup`がテナントごとの署名付きトークンを埋め込んだ`.../notifications/{token}`という宛先URLを登録するようになり、`ebay-webhook`のchallenge応答・notification処理の両方がそのトークンから実テナントIDを復元する(eBayのchallenge-response仕様上、ハッシュ計算に使う`endpoint`文字列は実際に呼ばれたURLと完全一致している必要があるため、`{token}`付きの場合は`handleChallenge`もそれを含めて計算する)。トークンなし(素のパス)のルートは残してあるため、この修正より前に登録済みの1件(BOOTSTRAP_TENANT_ID宛)は無停止でそのまま動き続ける — 破壊的な切り替えではなく、新規テナント向けの追加のみ。
+
+### 請求関連メール通知(SES)
+
+「本番ようにしてすべて」レビューで、管理画面の通知設定タブにあった5つのトグルのうち`billingNotice`(請求関連のお知らせ)だけ、実際にメール配信されるようにした。他の4つ(`inventoryDiffAlert`/`aiDraftCompleted`/`oauthExpiryNotice`/`importantNotice`)は引き続き保存のみで配信基盤自体が未実装 — 詳細はNotificationsTab自身のUI表示(項目ごとに「配信対応済み」/「保存のみ」バッジ)を参照。
+
+- **送信経路**: `services/lambdas/shared/src/email.ts`の`sendEmail()`(SES v2、`@aws-sdk/client-sesv2`)。`stripe-webhook`が`markTenantPastDue`/`markTenantCanceledWithGrace`の実際の状態遷移(out-of-orderガードで実際に適用された場合のみ、リプレイ/古いイベントでは送らない)を検知した後、`db.transaction()`のコミット後・かつwebhookのレスポンスとは独立に(失敗してもStripeへの200応答やイベント完了マークには一切影響しない)送信する。宛先は`getTenantContact()`(`packages/db/src/tenants.ts`)が返す`tenants.contactEmail`で、`notificationPreferences.billingNotice`がfalseか`contactEmail`が未設定なら送信自体をスキップする。
+- **CDK側の配線**: `infra/lib/lambda-stack.ts`の`StripeWebhook` Lambdaに`ses:SendEmail`/`ses:SendRawEmail`のIAM権限(`arn:aws:ses:<region>:<account>:identity/*`)を付与済み。送信元アドレスは`PlatformConfig.sesFromEmail`(既定未設定)経由で`SES_FROM_EMAIL`環境変数として渡す。
+- **デプロイ後に人間が行う手作業(このセッションでは完了できない)**: (1) SESコンソールで送信元アドレス、または独自ドメインを検証する(ドメイン検証はDNSレコード追加が必要 — SESがサンドボックスモードのままだと検証済みの宛先にしか送れない点にも注意。本番送信するには別途サンドボックス解除のリクエストが必要)。(2) `cdk deploy --context sesFromEmail=notifications@yourdomain.example ...`(または`deploy.yml`のworkflow_dispatch入力に追加)で`sesFromEmail`を設定して再デプロイ。この設定が入るまでは`sendEmail()`が明確なエラー(`SES_FROM_EMAIL is not configured`)を投げ、`stripe-webhook`側はそれをキャッチしてログに残すだけ(webhook自体の処理・応答には影響しない)。
+
+### CORS・レート制限・Lambda同時実行数(本番化レビュー)
+
+- **CORSにPATCHが漏れていたバグを修正**: `infra/lib/api-core-stack.ts`のHttpApi `corsPreflight.allowMethods`が長らくGET/POSTのみで、`apps/admin/lib/api-client.ts`の`apiPatch`(通知設定・テナント設定・価格デフォルトなど複数の設定タブが使用)は実際にPATCHメソッドで呼んでいた。ブラウザからの実デプロイ環境向けアクセスでは、これらの設定保存がすべてCORSプリフライト段階でブロックされていたはず(このセッションには実AWS疎通ができないため、これまで気づけなかった)。`allowMethods`にPATCHを追加して修正済み。
+- **レート制限**: `ApiCoreStack`の全ルート共通デフォルト(50 req/s, burst 100)に加え、署名検証を持たない`POST /webhooks/ebay/platform-notifications/{token}`のみ個別に絞ってある(5 req/s, burst 10 — 詳細は上の「eBay Platform Notification abuse対策」)。署名/HMAC検証がある他の公開ルート(REST Notification API、Stripe webhook)はデフォルトの共通スロットルのみで十分と判断(悪用の実害が「無駄なLambda起動」程度に収まるため)。`/signup`は共有招待コードでゲートされておりレート制限は共通デフォルトのみ — ブルートフォース対策として招待コードのローテーションは運用側の手作業。
+- **Lambda同時実行数の上限**: 従来、全Lambdaが予約なし(アカウント共有プール、デフォルト1000)だった。SQSキューの深さに応じて並列度が跳ね上がる4つのワーカー(`AiGenerateWorker`/`EbaySyncWorker`/`InventorySyncWorker`/`EbayPlatformNotificationDispatcher`)だけ`reservedConcurrentExecutions`を明示的に設定(それぞれ10・10・10・5)。理由は二つ: (1) BASE/eBay/Bedrock・OpenAI側のアカウント単位レート制限を超えて無駄にLambda起動→即429を繰り返すのを防ぐ、(2) 想定外のバーストが起きても、admin-apiや各webhookが使うアカウント共有の同時実行プールを食い潰さないようにする。値は正確なAPI制限から逆算したものではなく保守的な初期値 — 実トラフィックが乗った後、CloudWatchの新設`*ThrottleAlarm`(`infra/lib/monitoring-stack.ts`)の発火状況を見て調整する前提。
+  - **実デプロイで判明した落とし穴**: このAWSアカウントのLambda「Concurrent executions」クォータは、AWSの既定値1000ではなく**10**(AWSが許す最低値)だった — 新規/利用実績の浅いアカウントがまだ自動引き上げされていないためと見られる。AWSは常時アカウント全体で最低10の「unreserved」実行枠を残すことを強制するため、**アカウント全体の上限が10の状態では、たった1つの関数に1でも予約すると即座にデプロイが失敗する**(`decreases account's UnreservedConcurrentExecution below its minimum value of [10]`)。そのため`PlatformConfig.lambdaConcurrencyLimitsEnabled`(既定`false`)を新設し、`reservedConcurrentExecutions`は実際にはこのフラグがtrueの時だけ適用されるようにした(`infra/lib/lambda-stack.ts`のmakeFn)。既定はfalseなので、クォータが低いアカウントでも他の変更まで巻き込まれてデプロイ不能になることはない。Service Quotasへクォータ引き上げ(1000への`RequestServiceQuotaIncrease`、`lambda`サービスの`L-B99A9384`)はリクエスト済みだが、自動承認される保証はない — `GetServiceQuota`で実際に引き上げられたことを確認してから`--context lambdaConcurrencyLimitsEnabled=true`を付けて再デプロイすること。スロットルアラーム(`*ThrottleAlarm`)自体はこのフラグに関係なく常時有効 — アカウント単位のスロットリングも同じCloudWatchメトリクスに現れるため、予約なしの状態でも検知の価値がある。
+
+### WAF/CloudFrontの本番適用と、direct execute-api URLの制限
+
+**現状(round 15完了時点)**: `infra/lib/cloudfront-stack.ts`のWAF付きCloudFrontディストリビューションは技術的に完成している(`CACHING_DISABLED` + `OriginRequestPolicy.ALL_VIEWER`で認証ヘッダ・生bodyともに素通し確認済み)が、**デフォルトでは何もこれを使っていない**。`PlatformConfig.apiEntrypoint`(`infra/lib/config.ts`)が`"direct"`(既定)か`"cloudfront"`かを1箇所で決める:
+
+- `"direct"`(既定・現状維持): `BASE_OAUTH_REDIRECT_URI`・eBay webhook宛先・管理画面のAPI URLは全部これまで通り直接execute-apiのURL。WAFは立っているが本番トラフィックは一切通らない。
+- `"cloudfront"`: 上記すべてがCloudFrontのURLに切り替わる。**同時に**、CloudFrontが注入するシークレットヘッダ(`X-CloudFront-Secret`、Secrets Manager `cloudfront-shared-secret`から自動生成)をLambda側の`requireCloudFrontOrigin`(`services/lambdas/shared/src/cloudfront-origin.ts`)が検証するようになり、このヘッダを持たない直接execute-apiへのリクエストは403で拒否される。**HTTP API v2はresource policyもWAFの直接アタッチも非対応**(REST APIとの既知の違い、AWS公式ドキュメントで確認済み)なので、この「共有シークレットヘッダ」がAWS自身も推奨する代替策。
+
+**なぜ自動で切り替えないか**: `BASE_OAUTH_REDIRECT_URI`はBASEの開発者コンソール側にも登録されており、Stripeのwebhook宛先もStripeダッシュボード側の設定。このコードベースだけでは変更できない。ここを揃えずに`apiEntrypoint`だけ切り替えると、新規BASE接続とStripe webhook配信がその場で壊れる。
+
+**切り替え手順(この順序を守ること)**:
+
+1. BASEの開発者コンソールで、このアプリのOAuthアプリ設定のredirect_uriを`https://<CloudFrontドメイン>/oauth/base/callback`に**追加**(既存の直接URLを消すのはまだ早い — 後述)。
+2. Stripeダッシュボード → Webhooks で、エンドポイントURLを`https://<CloudFrontドメイン>/webhooks/stripe`に更新(またはCloudFront宛の新エンドポイントを追加)。
+3. `apps/admin/.env.local`(gitignore対象、Amplifyのビルド設定ではなくローカルのビルド時にJSへ焼き込まれる)の`NEXT_PUBLIC_API_BASE_URL`をCloudFrontのURLに変更し、管理画面を再ビルド・再デプロイ。
+4. `cdk deploy --all --context apiEntrypoint=cloudfront ...`(または`deploy.yml`のworkflow_dispatch入力にcontextを追加)を実行。これでLambda側のURL群とCLOUDFRONT_SHARED_SECRETが切り替わる。
+5. 管理画面から実際にBASE/eBay接続・Stripe課金・商品同期が新URL経由で動くことを確認。
+6. 問題なければ、eBayの各webhook購読(`POST /admin/ebay/webhook-setup`・`POST /admin/ebay/platform-notification-setup`)をテナントごとに再実行してCloudFront URLへ再登録。
+7. 数日〜1週間、旧URL(直接execute-api)への到達がないことをCloudWatch Logsで確認できたら、BASEコンソールから旧redirect_uriを削除。
+
+**ロールバック**: `apiEntrypoint`を`"direct"`に戻して再デプロイすれば、Lambda側は即座に旧URL/旧設定に戻る(BASE/Stripe側は手順1・2で「追加」しているだけなので、消していなければそのまま両対応の状態を維持できる)。
+
+## デプロイフローとDB migration
+
+### 新しいデプロイフロー(round 15で変更)
+
+`workflow_dispatch` → `cdk deploy --all` → **DbMigrate Lambda呼び出し(新規)** → **post-deploy smoke test(新規)**。migrationとsmoke testはどちらも失敗時に`exit 1`でジョブ全体を失敗扱いにする(「prodではmigration failure時に明確にdeploy失敗にする」の実装)。
+
+- migrationステップは`aws cloudformation describe-stacks`でLambdaStackの`DbMigrateFunctionName`出力を引き、`aws lambda invoke`で直接呼び出す。レスポンスの`FunctionError`フィールドで成否判定(Lambda呼び出し自体のexit codeは関数内部のエラーでは非0にならないため)。
+- drizzleの migrator は適用済みmigrationを自分のテーブルで管理するため、**何度実行しても安全**(新しいmigrationがなければ単に何もしない)。
+- smoke testは`GET /webhooks/ebay/notifications`(challenge_codeなし)を叩き、HTTP 400が返ることだけを確認する認証不要・副作用なしの疎通確認。DBを実際に触る確認はmigrationステップ自体がすでに兼ねている。
+
+### リソース削除時のスタック間export/import順序問題(`targetStacks`入力)
+
+Lambda関数やその他のリソースを削除するコード変更(例: round 12でのOAuth authorizeルート廃止)を、その関数のARNを別スタックが`Fn::ImportValue`で参照したままの状態から初めて本番にデプロイすると、CloudFormationは`Cannot delete export ... as it is in use by ...`で失敗する。`cdk deploy --all`は常に依存関係順(例: `Lambdas`→`Api`)でスタックを処理するため、「先にimport側(`Api`)だけを更新してexport(`Lambdas`)を未使用にしてから、export側を更新する」という2段階デプロイが`--all`では実現できない。
+
+対処として、`deploy.yml`の`workflow_dispatch`に`targetStacks`(既定は空 = 通常通り`--all`)を追加した。この現象に遭遇したら:
+
+1. `targetStacks`に、importしている側のスタック名(例: `AiEcPlatform-prod-Api`)を指定してデプロイ実行 → `cdk deploy <指定スタック> --exclusively`が走り、依存スタック(`Lambdas`など)は一切触らずそのスタックだけを更新する。importが外れる。
+2. それが成功したら、`targetStacks`を空に戻して通常通り`--all`で再デプロイ → 今度はexport側のスタックが安全に該当リソースを削除できる。
+
+普段は`targetStacks`は空のままにしておくこと。
+
+**この変更を有効にする前に必須の作業**: `deployRole`(GitHub Actionsが引き受けるIAMロール)に`lambda:InvokeFunction`/`cloudformation:DescribeStacks`権限を追加した(`infra/lib/github-oidc-stack.ts`)。この`GithubOidcStack`は**人手による一度きりのブートストラップ**(README上部の手順参照)であり、`deploy.yml`が自動デプロイする対象では**ない**。そのため、この変更をコード上マージしただけでは本番のIAMロールには反映されない — 以下を一度だけ手動実行すること:
+
+```bash
+cd infra && npx cdk deploy AiEcPlatform-<env>-GithubOidc \
+  --context bootstrapOidc=true \
+  --context githubRepo=<owner>/<repo>
+```
+
+これを実行しないまま次回`deploy.yml`を回すと、新しい"Run DB migration"/"Post-deploy smoke test"ステップがAccessDeniedで失敗する。
+
+### migration failureの挙動とロールバック方針
+
+- migration自体が失敗(SQL構文エラー、既存データとの制約違反等)した場合、deployジョブは赤字で失敗し、**CDKによるLambdaコード自体のデプロイはすでに完了している**状態になり得る(新Lambda + 未適用schemaの共存)。この場合の復旧は、(a) 問題のmigration SQLを修正した新しいmigrationファイルを追加して再デプロイするか、(b) 直前の(migrationを含まない)コミットへLambdaコードだけを再デプロイして手動でDBを復旧するか、状況に応じて判断する。
+- 本番運用としては、破壊的な変更(列削除・型変更・NOT NULL化)は**expand/contract方式**(まず新しい列/形を追加 → コードを新形式に対応させてデプロイ → 十分な期間後に旧列を削除する別のmigrationを出す)を採用し、「新Lambda + 旧schema」の組み合わせでも新Lambdaが動き続けられる状態を常に保つ。このセッションのこれまでのmigration(0013〜0015)はすべてこの原則に従っており(nullable列の追加のみ、既存列の削除・変更なし)、今後もこの方針を維持すること。
+
+### 確認コマンド
+
+```bash
+# DbMigrate Lambdaの実際の関数名を確認
+aws cloudformation describe-stacks --stack-name AiEcPlatform-<env>-Lambdas \
+  --query "Stacks[0].Outputs[?OutputKey=='DbMigrateFunctionName'].OutputValue" --output text
+
+# 手動でmigrationを再実行(deploy.ymlと同じ呼び出し)
+aws lambda invoke --function-name <上記の関数名> --payload '{}' response.json && cat response.json
+
+# CloudFrontのURLを確認
+aws cloudformation describe-stacks --stack-name AiEcPlatform-<env>-CloudFrontApi \
+  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" --output text
+```
 
 ## モノレポ構成
 
@@ -59,14 +171,15 @@ packages/
   ai/               AI生成サービス + ガードレール(Bedrock/OpenAI切替可能)
 services/lambdas/
   shared/           DB接続・Secrets・SQS・監査ログ等の共通ヘルパー
-  oauth-base/       BASE OAuth authorize/callback
-  oauth-ebay/       eBay OAuth authorize/callback
+  oauth-base/       BASE OAuth callback(公開)。authorize-urlの発行はadmin-apiの認証済みroute
+  oauth-ebay/       eBay OAuth callback(公開)。authorize-urlの発行はadmin-apiの認証済みroute
   product-fetch/    BASE商品ポーリング→商品マスター反映(EventBridge)
   ai-generate-worker/  AI生成ワーカー(SQS)
   ebay-sync-worker/    eBay出品/更新ワーカー(SQS)
   sales-poller/     BASE/eBay売却検知(EventBridge)
   inventory-sync-worker/ 在庫同期・二重販売対策(SQS)
   inventory-diff-check/  在庫差分チェック(EventBridge、日次)
+  tenant-offboarding/    解約テナントのmarketplace delist + OAuth revoke(EventBridge、1時間毎)
   admin-api/        管理画面向けAPI(API Gateway)
 infra/              AWS CDK(TypeScript)。全AWSリソース定義
 apps/admin/         Next.js管理画面(Amplify Hosting)
@@ -84,6 +197,8 @@ pnpm -r run test
 
 ## デプロイ
 
+**実際にゼロから本番稼働まで持っていく際は、`docs/deployment-runbook.md`を上から順にチェックリストとして使うこと** — 以下のセクションと、SES設定・WAF/CloudFront切替・スモークテストなど本README各所に散らばった手順を実行順に1本化したもの。以下の2セクションはその中のブートストラップ部分の抜粋。
+
 ### 1. 一度きりの人手によるブートストラップ
 
 1. 自分のAWS認証情報で `cd infra && npx cdk deploy AiEcPlatform-dev-GithubOidc --context bootstrapOidc=true --context region=us-east-2` を一度だけ実行し、GitHub ActionsがOIDCでAssumeできるIAMロールを作成する。
@@ -92,7 +207,10 @@ pnpm -r run test
 4. `cdk bootstrap`を対象アカウント/リージョンに対して実行。
 5. `.github/workflows/deploy.yml` を `workflow_dispatch` から実行(environment=dev または prod)。
 6. デプロイ後、Secrets Managerの `ai-ec-platform/app-credentials/{base,ebay,openai}` に実クレデンシャルを手動投入。
-7. Cognitoに管理者ユーザーを作成(`aws cognito-idp admin-create-user`)。
+7. AWSコンソールで `DbMigrate` Lambda(`services/lambdas/db-migrate`)を1回テスト実行し、`packages/db/migrations/*.sql` を適用してブートストラップテナント行を作成する(繰り返し実行しても安全 -- drizzleの標準マイグレーターが適用済みを記録する)。新しいマイグレーションを追加した際も、同じLambdaを再実行すればよい。
+8. Cognitoに管理者ユーザーを作成(`aws cognito-idp admin-create-user`。カスタム属性 `custom:tenant_id` に、ステップ7で作成したブートストラップテナントのID(`00000000-0000-0000-0000-000000000001`)を設定する)。
+9. BASE/eBayのOAuth接続は、ステップ8で作成した管理者アカウントで管理画面にログインし、`/onboarding`(または`/commerce`・サイドバー)の「連携」ボタンから行う。**(round 12の変更点)** 以前存在した公開・無認証の `GET /oauth/{base,ebay}/authorize` ルートは廃止した — マルチテナントSaaSでは危険(認証なしに任意のtenantIdへOAuth接続を紐付けられた)なため。ステップ8で作成したCognitoユーザーは`custom:tenant_id`にブートストラップテナントIDを持つので、認証済みの`GET /admin/oauth/{channel}/authorize-url`が自動的に同じテナント向けの署名済みstateを発行する — 追加の移行作業は不要。
+
 
 ### 2. 通常のデプロイフロー
 
@@ -104,3 +222,20 @@ mainへの直接pushは禁止(ブランチ保護をリポジトリ側で設定)�
 - GitHub→AWSはOIDC(静的キーなし)。
 - 各Lambdaは最小権限のIAMロール(DB Data API・該当Secrets・該当SQSキューのみ)。
 - 本番デプロイ・Secrets変更・商品公開(eBay出品)は人間承認が必須な設計。
+
+### TOTP(MFA)紛失時の復旧手順
+
+Cognitoユーザープールは `Mfa.REQUIRED` — 全アカウントがTOTP必須で、セルフサービスの復旧フローは現状存在しない。認証アプリの機種変更・紛失を店舗から連絡された場合、運営者は以下の手順で本人確認の上MFAを再設定する。
+
+1. **本人確認**: 登録メールアドレス宛に確認メールを送り、返信または別の合意済み手段(電話等)で本人であることを確認する。契約情報(会社名・登録メール)が一致することを確認してから次に進む。
+2. **MFA設定の解除**: 該当ユーザーのMFA設定を解除する。
+   ```bash
+   aws cognito-idp admin-set-user-mfa-preference \
+     --user-pool-id <USER_POOL_ID> \
+     --username <ユーザーのメールアドレス> \
+     --software-token-mfa-settings Enabled=false
+   ```
+3. **店舗へ案内**: 次回ログイン時にTOTPの再設定画面(QRコード)が表示される旨を伝える。パスワード自体は変更不要(紛失は認証アプリのみが対象の場合)。
+4. **監査ログへの記録**: 対応した日時・担当者・確認方法を運営側の記録(スプレッドシート等)に残す — このサービス自体の `audit_log` はテナント操作を記録する仕組みであり、運営者によるCognito操作はその対象外のため、別途手元で記録すること。
+
+パスワード自体も忘れている場合は、`admin-set-user-password --permanent` で新しいパスワードを設定し、上記と合わせて案内する。セルフサービス化(店舗側で完結する復旧フロー)は将来の改善候補。

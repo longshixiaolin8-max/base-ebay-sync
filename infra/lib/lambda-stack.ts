@@ -27,18 +27,29 @@ export interface LambdaStackProps extends cdk.StackProps {
     base: secretsmanager.Secret;
     ebay: secretsmanager.Secret;
     openai: secretsmanager.Secret;
+    stripe: secretsmanager.Secret;
+    signup: secretsmanager.Secret;
   };
   oauthTokenSecretArnPattern: string;
   apiUrl: string;
+  adminAppUrl: string;
+  /** Only actually read (as CLOUDFRONT_SHARED_SECRET) when config.apiEntrypoint is
+   *  "cloudfront" -- see requireCloudFrontOrigin in services/lambdas/shared/src. */
+  cloudFrontSharedSecret: secretsmanager.Secret;
+  /** Scoped Cognito identifiers used after our own SES OTP has verified email ownership. */
+  userPoolArn: string;
+  userPoolId: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
     inventorySync: sqs.Queue;
+    ebayPlatformNotificationPoll: sqs.Queue;
   };
   dlqs: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
     inventorySync: sqs.Queue;
+    ebayPlatformNotificationPoll: sqs.Queue;
   };
   productImagesBucket: s3.Bucket;
 }
@@ -53,18 +64,21 @@ const ESM_BUNDLING: Partial<nodejs.BundlingOptions> = {
 
 export class LambdaStack extends cdk.Stack {
   readonly adminApiFn: nodejs.NodejsFunction;
-  readonly oauthBaseAuthorizeFn: nodejs.NodejsFunction;
   readonly oauthBaseCallbackFn: nodejs.NodejsFunction;
-  readonly oauthEbayAuthorizeFn: nodejs.NodejsFunction;
   readonly oauthEbayCallbackFn: nodejs.NodejsFunction;
   readonly ebayWebhookFn: nodejs.NodejsFunction;
+  readonly ebayPlatformNotificationDispatcherFn: nodejs.NodejsFunction;
   readonly productFetchFn: nodejs.NodejsFunction;
   readonly aiGenerateWorkerFn: nodejs.NodejsFunction;
   readonly ebaySyncWorkerFn: nodejs.NodejsFunction;
   readonly salesPollerFn: nodejs.NodejsFunction;
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
+  readonly tenantOffboardingFn: nodejs.NodejsFunction;
   readonly dlqRedriveFn: nodejs.NodejsFunction;
+  readonly signupHandlerFn: nodejs.NodejsFunction;
+  readonly stripeWebhookFn: nodejs.NodejsFunction;
+  readonly dbMigrateFn: nodejs.NodejsFunction;
 
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
@@ -76,11 +90,35 @@ export class LambdaStack extends cdk.Stack {
       AI_GENERATE_QUEUE_URL: props.queues.aiGenerate.queueUrl,
       EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
       INVENTORY_SYNC_QUEUE_URL: props.queues.inventorySync.queueUrl,
+      EBAY_PLATFORM_NOTIFICATION_POLL_QUEUE_URL: props.queues.ebayPlatformNotificationPoll.queueUrl,
       AI_PROVIDER: props.config.aiProvider,
+      // Read by @ai-ec/lambda-shared's secrets.ts to build env-scoped Secrets Manager
+      // names (see secrets-stack.ts) so dev and prod, run side by side in the same
+      // account, never read/write each other's app credentials or OAuth tokens.
+      PLATFORM_ENV: props.config.envName,
+      // requireCloudFrontOrigin treats this as a pure no-op when unset -- only actually
+      // set (and enforced) once config.apiEntrypoint is "cloudfront", so this round's own
+      // deploy can never itself break traffic still using the direct execute-api URL.
+      ...(props.config.apiEntrypoint === "cloudfront"
+        ? { CLOUDFRONT_SHARED_SECRET: props.cloudFrontSharedSecret.secretValue.unsafeUnwrap() }
+        : {}),
     };
 
     const oauthTokenSecretsPolicy = new iam.PolicyStatement({
-      actions: ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret"],
+      // DeleteSecret is needed by tenant-offboarding's own OAuth-revoke step (see
+      // deleteOAuthConnectionsForTenant) and by ebay-webhook's Marketplace Account
+      // Deletion handler (deleteOAuthConnectionsByExternalAccount) -- both call
+      // DeleteSecretCommand against a token secret under this same prefix. Granted on the
+      // same shared, already-broad (every makeFn'd lambda gets read+write on every tenant's
+      // OAuth token secret) statement rather than a narrower per-lambda one, matching this
+      // policy's existing precedent rather than introducing a new grant shape for it.
+      actions: [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:DeleteSecret",
+      ],
       resources: [props.oauthTokenSecretArnPattern],
     });
 
@@ -90,6 +128,22 @@ export class LambdaStack extends cdk.Stack {
       handlerName: string,
       extraEnv: Record<string, string> = {},
       timeout = cdk.Duration.seconds(30),
+      // Production-readiness pass: unset (Lambda's own account-wide unreserved pool, default
+      // 1000 concurrent executions region-wide) for every function EXCEPT the SQS-driven
+      // workers below, which pass an explicit cap. Those four scale with queue depth, not a
+      // fixed schedule -- a burst (a webhook flood, a large CSV-driven product-fetch cycle)
+      // could otherwise spike their concurrency high enough to exhaust the account's shared
+      // pool and starve admin-api/the public webhooks of capacity. The caps chosen are a
+      // deliberately conservative starting point (bounding worst-case parallel calls against
+      // BASE/eBay's own account-level API rate limits, which are not published precisely
+      // enough here to size exactly) -- tune upward via CloudWatch Throttles/Duration once
+      // real traffic is observed.
+      //
+      // Only actually applied when props.config.lambdaConcurrencyLimitsEnabled is true (see
+      // its own doc comment) -- confirmed live that this account's account-wide Concurrent
+      // executions quota was AWS's minimum (10), not the usual 1000, making ANY
+      // reservedConcurrentExecutions value on ANY function fail deployment outright.
+      reservedConcurrency?: number,
     ): nodejs.NodejsFunction => {
       const fn = new nodejs.NodejsFunction(this, id, {
         entry: path.join(REPO_ROOT, entry),
@@ -102,6 +156,7 @@ export class LambdaStack extends cdk.Stack {
         logRetention: logs.RetentionDays.ONE_MONTH,
         environment: { ...commonEnv, ...extraEnv },
         bundling: ESM_BUNDLING,
+        reservedConcurrentExecutions: props.config.lambdaConcurrencyLimitsEnabled ? reservedConcurrency : undefined,
       });
 
       props.cluster.grantDataApiAccess(fn);
@@ -110,26 +165,22 @@ export class LambdaStack extends cdk.Stack {
     };
 
     // --- OAuth ---
-    this.oauthBaseAuthorizeFn = makeFn(
-      "OauthBaseAuthorize",
-      "services/lambdas/oauth-base/src/handler.ts",
-      "authorize",
-      { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
-    );
+    // Round 12 hardening ("public OAuth authorize routeを廃止"): only /callback is public
+    // now (BASE/eBay's own redirect target, which never carries a Cognito session either --
+    // protected by verifyState's signed, tenant-bound, time-limited state instead). The
+    // /authorize step itself moved entirely to admin-api's authenticated
+    // GET /admin/oauth/{base,ebay}/authorize-url, which mints that same signed state from
+    // *this caller's own* tenantId -- so there's no longer a separate Authorize Lambda/route
+    // for either channel.
     this.oauthBaseCallbackFn = makeFn(
       "OauthBaseCallback",
       "services/lambdas/oauth-base/src/handler.ts",
       "callback",
       { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
     );
-    this.oauthEbayAuthorizeFn = makeFn("OauthEbayAuthorize", "services/lambdas/oauth-ebay/src/handler.ts", "authorize");
     this.oauthEbayCallbackFn = makeFn("OauthEbayCallback", "services/lambdas/oauth-ebay/src/handler.ts", "callback");
-    for (const fn of [this.oauthBaseAuthorizeFn, this.oauthBaseCallbackFn]) {
-      props.appCredentialSecrets.base.grantRead(fn);
-    }
-    for (const fn of [this.oauthEbayAuthorizeFn, this.oauthEbayCallbackFn]) {
-      props.appCredentialSecrets.ebay.grantRead(fn);
-    }
+    props.appCredentialSecrets.base.grantRead(this.oauthBaseCallbackFn);
+    props.appCredentialSecrets.ebay.grantRead(this.oauthEbayCallbackFn);
 
     this.ebayWebhookFn = makeFn(
       "EbayWebhook",
@@ -140,6 +191,31 @@ export class LambdaStack extends cdk.Stack {
     );
     props.appCredentialSecrets.ebay.grantRead(this.ebayWebhookFn);
     props.queues.inventorySync.grantSendMessages(this.ebayWebhookFn);
+    props.queues.ebayPlatformNotificationPoll.grantSendMessages(this.ebayWebhookFn);
+
+    // Round 14 hardening ("eBay Platform Notification abuse対策"): the actual eBay poll a
+    // platform-notification triggers now runs here, off the public webhook's own request
+    // path -- see ebay-webhook's own handlePlatformNotification/triggerCoalescedPoll
+    // comments for why (a flood of HTTP requests can amplify at most into this queue's
+    // depth, never into synchronous eBay API calls). Deployed from the same handler.ts as
+    // EbayWebhook above, just a different exported entrypoint -- same pattern as
+    // oauth-{base,ebay}'s authorize/callback split before it.
+    this.ebayPlatformNotificationDispatcherFn = makeFn(
+      "EbayPlatformNotificationDispatcher",
+      "services/lambdas/ebay-webhook/src/handler.ts",
+      "dispatchPoll",
+      {},
+      cdk.Duration.minutes(2),
+      // Matches this route's own API Gateway throttle intent (5 req/s, see api-stack.ts) --
+      // even a fully coalesced flood shouldn't fan out into more than a handful of parallel
+      // eBay poll calls at once.
+      5,
+    );
+    props.appCredentialSecrets.ebay.grantRead(this.ebayPlatformNotificationDispatcherFn);
+    props.queues.inventorySync.grantSendMessages(this.ebayPlatformNotificationDispatcherFn);
+    this.ebayPlatformNotificationDispatcherFn.addEventSource(
+      new SqsEventSource(props.queues.ebayPlatformNotificationPoll, { batchSize: 5, reportBatchItemFailures: true }),
+    );
 
     // --- Product / AI / eBay sync pipeline ---
     this.productFetchFn = makeFn(
@@ -163,6 +239,11 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       props.config.aiProvider === "openai" ? {} : {},
       cdk.Duration.minutes(2),
+      // Bedrock/OpenAI both apply their own per-account TPM/RPM quotas well below Lambda's
+      // shared 1000-concurrency pool -- capping here fails fast into this queue's own
+      // redrive/DLQ instead of every invocation past the provider's real limit burning a
+      // Lambda invocation just to immediately 429.
+      10,
     );
     if (props.config.aiProvider === "openai") {
       props.appCredentialSecrets.openai.grantRead(this.aiGenerateWorkerFn);
@@ -184,11 +265,16 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       {},
       cdk.Duration.minutes(2),
+      10,
     );
     props.appCredentialSecrets.ebay.grantRead(this.ebaySyncWorkerFn);
     this.ebaySyncWorkerFn.addEventSource(
       new SqsEventSource(props.queues.ebaySync, { batchSize: 5, reportBatchItemFailures: true }),
     );
+    // Needed for the AI mis-listing gate (item #5): when a product's content has changed
+    // since its AI draft was generated, publish()/update() enqueue a fresh ai_generate job
+    // instead of pushing a possibly-stale listing.
+    props.queues.aiGenerate.grantSendMessages(this.ebaySyncWorkerFn);
 
     // --- Inventory sync (double-sell prevention) ---
     this.salesPollerFn = makeFn(
@@ -215,6 +301,7 @@ export class LambdaStack extends cdk.Stack {
       "handler",
       {},
       cdk.Duration.minutes(2),
+      10,
     );
     props.appCredentialSecrets.base.grantRead(this.inventorySyncWorkerFn);
     props.appCredentialSecrets.ebay.grantRead(this.inventorySyncWorkerFn);
@@ -234,6 +321,26 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
+    });
+
+    // Tenant lifecycle (round 11 hardening, "解約済みテナントのworker動作を修正"): delists a
+    // canceled/canceling tenant's still-published listings on both marketplaces, then
+    // revokes this platform's own OAuth connections for it once every one is confirmed
+    // delisted. Runs independently of, and less often than, the routine sync workers above
+    // -- offboarding has no latency requirement, and listWorkerEligibleTenants already keeps
+    // a canceling tenant's *existing* listings safely synced in the meantime.
+    this.tenantOffboardingFn = makeFn(
+      "TenantOffboarding",
+      "services/lambdas/tenant-offboarding/src/handler.ts",
+      "handler",
+      {},
+      cdk.Duration.minutes(5),
+    );
+    props.appCredentialSecrets.base.grantRead(this.tenantOffboardingFn);
+    props.appCredentialSecrets.ebay.grantRead(this.tenantOffboardingFn);
+    new events.Rule(this, "TenantOffboardingSchedule", {
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
     });
 
     // --- Automatic recovery after API failures (item #4) ---
@@ -272,23 +379,153 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
+    // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
+    // email ownership first, then and only then do we create the Cognito identity + tenant.
+    this.signupHandlerFn = makeFn(
+      "SignupHandler",
+      "services/lambdas/signup/src/handler.ts",
+      "handler",
+      {
+        COGNITO_USER_POOL_ID: props.userPoolId,
+        ADMIN_APP_URL: props.adminAppUrl,
+        ...(props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {}),
+      },
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
+    props.appCredentialSecrets.signup.grantRead(this.signupHandlerFn);
+    this.signupHandlerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminSetUserPassword",
+          "cognito-idp:AdminDeleteUser",
+        ],
+        resources: [props.userPoolArn],
+      }),
+    );
+    this.signupHandlerFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+      }),
+    );
+
+    this.stripeWebhookFn = makeFn(
+      "StripeWebhook",
+      "services/lambdas/stripe-webhook/src/handler.ts",
+      "handler",
+      // Unset by default -- see PlatformConfig.sesFromEmail's own doc comment. sendEmail()
+      // (services/lambdas/shared/src/email.ts) throws a clear, caught-and-logged error
+      // instead of silently no-op'ing until this is actually configured post-deploy.
+      props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {},
+      cdk.Duration.seconds(30),
+    );
+    props.appCredentialSecrets.stripe.grantRead(this.stripeWebhookFn);
+    // SES v2 has no per-secret-style resource to scope down to; identity/* is the narrowest
+    // this grants (every verified sending identity in this account/region), matching this
+    // stack's existing precedent of a wildcard-within-service grant where finer scoping isn't
+    // possible (see the Bedrock InvokeModel grant above).
+    this.stripeWebhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+      }),
+    );
+
+    // --- Database migrations ---
+    // No environment has ever had a script or CI step that actually applies
+    // packages/db/migrations/*.sql -- every one so far was run by hand from a session that
+    // happened to have direct database access. Meant to be invoked manually (AWS Console
+    // "Test", or `aws lambda invoke`) once per fresh environment and again whenever new
+    // migrations are added; drizzle's own migrator tracks what's already applied, so
+    // repeat invocations are safe. Built directly (not via makeFn) because it alone needs
+    // packages/db/migrations copied into its bundle -- migrate() reads those files at
+    // runtime, and esbuild bundling doesn't pull in non-JS assets on its own.
+    this.dbMigrateFn = new nodejs.NodejsFunction(this, "DbMigrate", {
+      entry: path.join(REPO_ROOT, "services/lambdas/db-migrate/src/handler.ts"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
+      depsLockFilePath: LOCK_FILE,
+      logRetention: logs.RetentionDays.ONE_MONTH,
+      environment: commonEnv,
+      bundling: {
+        ...ESM_BUNDLING,
+        commandHooks: {
+          beforeBundling: () => [],
+          afterBundling: (inputDir: string, outputDir: string) => [
+            `cp -r ${inputDir}/packages/db/migrations ${outputDir}/migrations`,
+          ],
+          beforeInstall: () => [],
+        },
+      },
+    });
+    props.cluster.grantDataApiAccess(this.dbMigrateFn);
+    // Round 15 hardening ("DB migrationをdeployに統合"): the deploy workflow looks this
+    // output up (`aws cloudformation describe-stacks`) right after `cdk deploy` to invoke
+    // this exact function -- an explicit output rather than a hardcoded name because CDK
+    // auto-generates this function's real name (no `functionName` override here), and that
+    // generated name isn't predictable ahead of a real deploy.
+    new cdk.CfnOutput(this, "DbMigrateFunctionName", { value: this.dbMigrateFn.functionName });
+
     // --- Admin API ---
     this.adminApiFn = makeFn(
       "AdminApi",
       "services/lambdas/admin-api/src/handler.ts",
       "handler",
-      { EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications` },
-      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to
-      // our own endpoint during destination creation, so this needs more than the old 15s.
-      cdk.Duration.seconds(30),
+      {
+        EBAY_WEBHOOK_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/notifications`,
+        EBAY_PLATFORM_NOTIFICATION_ENDPOINT_URL: `${props.apiUrl}/webhooks/ebay/platform-notifications`,
+        // Commercial-features round's SLO endpoint (GET /admin/slo) reports live DLQ depth --
+        // same env var names dlq-redrive already reads, reused here read-only.
+        AI_GENERATE_DLQ_URL: props.dlqs.aiGenerate.queueUrl,
+        EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
+        INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
+        // GET /admin/oauth/base/authorize-url (this platform's sole BASE OAuth entry point
+        // as of round 12's "public OAuth authorize routeを廃止") needs the same fixed
+        // redirect URI BASE's own callback is registered against.
+        BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
+        // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
+        // billing portal session it creates.
+        ADMIN_APP_URL: props.adminAppUrl,
+      },
+      // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
+      // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
+      // several DB round trips per product across up to 30 products by default -- both need
+      // more than the old 15s, and this comfortably covers either.
+      cdk.Duration.seconds(60),
     );
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
+    for (const dlq of [props.dlqs.aiGenerate, props.dlqs.ebaySync, props.dlqs.inventorySync]) {
+      dlq.grant(this.adminApiFn, "sqs:GetQueueAttributes");
+    }
     // Needed for POST /admin/ebay/location, which reads eBay app credentials and the
     // connected account's OAuth token (already granted to every fn via makeFn) to create
     // the seller's ship-from location.
     props.appCredentialSecrets.ebay.grantRead(this.adminApiFn);
+    // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
+    // to fetch a single item's raw detail response (e.g. to compare against product_master).
+    props.appCredentialSecrets.base.grantRead(this.adminApiFn);
+    // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
+    props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
+    // Needed for the commercial-features round's AI endpoints (SNS script generation,
+    // stale-product suggestions), which call Bedrock directly the same way
+    // ai-generate-worker does.
+    if (props.config.aiProvider === "openai") {
+      props.appCredentialSecrets.openai.grantRead(this.adminApiFn);
+    } else {
+      this.adminApiFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["bedrock:InvokeModel"],
+          resources: ["*"], // see the identical grant on aiGenerateWorkerFn above for why.
+        }),
+      );
+    }
 
     // productImagesBucket is provisioned for a future image re-hosting step (see README
     // follow-ups); no lambda writes to it yet, so no grant is issued until one does.

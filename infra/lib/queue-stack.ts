@@ -28,6 +28,7 @@ export class QueueStack extends cdk.Stack {
   readonly aiGenerate: QueuePair;
   readonly ebaySync: QueuePair;
   readonly inventorySync: QueuePair;
+  readonly ebayPlatformNotificationPoll: QueuePair;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -38,5 +39,11 @@ export class QueueStack extends cdk.Stack {
     this.aiGenerate = makeQueuePair(this, "AiGenerate", 12 * 60);
     this.ebaySync = makeQueuePair(this, "EbaySync", 12 * 60);
     this.inventorySync = makeQueuePair(this, "InventorySync", 12 * 60);
+    // Round 14 hardening ("eBay Platform Notification abuse対策"): decouples the public,
+    // unauthenticated POST /webhooks/ebay/platform-notifications from the actual eBay poll
+    // it triggers, so a flood of HTTP requests can amplify at most into this queue's own
+    // depth, never into synchronous eBay API calls running inline on the webhook's own
+    // request path. Its consumer (ebay-webhook's own dispatchPoll) runs at 1 minute.
+    this.ebayPlatformNotificationPoll = makeQueuePair(this, "EbayPlatformNotificationPoll", 6 * 60);
   }
 }

@@ -2,36 +2,132 @@ import * as cdk from "aws-cdk-lib";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 
+export interface SecretsStackProps extends cdk.StackProps {
+  envName: string;
+}
+
 /**
  * Provisions empty secret *containers* only. CDK never writes a real client id/secret
  * into these — that would mean the credential passes through a GitHub-triggered
  * pipeline and CloudFormation template diffs. A human fills in the real value after
  * deploy via `aws secretsmanager put-secret-value` or the console, satisfying both
  * "APIキーをGitHubへ保存しない" and "Secrets変更は人間承認必須".
+ *
+ * Names are scoped by envName for every env except "dev" (kept unprefixed for backward
+ * compatibility -- dev's secrets already have real BASE/eBay/OpenAI credentials filled in
+ * by hand; renaming them would silently break the one environment currently in live use).
+ * dev and prod are meant to run side by side in the same AWS account (see
+ * database-stack.ts/auth-stack.ts's own env-conditional settings), and Secrets Manager
+ * names must be unique per account/region -- without this scoping, a prod deploy would
+ * collide with dev's exact secret names and the two environments would end up reading/
+ * writing each other's credentials and OAuth tokens.
  */
 export class SecretsStack extends cdk.Stack {
   readonly baseAppCredentials: secretsmanager.Secret;
   readonly ebayAppCredentials: secretsmanager.Secret;
   readonly openAiApiKey: secretsmanager.Secret;
-  readonly oauthTokenPrefix = "ai-ec-platform/oauth/";
+  readonly stripeAppCredentials: secretsmanager.Secret;
+  readonly signupCredentials: secretsmanager.Secret;
+  readonly signupOtpCredentials: secretsmanager.Secret;
+  readonly cloudfrontSharedSecret: secretsmanager.Secret;
+  readonly oauthTokenPrefix: string;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: SecretsStackProps) {
     super(scope, id, props);
 
+    const envSegment = props.envName === "dev" ? "" : `${props.envName}/`;
+    // Same env-conditional pattern database-stack.ts/storage-stack.ts/auth-stack.ts already
+    // use for their own stateful resources: CloudFormation's default (RemovalPolicy.DESTROY,
+    // schedules AWS Secrets Manager's own 30-day recovery-window deletion) is fine for dev,
+    // but in prod a stack replacement or accidental `cdk destroy` must never be able to lose
+    // every tenant's live BASE/eBay/Stripe credentials -- RETAIN means CloudFormation leaves
+    // the secret in place (and its value untouched) even if this stack or the resource itself
+    // is deleted.
+    const secretRemovalPolicy = props.envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
+    // Only a prefix for IAM scoping (see oauthTokenSecretArnPattern in infra/bin/infra.ts) --
+    // the actual secrets under it are created dynamically at runtime by saveOAuthToken
+    // (services/lambdas/shared/src/secrets.ts), not provisioned here. Its full name is
+    // `${oauthTokenPrefix}${tenantId}/${channel}/${externalAccountId}` -- the tenantId
+    // segment is required so that two tenants resolving to the same (channel,
+    // externalAccountId) (e.g. a not-yet-known BASE shop id) never share the same Secrets
+    // Manager secret name. This prefix already covers that longer path with no change here.
+    this.oauthTokenPrefix = `ai-ec-platform/${envSegment}oauth/`;
+
     this.baseAppCredentials = new secretsmanager.Secret(this, "BaseAppCredentials", {
-      secretName: "ai-ec-platform/app-credentials/base",
+      secretName: `ai-ec-platform/${envSegment}app-credentials/base`,
       description: "BASE OAuth app clientId/clientSecret. Fill in manually after deploy.",
     });
 
     this.ebayAppCredentials = new secretsmanager.Secret(this, "EbayAppCredentials", {
-      secretName: "ai-ec-platform/app-credentials/ebay",
+      secretName: `ai-ec-platform/${envSegment}app-credentials/ebay`,
       description:
         "eBay OAuth app clientId/clientSecret/ruName/merchantLocationKey. Fill in manually after deploy.",
     });
 
     this.openAiApiKey = new secretsmanager.Secret(this, "OpenAiApiKey", {
-      secretName: "ai-ec-platform/app-credentials/openai",
+      secretName: `ai-ec-platform/${envSegment}app-credentials/openai`,
       description: "OpenAI API key, only used when AI_PROVIDER=openai. Fill in manually after deploy.",
     });
+
+    // Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing").
+    // { secretKey, publishableKey, priceId, webhookSigningSecret } -- test-mode only for
+    // now, same manual-fill-in-after-deploy pattern as every other credential above.
+    this.stripeAppCredentials = new secretsmanager.Secret(this, "StripeAppCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/stripe`,
+      description: "Stripe test-mode secretKey/publishableKey/priceId/webhookSigningSecret. Fill in manually after deploy.",
+    });
+
+    // Legacy beta invite secret. Kept in place during the public-SaaS migration so
+    // deploying this release never mutates or replaces an existing manually-populated
+    // secret as a side effect.
+    this.signupCredentials = new secretsmanager.Secret(this, "SignupCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/signup`,
+      description: "Legacy beta signup secret. No longer read by the public signup flow.",
+    });
+
+    // Dedicated, newly-named HMAC pepper for short-lived public-signup email OTPs. A
+    // separate resource/name guarantees every existing dev/prod environment receives a
+    // generated pepper rather than depending on how CloudFormation updates an old secret
+    // that used to contain a manually-entered inviteCode.
+    this.signupOtpCredentials = new secretsmanager.Secret(this, "SignupOtpCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/signup-otp`,
+      description: "Auto-generated HMAC pepper for public signup email verification codes.",
+      generateSecretString: {
+        secretStringTemplate: "{}",
+        generateStringKey: "otpPepper",
+        excludePunctuation: true,
+        passwordLength: 48,
+      },
+    });
+
+    // Round 15 hardening ("WAFを実際の本番経路に適用"). Unlike every secret above, this one
+    // needs no manual fill-in -- it's an internal value with no external registration, so
+    // CDK generates it. CloudFrontStack injects it as a custom header on every request it
+    // forwards to the origin API; requireCloudFrontOrigin (services/lambdas/shared/src) reads
+    // it at runtime and compares it against the incoming request's header, letting a Lambda
+    // tell "this came through the WAF-protected CloudFront distribution" apart from "this
+    // hit the direct execute-api URL" -- HTTP API v2 supports neither a resource policy nor
+    // a direct WAF association (confirmed against AWS's own docs), so this shared-header
+    // pattern is the recommended alternative, not a guessed workaround.
+    this.cloudfrontSharedSecret = new secretsmanager.Secret(this, "CloudFrontSharedSecret", {
+      secretName: `ai-ec-platform/${envSegment}cloudfront-shared-secret`,
+      description: "Auto-generated -- CloudFront injects this as a custom header; Lambdas verify it. Never filled in manually.",
+      generateSecretString: { excludePunctuation: true, passwordLength: 32 },
+    });
+
+    // secretsmanager.Secret's props don't accept removalPolicy directly (unlike the RDS
+    // cluster/S3 bucket constructs above it borrows this pattern from) -- applied here via
+    // the same method every CDK resource exposes.
+    for (const secret of [
+      this.baseAppCredentials,
+      this.ebayAppCredentials,
+      this.openAiApiKey,
+      this.stripeAppCredentials,
+      this.signupCredentials,
+      this.signupOtpCredentials,
+      this.cloudfrontSharedSecret,
+    ]) {
+      secret.applyRemovalPolicy(secretRemovalPolicy);
+    }
   }
 }

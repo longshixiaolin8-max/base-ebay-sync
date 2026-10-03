@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import "source-map-support/register.js";
 import * as cdk from "aws-cdk-lib";
+import { AdminHostingStack } from "../lib/admin-hosting-stack.js";
 import { ApiCoreStack } from "../lib/api-core-stack.js";
 import { ApiStack } from "../lib/api-stack.js";
 import { AuthStack } from "../lib/auth-stack.js";
+import { CloudFrontStack } from "../lib/cloudfront-stack.js";
 import { DatabaseStack } from "../lib/database-stack.js";
 import { loadConfig } from "../lib/config.js";
 import { GithubOidcStack } from "../lib/github-oidc-stack.js";
@@ -12,6 +14,7 @@ import { MonitoringStack } from "../lib/monitoring-stack.js";
 import { QueueStack } from "../lib/queue-stack.js";
 import { SecretsStack } from "../lib/secrets-stack.js";
 import { StorageStack } from "../lib/storage-stack.js";
+import { WafStack } from "../lib/waf-stack.js";
 
 const app = new cdk.App();
 
@@ -19,8 +22,39 @@ const envName = (app.node.tryGetContext("env") as string | undefined) ?? "dev";
 const alarmEmail = app.node.tryGetContext("alarmEmail") as string | undefined;
 const aiProvider = app.node.tryGetContext("aiProvider") as string | undefined;
 const githubRepo = (app.node.tryGetContext("githubRepo") as string | undefined) ?? "OWNER/base-ebay-sync";
+const monthlyBudgetUsd = app.node.tryGetContext("monthlyBudgetUsd") as string | undefined;
+// "direct" (default, unchanged) or "cloudfront" -- see PlatformConfig.apiEntrypoint's own
+// doc comment and README's runbook before ever passing --context apiEntrypoint=cloudfront.
+const apiEntrypoint = app.node.tryGetContext("apiEntrypoint") as string | undefined;
+// See PlatformConfig.ebayPlatformNotificationThrottleEnabled's own doc comment: leave this
+// false on the first deploy that ever introduces the platform-notifications route in a given
+// environment (it fails otherwise -- the Route doesn't exist yet for the Stage to reference),
+// then pass `--context ebayPlatformNotificationThrottleEnabled=true` on a later deploy once
+// that first one has succeeded.
+const ebayPlatformNotificationThrottleEnabled = app.node.tryGetContext("ebayPlatformNotificationThrottleEnabled") as
+  | string
+  | undefined;
+// See PlatformConfig.sesFromEmail's own doc comment: unset by default (billing-notice emails
+// stay a caught, logged no-op) until an address/domain has been verified in the SES console
+// for this account/region and passed here via `--context sesFromEmail=notifications@yourdomain`.
+const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
+// See PlatformConfig.lambdaConcurrencyLimitsEnabled's own doc comment: false (default) until
+// this account's Lambda "Concurrent executions" quota is confirmed (GetServiceQuota,
+// lambda/L-B99A9384) to be comfortably above the sum of every reservedConcurrency value
+// makeFn sets -- an account still on AWS's low starting quota (as low as 10) cannot reserve
+// concurrency for even one function without violating AWS's own 10-unit unreserved floor.
+const lambdaConcurrencyLimitsEnabled = app.node.tryGetContext("lambdaConcurrencyLimitsEnabled") as string | undefined;
 
-const config = loadConfig(envName, alarmEmail, aiProvider);
+const config = loadConfig(
+  envName,
+  alarmEmail,
+  aiProvider,
+  monthlyBudgetUsd,
+  apiEntrypoint,
+  ebayPlatformNotificationThrottleEnabled,
+  sesFromEmail,
+  lambdaConcurrencyLimitsEnabled,
+);
 
 // Region is read from CDK context (`--context region=...`), not from
 // CDK_DEFAULT_REGION/AWS_REGION — the CDK CLI recomputes those env vars from the
@@ -46,11 +80,41 @@ if (app.node.tryGetContext("bootstrapOidc") === "true") {
 }
 
 const database = new DatabaseStack(app, `${stackPrefix}-Database`, config, { env, tags });
-const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags });
+const secrets = new SecretsStack(app, `${stackPrefix}-Secrets`, { env, tags, envName });
 const storage = new StorageStack(app, `${stackPrefix}-Storage`, config, { env, tags });
 const auth = new AuthStack(app, `${stackPrefix}-Auth`, config, { env, tags });
 const queues = new QueueStack(app, `${stackPrefix}-Queues`, { env, tags });
-const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags });
+// Created before ApiCoreStack so its real hosted origin (a stable *.amplifyapp.com URL,
+// independent of anything ApiCoreStack/LambdaStack/ApiStack produce) can tighten the API's
+// CORS config away from the wildcard bootstrap fallback -- see api-core-stack.ts.
+const adminHosting = new AdminHostingStack(app, `${stackPrefix}-AdminHosting`, { env, tags, envName });
+const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags, adminOrigin: adminHosting.url });
+
+// WAF-protected CloudFront entry point in front of apiCore.api -- created before LambdaStack
+// (unlike the rest of this file's original ordering) because computing apiUrl below needs
+// its auto-generated domain name, which only exists once the distribution itself does.
+// Standing this up is still purely additive: config.apiEntrypoint (default "direct") is
+// what actually decides whether anything downstream (BASE_OAUTH_REDIRECT_URI, the eBay
+// webhook destinations, CLOUDFRONT_SHARED_SECRET) ever uses it -- see cloudfront-stack.ts
+// and config.ts's own doc comments, and README's runbook for the real cutover.
+const waf = new WafStack(app, `${stackPrefix}-Waf`, {
+  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
+  tags,
+  crossRegionReferences: true,
+});
+const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
+  env,
+  tags,
+  crossRegionReferences: true,
+  api: apiCore.api,
+  webAclArn: waf.webAcl.attrArn,
+  sharedSecret: secrets.cloudfrontSharedSecret,
+});
+cloudfrontApi.addStackDependency(apiCore);
+cloudfrontApi.addStackDependency(waf);
+cloudfrontApi.addStackDependency(secrets);
+
+const apiUrl = config.apiEntrypoint === "cloudfront" ? `https://${cloudfrontApi.distribution.domainName}` : apiCore.api.apiEndpoint;
 
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
@@ -62,11 +126,27 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     base: secrets.baseAppCredentials,
     ebay: secrets.ebayAppCredentials,
     openai: secrets.openAiApiKey,
+    stripe: secrets.stripeAppCredentials,
+    signup: secrets.signupOtpCredentials,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
-  apiUrl: apiCore.api.apiEndpoint,
-  queues: { aiGenerate: queues.aiGenerate.queue, ebaySync: queues.ebaySync.queue, inventorySync: queues.inventorySync.queue },
-  dlqs: { aiGenerate: queues.aiGenerate.dlq, ebaySync: queues.ebaySync.dlq, inventorySync: queues.inventorySync.dlq },
+  apiUrl,
+  adminAppUrl: adminHosting.url,
+  cloudFrontSharedSecret: secrets.cloudfrontSharedSecret,
+  userPoolArn: auth.userPool.userPoolArn,
+  userPoolId: auth.userPool.userPoolId,
+  queues: {
+    aiGenerate: queues.aiGenerate.queue,
+    ebaySync: queues.ebaySync.queue,
+    inventorySync: queues.inventorySync.queue,
+    ebayPlatformNotificationPoll: queues.ebayPlatformNotificationPoll.queue,
+  },
+  dlqs: {
+    aiGenerate: queues.aiGenerate.dlq,
+    ebaySync: queues.ebaySync.dlq,
+    inventorySync: queues.inventorySync.dlq,
+    ebayPlatformNotificationPoll: queues.ebayPlatformNotificationPoll.dlq,
+  },
   productImagesBucket: storage.productImagesBucket,
 });
 lambdas.addStackDependency(database);
@@ -74,6 +154,8 @@ lambdas.addStackDependency(secrets);
 lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
 lambdas.addStackDependency(apiCore);
+lambdas.addStackDependency(auth);
+lambdas.addStackDependency(cloudfrontApi); // apiUrl may reference its domain name (config.apiEntrypoint === "cloudfront")
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
@@ -82,11 +164,12 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   userPool: auth.userPool,
   userPoolClient: auth.userPoolClient,
   adminApiFn: lambdas.adminApiFn,
-  oauthBaseAuthorizeFn: lambdas.oauthBaseAuthorizeFn,
   oauthBaseCallbackFn: lambdas.oauthBaseCallbackFn,
-  oauthEbayAuthorizeFn: lambdas.oauthEbayAuthorizeFn,
   oauthEbayCallbackFn: lambdas.oauthEbayCallbackFn,
   ebayWebhookFn: lambdas.ebayWebhookFn,
+  signupHandlerFn: lambdas.signupHandlerFn,
+  stripeWebhookFn: lambdas.stripeWebhookFn,
+  enableEbayPlatformNotificationThrottle: config.ebayPlatformNotificationThrottleEnabled,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);
@@ -96,7 +179,7 @@ new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
   env,
   tags,
   config,
-  dlqs: [queues.aiGenerate.dlq, queues.ebaySync.dlq, queues.inventorySync.dlq],
+  dlqs: [queues.aiGenerate.dlq, queues.ebaySync.dlq, queues.inventorySync.dlq, queues.ebayPlatformNotificationPoll.dlq],
   workerFns: [
     lambdas.adminApiFn,
     lambdas.productFetchFn,
@@ -105,5 +188,14 @@ new MonitoringStack(app, `${stackPrefix}-Monitoring`, {
     lambdas.salesPollerFn,
     lambdas.inventorySyncWorkerFn,
     lambdas.inventoryDiffCheckFn,
+    lambdas.tenantOffboardingFn,
+    lambdas.ebayPlatformNotificationDispatcherFn,
+  ],
+  // Must match exactly the functions makeFn gave a reservedConcurrency cap to (lambda-stack.ts).
+  concurrencyCappedFns: [
+    lambdas.aiGenerateWorkerFn,
+    lambdas.ebaySyncWorkerFn,
+    lambdas.inventorySyncWorkerFn,
+    lambdas.ebayPlatformNotificationDispatcherFn,
   ],
 });

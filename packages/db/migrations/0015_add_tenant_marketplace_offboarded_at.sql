@@ -1,0 +1,1 @@
+ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "marketplace_offboarded_at" timestamp with time zone;

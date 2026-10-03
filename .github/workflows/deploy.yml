@@ -9,6 +9,28 @@ on:
         type: choice
         options: [dev, prod]
         default: dev
+      enableEbayPlatformNotificationThrottle:
+        description: >-
+          Enable the per-route API Gateway throttle on the eBay platform-notifications
+          webhook. Leave unchecked (default) on an environment's first-ever deploy of this
+          route -- it fails otherwise, since the route doesn't exist yet for the throttle to
+          reference. Check it only on a LATER deploy, once that first one has already
+          succeeded. See README's "eBay Platform Notification abuse対策" section.
+        required: false
+        type: boolean
+        default: false
+      targetStacks:
+        description: >-
+          Advanced/one-off use only: space-separated stack names to deploy with
+          --exclusively instead of the normal --all (e.g. "AiEcPlatform-prod-Api"). Needed
+          when CloudFormation refuses to remove a cross-stack export because a downstream
+          stack still imports it ("Cannot delete export ... as it is in use by ...") -- the
+          fix is deploying the downstream stack (which drops the import) on its own first,
+          which --all can't do since it always deploys stacks in dependency order. Leave
+          blank for a normal deploy.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write # required for OIDC — no static AWS keys are ever stored in GitHub
@@ -17,6 +39,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      API_ENTRYPOINT: ${{ vars.API_ENTRYPOINT }}
     # GitHub Environment protection rules (configured in repo Settings > Environments)
     # gate this job: "prod" requires a human reviewer's approval before the job runs at
     # all, satisfying "本番デプロイは人間承認必須". "dev" has no required reviewers.
@@ -26,11 +50,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9.12.0
+          version: 10.34.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -45,12 +69,246 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: CDK deploy
+      - name: Production public-SaaS configuration preflight
+        if: inputs.environment == 'prod'
+        env:
+          LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
+          LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
+          LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          SES_FROM_EMAIL: ${{ vars.SES_FROM_EMAIL }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::prod environment variable $name is required before the public SaaS frontend can be released."
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Refresh GitHub OIDC deploy role
         working-directory: infra
         run: |
-          npx cdk deploy --all \
+          set -euo pipefail
+          # The role already exists (this workflow is running under it), so unlike the
+          # one-time initial bootstrap it can now safely update its own source-managed
+          # policy through the CDK bootstrap CloudFormation execution role. This keeps new
+          # deploy-time capabilities such as Amplify manual publishing reproducible instead
+          # of requiring an out-of-band IAM console edit.
+          npx cdk deploy "AiEcPlatform-${{ inputs.environment }}-GithubOidc" \
+            --context bootstrapOidc=true \
             --context env=${{ inputs.environment }} \
             --context region=${{ vars.AWS_REGION }} \
-            --context alarmEmail=${{ vars.ALARM_EMAIL }} \
             --context githubRepo=${{ github.repository }} \
             --require-approval never
+
+      - name: CDK deploy
+        working-directory: infra
+        env:
+          TARGET_STACKS: ${{ inputs.targetStacks }}
+        run: |
+          set -euo pipefail
+          # See targetStacks' own doc comment above: only set for the one-off case of
+          # unsticking a cross-stack export/import removal conflict. --exclusively skips
+          # deploying (or even checking) any stack this one depends on, so it must only be
+          # used once the operator has confirmed those dependency stacks are already up to
+          # date -- an ordinary run always leaves this blank and deploys --all as before.
+          if [ -n "$TARGET_STACKS" ]; then
+            echo "::notice::Targeted deploy (--exclusively): $TARGET_STACKS"
+            # shellcheck disable=SC2086
+            npx cdk deploy $TARGET_STACKS --exclusively \
+              --context env=${{ inputs.environment }} \
+              --context region=${{ vars.AWS_REGION }} \
+              --context alarmEmail=${{ vars.ALARM_EMAIL }} \
+              --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
+              --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --require-approval never
+          else
+            npx cdk deploy --all \
+              --context env=${{ inputs.environment }} \
+              --context region=${{ vars.AWS_REGION }} \
+              --context alarmEmail=${{ vars.ALARM_EMAIL }} \
+              --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
+              --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --require-approval never
+          fi
+
+      - name: Resolve public API URL
+        run: |
+          set -euo pipefail
+          if [ "${API_ENTRYPOINT:-direct}" = "cloudfront" ]; then
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-CloudFrontApi" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+              --output text)
+          else
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+              --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+              --output text)
+          fi
+          if [ -z "$PUBLIC_API_URL" ] || [ "$PUBLIC_API_URL" = "None" ]; then
+            echo "::error::Could not resolve the selected public API URL."
+            exit 1
+          fi
+          echo "PUBLIC_API_URL=$PUBLIC_API_URL" >> "$GITHUB_ENV"
+          echo "Using public API entry point: ${API_ENTRYPOINT:-direct}"
+
+      # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
+      # easy-to-forget post-deploy step (see README's old bootstrap notes) -- a new Lambda
+      # deployed against an un-migrated schema is exactly the "新Lambda + 旧schema共存"
+      # risk this closes. drizzle's own migrator only ever applies pending migrations and
+      # tracks what's already run in its own table, so this is safe to run on every deploy,
+      # including ones with no new migration at all (a no-op that exits cleanly).
+      #
+      # A migration failure here MUST fail this job (`exit 1`, no continue-on-error) --
+      # this is the actual guarantee behind "prodではmigration failure時に明確にdeploy失敗
+      # 扱いにする": CDK's own deploy step above can succeed (new Lambda code + infra is
+      # live) while the schema it expects never actually lands, silently leaving new code
+      # running against an old schema until someone happens to notice.
+      - name: Run DB migration
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          FN_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Lambdas" \
+            --query "Stacks[0].Outputs[?OutputKey=='DbMigrateFunctionName'].OutputValue" \
+            --output text)
+          if [ -z "$FN_NAME" ] || [ "$FN_NAME" = "None" ]; then
+            echo "::error::Could not resolve the DbMigrate Lambda's name from stack outputs."
+            exit 1
+          fi
+          echo "Invoking DbMigrate ($FN_NAME)..."
+          INVOKE_RESULT=$(aws lambda invoke \
+            --function-name "$FN_NAME" \
+            --cli-read-timeout 300 \
+            --payload '{}' \
+            /tmp/db-migrate-response.json)
+          echo "$INVOKE_RESULT"
+          echo "--- DbMigrate response payload ---"
+          cat /tmp/db-migrate-response.json
+          echo ""
+          FUNCTION_ERROR=$(echo "$INVOKE_RESULT" | jq -r '.FunctionError // empty')
+          if [ -n "$FUNCTION_ERROR" ]; then
+            echo "::error::DB migration failed (FunctionError=$FUNCTION_ERROR) -- see response payload above. Failing the deploy."
+            exit 1
+          fi
+          echo "DB migration applied successfully."
+
+      # Confirms the API Gateway route -> Lambda integration this deploy just updated is
+      # actually live end-to-end, not just that CloudFormation reported success. Uses the
+      # eBay webhook's own challenge endpoint (public, side-effect-free, no auth required)
+      # purely as a reachability check -- a 400 (missing challenge_code) proves the request
+      # made it through routing into a warm, responding Lambda; anything else (5xx, a
+      # connection failure) means something is broken post-deploy that CDK's own success
+      # exit code didn't catch.
+      - name: Post-deploy smoke test
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${PUBLIC_API_URL}/webhooks/ebay/notifications")
+          echo "GET /webhooks/ebay/notifications (no challenge_code) -> HTTP $STATUS"
+          if [ "$STATUS" != "400" ]; then
+            echo "::error::Smoke test failed: expected HTTP 400, got $STATUS. The API may not be responding correctly post-deploy."
+            exit 1
+          fi
+          echo "Smoke test passed: API is responding."
+
+      - name: Verify public billing readiness
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          HTTP_CODE=$(curl -sS --max-time 20 -o /tmp/public-pricing.json -w "%{http_code}" "${PUBLIC_API_URL}/public/pricing")
+          cat /tmp/public-pricing.json
+          echo ""
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Public pricing endpoint is not ready (HTTP $HTTP_CODE). For prod, Stripe must use sk_live_ credentials and a valid recurring Price."
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" = "prod" ] && [ "$(jq -r '.live' /tmp/public-pricing.json)" != "true" ]; then
+            echo "::error::Production billing is not live."
+            exit 1
+          fi
+
+      - name: Build production-configured admin frontend
+        env:
+          NEXT_PUBLIC_LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
+          NEXT_PUBLIC_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
+          NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+        run: |
+          set -euo pipefail
+          USER_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+            --output text)
+          USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
+            --output text)
+          test -n "$PUBLIC_API_URL" && test "$PUBLIC_API_URL" != "None"
+          test -n "$USER_POOL_ID" && test "$USER_POOL_ID" != "None"
+          test -n "$USER_POOL_CLIENT_ID" && test "$USER_POOL_CLIENT_ID" != "None"
+          NEXT_PUBLIC_API_BASE_URL="$PUBLIC_API_URL" \
+          NEXT_PUBLIC_COGNITO_USER_POOL_ID="$USER_POOL_ID" \
+          NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID="$USER_POOL_CLIENT_ID" \
+          pnpm --filter @ai-ec/admin build
+
+      - name: Deploy admin frontend to Amplify Hosting
+        run: |
+          set -euo pipefail
+          APP_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-AdminHosting" \
+            --query "Stacks[0].Outputs[?OutputKey=='AdminAppId'].OutputValue" \
+            --output text)
+          ADMIN_URL=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-AdminHosting" \
+            --query "Stacks[0].Outputs[?OutputKey=='AdminUrl'].OutputValue" \
+            --output text)
+          test -n "$APP_ID" && test "$APP_ID" != "None"
+          rm -f /tmp/admin-out.zip
+          (cd apps/admin/out && zip -qr /tmp/admin-out.zip .)
+
+          DEPLOYMENT=$(aws amplify create-deployment --app-id "$APP_ID" --branch-name deploy)
+          JOB_ID=$(echo "$DEPLOYMENT" | jq -r '.jobId')
+          UPLOAD_URL=$(echo "$DEPLOYMENT" | jq -r '.zipUploadUrl')
+          test -n "$JOB_ID" && test "$JOB_ID" != "null"
+          test -n "$UPLOAD_URL" && test "$UPLOAD_URL" != "null"
+
+          curl -fsS -X PUT -H "Content-Type: application/zip" --upload-file /tmp/admin-out.zip "$UPLOAD_URL"
+          aws amplify start-deployment --app-id "$APP_ID" --branch-name deploy --job-id "$JOB_ID" > /tmp/amplify-start.json
+
+          for attempt in $(seq 1 90); do
+            STATUS=$(aws amplify get-job --app-id "$APP_ID" --branch-name deploy --job-id "$JOB_ID" --query 'job.summary.status' --output text)
+            echo "Amplify deployment $JOB_ID: $STATUS"
+            case "$STATUS" in
+              SUCCEED) break ;;
+              FAILED|CANCELLED) echo "::error::Amplify frontend deployment failed: $STATUS"; exit 1 ;;
+            esac
+            if [ "$attempt" -eq 90 ]; then
+              echo "::error::Amplify frontend deployment timed out."
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "ADMIN_URL=$ADMIN_URL" >> "$GITHUB_ENV"
+
+      - name: Public frontend smoke test
+        run: |
+          set -euo pipefail
+          for path in / /signup/ /terms/ /privacy/ /legal/ /support/; do
+            STATUS=$(curl -L -s -o /dev/null -w "%{http_code}" --max-time 20 "${ADMIN_URL}${path}")
+            echo "GET ${path} -> HTTP ${STATUS}"
+            if [ "$STATUS" != "200" ]; then
+              echo "::error::Frontend smoke test failed for ${path}: HTTP ${STATUS}"
+              exit 1
+            fi
+          done
+          echo "Frontend release is live at ${ADMIN_URL}"
