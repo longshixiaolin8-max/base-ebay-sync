@@ -35,7 +35,7 @@ export async function createPendingTenant(
       ...(options?.id ? { id: options.id } : {}),
       name,
       status: "pending_payment",
-      contactEmail: options?.contactEmail ?? null,
+      ...(options?.contactEmail ? { contactEmail: options.contactEmail } : {}),
     })
     .returning({ id: tenants.id });
   return row!;
