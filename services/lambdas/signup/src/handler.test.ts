@@ -125,7 +125,7 @@ describe("public signup", () => {
 
     getAppCredentialsMock.mockReset();
     getAppCredentialsMock.mockImplementation(async (channel: string) => {
-      if (channel === "signup") return { otpPepper: OTP_PEPPER };
+      if (channel === "signup-otp") return { otpPepper: OTP_PEPPER };
       if (channel === "stripe") {
         return {
           secretKey: "sk_test_123",
