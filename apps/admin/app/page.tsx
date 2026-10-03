@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { BoxIcon, CoinIcon, MenuIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
 import { publicApiGet } from "@/lib/api-client";
+import { formatStripeAmount } from "@/lib/format";
 
 interface PublicPricing {
   unitAmount: number;
@@ -58,12 +59,7 @@ const STEPS = [
 
 function priceLabel(pricing: PublicPricing | null): string {
   if (!pricing) return "料金を取得中";
-  const amount = pricing.unitAmount / 100;
-  const value = new Intl.NumberFormat("ja-JP", {
-    style: "currency",
-    currency: pricing.currency.toUpperCase(),
-    maximumFractionDigits: pricing.currency.toLowerCase() === "jpy" ? 0 : 2,
-  }).format(amount);
+  const value = formatStripeAmount(pricing.unitAmount, pricing.currency);
   return `${value} / ${pricing.interval === "month" ? "月" : pricing.interval}`;
 }
 
