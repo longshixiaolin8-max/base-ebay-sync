@@ -67,6 +67,7 @@ export default function PlanTab() {
   const [savingTenant, setSavingTenant] = useState(false);
   const [loading, setLoading] = useState(true);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [openingCheckout, setOpeningCheckout] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
@@ -96,6 +97,17 @@ export default function PlanTab() {
     } catch (err) {
       notify(`Stripeポータルを開けませんでした: ${(err as Error).message}`);
       setOpeningPortal(false);
+    }
+  }
+
+  async function resumeCheckout() {
+    setOpeningCheckout(true);
+    try {
+      const { url } = await apiPost<{ url: string }>("/admin/billing/checkout-session");
+      window.location.href = url;
+    } catch (err) {
+      notify(`お支払い設定を再開できませんでした: ${(err as Error).message}`);
+      setOpeningCheckout(false);
     }
   }
 
@@ -231,9 +243,15 @@ export default function PlanTab() {
           {STATUS_MESSAGE[billing.status] && (
             <p style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>{STATUS_MESSAGE[billing.status]}</p>
           )}
-          <button type="button" onClick={openPortal} disabled={openingPortal} style={{ marginTop: "1.25rem", width: "100%" }}>
-            {openingPortal ? "開いています..." : "Stripeでお支払い方法を管理"}
-          </button>
+          {billing.status === "pending_payment" ? (
+            <button type="button" onClick={resumeCheckout} disabled={openingCheckout} style={{ marginTop: "1.25rem", width: "100%" }}>
+              {openingCheckout ? "開いています..." : "Stripeでお支払い設定を続ける"}
+            </button>
+          ) : (
+            <button type="button" onClick={openPortal} disabled={openingPortal} style={{ marginTop: "1.25rem", width: "100%" }}>
+              {openingPortal ? "開いています..." : "Stripeでお支払い方法を管理"}
+            </button>
+          )}
           <p style={{ marginTop: "0.6rem", fontSize: "0.76rem", color: "var(--fg-subtle)" }}>
             現在はスタンダードプランのみご提供しています。他プランへの変更はご用意がありません。
           </p>
