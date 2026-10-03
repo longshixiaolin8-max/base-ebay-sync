@@ -68,6 +68,7 @@ export class ApiStack extends cdk.Stack {
     // admin-api's own handler serves.
     addRoute("AdminApiGet", apigwv2.HttpMethod.GET, "/admin/{proxy+}", adminIntegration, true);
     addRoute("AdminApiPost", apigwv2.HttpMethod.POST, "/admin/{proxy+}", adminIntegration, true);
+    addRoute("AdminApiPatch", apigwv2.HttpMethod.PATCH, "/admin/{proxy+}", adminIntegration, true);
 
     // Round 12 hardening ("public OAuth authorize routeを廃止"): the old public
     // GET /oauth/{base,ebay}/authorize routes (unauthenticated, minted state for the fixed
