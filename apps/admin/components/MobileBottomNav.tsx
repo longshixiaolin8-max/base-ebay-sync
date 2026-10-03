@@ -12,7 +12,7 @@ const PRIMARY_LINKS = [
   { href: "/orders", label: "注文", icon: CartIcon },
 ] as const;
 
-const PUBLIC_PATHS = new Set(["", "/login", "/signup", "/forgot-password"]);
+const PUBLIC_PATHS = new Set(["", "/login", "/signup", "/forgot-password", "/terms", "/privacy", "/legal", "/support"]);
 
 /**
  * Mobile-first primary navigation. The existing sidebar remains the complete navigation

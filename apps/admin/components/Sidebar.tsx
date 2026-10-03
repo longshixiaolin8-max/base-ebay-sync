@@ -61,7 +61,11 @@ export function Sidebar() {
     normalizedPath === "" ||
     normalizedPath === "/login" ||
     normalizedPath === "/signup" ||
-    normalizedPath === "/forgot-password";
+    normalizedPath === "/forgot-password" ||
+    normalizedPath === "/terms" ||
+    normalizedPath === "/privacy" ||
+    normalizedPath === "/legal" ||
+    normalizedPath === "/support";
 
   // Tapping a nav link should close the drawer on mobile, same as tapping the backdrop
   // -- staying open after navigating reads as broken, not intentional. A no-op on

@@ -39,6 +39,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      API_ENTRYPOINT: ${{ vars.API_ENTRYPOINT }}
     # GitHub Environment protection rules (configured in repo Settings > Environments)
     # gate this job: "prod" requires a human reviewer's approval before the job runs at
     # all, satisfying "本番デプロイは人間承認必須". "dev" has no required reviewers.
@@ -48,11 +50,11 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9.12.0
+          version: 10.34.0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -66,6 +68,41 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Production public-SaaS configuration preflight
+        if: inputs.environment == 'prod'
+        env:
+          LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
+          LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
+          LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          SES_FROM_EMAIL: ${{ vars.SES_FROM_EMAIL }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::prod environment variable $name is required before the public SaaS frontend can be released."
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Refresh GitHub OIDC deploy role
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          # The role already exists (this workflow is running under it), so unlike the
+          # one-time initial bootstrap it can now safely update its own source-managed
+          # policy through the CDK bootstrap CloudFormation execution role. This keeps new
+          # deploy-time capabilities such as Amplify manual publishing reproducible instead
+          # of requiring an out-of-band IAM console edit.
+          npx cdk deploy "AiEcPlatform-${{ inputs.environment }}-GithubOidc" \
+            --context bootstrapOidc=true \
+            --context env=${{ inputs.environment }} \
+            --context region=${{ vars.AWS_REGION }} \
+            --context githubRepo=${{ github.repository }} \
+            --require-approval never
 
       - name: CDK deploy
         working-directory: infra
@@ -86,6 +123,8 @@ jobs:
               --context region=${{ vars.AWS_REGION }} \
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           else
@@ -94,9 +133,32 @@ jobs:
               --context region=${{ vars.AWS_REGION }} \
               --context alarmEmail=${{ vars.ALARM_EMAIL }} \
               --context githubRepo=${{ github.repository }} \
+              --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
+              --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --require-approval never
           fi
+
+      - name: Resolve public API URL
+        run: |
+          set -euo pipefail
+          if [ "${API_ENTRYPOINT:-direct}" = "cloudfront" ]; then
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-CloudFrontApi" \
+              --query "Stacks[0].Outputs[?OutputKey=='CloudFrontUrl'].OutputValue" \
+              --output text)
+          else
+            PUBLIC_API_URL=$(aws cloudformation describe-stacks \
+              --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+              --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+              --output text)
+          fi
+          if [ -z "$PUBLIC_API_URL" ] || [ "$PUBLIC_API_URL" = "None" ]; then
+            echo "::error::Could not resolve the selected public API URL."
+            exit 1
+          fi
+          echo "PUBLIC_API_URL=$PUBLIC_API_URL" >> "$GITHUB_ENV"
+          echo "Using public API entry point: ${API_ENTRYPOINT:-direct}"
 
       # Round 15 hardening ("DB migrationをdeployに統合"): previously this was a manual,
       # easy-to-forget post-deploy step (see README's old bootstrap notes) -- a new Lambda
@@ -150,14 +212,103 @@ jobs:
         working-directory: infra
         run: |
           set -euo pipefail
-          API_URL=$(aws cloudformation describe-stacks \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
-            --output text)
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${API_URL}/webhooks/ebay/notifications")
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${PUBLIC_API_URL}/webhooks/ebay/notifications")
           echo "GET /webhooks/ebay/notifications (no challenge_code) -> HTTP $STATUS"
           if [ "$STATUS" != "400" ]; then
             echo "::error::Smoke test failed: expected HTTP 400, got $STATUS. The API may not be responding correctly post-deploy."
             exit 1
           fi
           echo "Smoke test passed: API is responding."
+
+      - name: Verify public billing readiness
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          HTTP_CODE=$(curl -sS --max-time 20 -o /tmp/public-pricing.json -w "%{http_code}" "${PUBLIC_API_URL}/public/pricing")
+          cat /tmp/public-pricing.json
+          echo ""
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Public pricing endpoint is not ready (HTTP $HTTP_CODE). For prod, Stripe must use sk_live_ credentials and a valid recurring Price."
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" = "prod" ] && [ "$(jq -r '.live' /tmp/public-pricing.json)" != "true" ]; then
+            echo "::error::Production billing is not live."
+            exit 1
+          fi
+
+      - name: Build production-configured admin frontend
+        env:
+          NEXT_PUBLIC_LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
+          NEXT_PUBLIC_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
+          NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+        run: |
+          set -euo pipefail
+          USER_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+            --output text)
+          USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Auth" \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
+            --output text)
+          test -n "$PUBLIC_API_URL" && test "$PUBLIC_API_URL" != "None"
+          test -n "$USER_POOL_ID" && test "$USER_POOL_ID" != "None"
+          test -n "$USER_POOL_CLIENT_ID" && test "$USER_POOL_CLIENT_ID" != "None"
+          NEXT_PUBLIC_API_BASE_URL="$PUBLIC_API_URL" \
+          NEXT_PUBLIC_COGNITO_USER_POOL_ID="$USER_POOL_ID" \
+          NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID="$USER_POOL_CLIENT_ID" \
+          pnpm --filter @ai-ec/admin build
+
+      - name: Deploy admin frontend to Amplify Hosting
+        run: |
+          set -euo pipefail
+          APP_ID=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-AdminHosting" \
+            --query "Stacks[0].Outputs[?OutputKey=='AdminAppId'].OutputValue" \
+            --output text)
+          ADMIN_URL=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-AdminHosting" \
+            --query "Stacks[0].Outputs[?OutputKey=='AdminUrl'].OutputValue" \
+            --output text)
+          test -n "$APP_ID" && test "$APP_ID" != "None"
+          rm -f /tmp/admin-out.zip
+          (cd apps/admin/out && zip -qr /tmp/admin-out.zip .)
+
+          DEPLOYMENT=$(aws amplify create-deployment --app-id "$APP_ID" --branch-name deploy)
+          JOB_ID=$(echo "$DEPLOYMENT" | jq -r '.jobId')
+          UPLOAD_URL=$(echo "$DEPLOYMENT" | jq -r '.zipUploadUrl')
+          test -n "$JOB_ID" && test "$JOB_ID" != "null"
+          test -n "$UPLOAD_URL" && test "$UPLOAD_URL" != "null"
+
+          curl -fsS -X PUT -H "Content-Type: application/zip" --upload-file /tmp/admin-out.zip "$UPLOAD_URL"
+          aws amplify start-deployment --app-id "$APP_ID" --branch-name deploy --job-id "$JOB_ID" > /tmp/amplify-start.json
+
+          for attempt in $(seq 1 90); do
+            STATUS=$(aws amplify get-job --app-id "$APP_ID" --branch-name deploy --job-id "$JOB_ID" --query 'job.summary.status' --output text)
+            echo "Amplify deployment $JOB_ID: $STATUS"
+            case "$STATUS" in
+              SUCCEED) break ;;
+              FAILED|CANCELLED) echo "::error::Amplify frontend deployment failed: $STATUS"; exit 1 ;;
+            esac
+            if [ "$attempt" -eq 90 ]; then
+              echo "::error::Amplify frontend deployment timed out."
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "ADMIN_URL=$ADMIN_URL" >> "$GITHUB_ENV"
+
+      - name: Public frontend smoke test
+        run: |
+          set -euo pipefail
+          for path in / /signup/ /terms/ /privacy/ /legal/ /support/; do
+            STATUS=$(curl -L -s -o /dev/null -w "%{http_code}" --max-time 20 "${ADMIN_URL}${path}")
+            echo "GET ${path} -> HTTP ${STATUS}"
+            if [ "$STATUS" != "200" ]; then
+              echo "::error::Frontend smoke test failed for ${path}: HTTP ${STATUS}"
+              exit 1
+            fi
+          done
+          echo "Frontend release is live at ${ADMIN_URL}"

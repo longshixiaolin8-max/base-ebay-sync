@@ -1,12 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BoxIcon, CoinIcon, MenuIcon, SyncIcon, TrendUpIcon } from "@/components/icons";
+import { publicApiGet } from "@/lib/api-client";
+import { formatStripeAmount } from "@/lib/format";
 
-// Illustrative only -- not a real tenant's listing. The platform never shows a channel
-// price it hasn't actually synced (see channelListings.lastSyncedPriceJpy elsewhere in
-// this app), so this example is clearly labeled as a sample rather than live data.
+interface PublicPricing {
+  unitAmount: number;
+  currency: string;
+  interval: string;
+  trialDays: number;
+  live: boolean;
+}
+
 const EXAMPLE_LISTING = {
   titleJa: "ヴィンテージ リング ガーネット 9号",
   status: "承認待ち",
@@ -25,40 +32,60 @@ const FEATURES = [
   {
     icon: BoxIcon,
     title: "AIによる自動出品ドラフト作成",
-    body: "BASEの商品情報から、英語タイトル・説明文・eBayカテゴリ/item specificsをAIが自動生成。内容を確認して承認するだけで出品できます。",
+    body: "BASEの商品情報から、英語タイトル・説明文・eBayカテゴリ/item specificsをAIが自動生成。内容を確認して承認するまでeBayへ公開しません。",
   },
   {
     icon: SyncIcon,
-    title: "在庫自動同期",
-    body: "BASEは最短15分、eBayは最短1分ごとに販売状況を自動チェックし、もう一方の在庫に反映します。売り違いのリスクを大きく減らせますが、在庫1点の商品は反映までのわずかな時間に同時受注が発生する可能性がゼロではありません。一点物を多く扱う場合は安全在庫の設定など運用上の工夫をおすすめします。",
+    title: "BASE / eBay 在庫自動同期",
+    body: "中央在庫マスターを介して販売状況を自動確認し、もう一方の在庫へ反映。冪等性・楽観ロック・安全在庫で売り違いリスクを抑えます。",
   },
   {
     icon: CoinIcon,
-    title: "動的価格計算",
-    body: "為替レート・送料・目標利益率から、eBay向けの適正価格を自動算出。商品ごとに送料や利益率を調整できます。",
+    title: "価格・利益管理",
+    body: "為替、送料、仕入れ、手数料、目標利益率から販売判断を支援。売上と利益を同じ管理画面で確認できます。",
   },
   {
     icon: TrendUpIcon,
-    title: "売上・利益ダッシュボード + 滞留商品AI提案",
-    body: "チャネル別の売上・利益推移をひと目で確認。長期間売れていない商品には、AIが価格改定などの改善案を提案します。",
+    title: "運用ダッシュボード",
+    body: "注文、同期状態、エラー、監査ログ、分析を一元管理。同期失敗は再試行キューとDLQで追跡できます。",
   },
 ];
 
-const STEPS = ["BASEアカウントを連携", "AIが自動でeBay出品ドラフトを作成", "内容を確認して承認するだけで出品、在庫は自動同期"];
+const STEPS = [
+  "無料アカウントを作成し、メールアドレスを確認",
+  "Stripeでお支払い方法を登録し、BASE / eBayをOAuth接続",
+  "AI下書きを確認・承認してeBayへ出品。在庫・注文は自動同期",
+];
+
+function priceLabel(pricing: PublicPricing | null): string {
+  if (!pricing) return "料金を取得中";
+  const value = formatStripeAmount(pricing.unitAmount, pricing.currency);
+  return `${value} / ${pricing.interval === "month" ? "月" : pricing.interval}`;
+}
 
 export default function LandingPage() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pricing, setPricing] = useState<PublicPricing | null>(null);
+  const [signupReady, setSignupReady] = useState(true);
+
+  useEffect(() => {
+    publicApiGet<PublicPricing>("/public/pricing")
+      .then((res) => {
+        setPricing(res);
+        setSignupReady(true);
+      })
+      .catch(() => setSignupReady(false));
+  }, []);
+
   return (
     <div className="landing">
       <header className="landing-topbar">
-        <span className="app-brand landing-brand">
+        <Link href="/" className="app-brand landing-brand">
           <span className="app-brand-mark">AI</span>
           BASE <span className="app-brand-ebay">eBay</span> Sync
-        </span>
+        </Link>
         <div className="landing-topbar-actions">
-          <Link href="/login" className="landing-login-link">
-            ログイン
-          </Link>
+          <Link href="/login" className="landing-login-link">ログイン</Link>
           <button
             type="button"
             className="landing-menu-button"
@@ -73,38 +100,28 @@ export default function LandingPage() {
 
       {menuOpen && (
         <nav className="landing-mobile-menu">
-          <a href="#features" onClick={() => setMenuOpen(false)}>
-            できること
-          </a>
-          <a href="#how-it-works" onClick={() => setMenuOpen(false)}>
-            使い方
-          </a>
-          <a href="#plan" onClick={() => setMenuOpen(false)}>
-            ご利用プラン
-          </a>
-          <Link href="/login" onClick={() => setMenuOpen(false)}>
-            ログイン
-          </Link>
-          <Link href="/signup" onClick={() => setMenuOpen(false)}>
-            新規登録
-          </Link>
+          <a href="#features" onClick={() => setMenuOpen(false)}>できること</a>
+          <a href="#how-it-works" onClick={() => setMenuOpen(false)}>使い方</a>
+          <a href="#plan" onClick={() => setMenuOpen(false)}>料金</a>
+          <Link href="/signup" onClick={() => setMenuOpen(false)}>新規登録</Link>
+          <Link href="/login" onClick={() => setMenuOpen(false)}>ログイン</Link>
         </nav>
       )}
 
       <section className="landing-hero">
         <h1>BASEの商品を、eBayへ。在庫と利益も、ひとつに。</h1>
         <p className="landing-hero-lead">
-          AIが出品ドラフトを自動作成。内容を確認・承認するだけで出品でき、在庫同期や価格計算までまとめて行えます。
+          AIがeBay向け出品ドラフトを作成。人が確認・承認して公開し、BASEとeBayの在庫・注文・利益管理までひとつの画面で運用できます。
         </p>
         <div className="landing-hero-cta">
-          <Link href="/signup" className="landing-cta-primary">
-            導入について相談
+          <Link href="/signup" className="landing-cta-primary" aria-disabled={!signupReady}>
+            {signupReady ? "無料で始める" : "新規受付状況を確認中"}
           </Link>
-          <Link href="/login" className="landing-cta-secondary">
-            すでにアカウントをお持ちの方
-          </Link>
+          <a href="#how-it-works" className="landing-cta-secondary">使い方を見る</a>
         </div>
-        <p className="landing-hero-note">招待制で先行導入を受付中</p>
+        <p className="landing-hero-note">
+          メール確認・MFA対応。{pricing ? `${pricing.trialDays}日間無料 / いつでも解約可能` : "料金は登録前に確認できます"}
+        </p>
 
         <div className="card landing-example-card">
           <span className="landing-example-tag">画面イメージ(サンプル)</span>
@@ -130,16 +147,14 @@ export default function LandingPage() {
               <dd>約¥{EXAMPLE_LISTING.estimatedProfitJpy.toLocaleString()}</dd>
             </div>
           </dl>
-          <p className="landing-example-disclaimer">※実際のデータではなく、イメージ例です。</p>
+          <p className="landing-example-disclaimer">※実際の利用者データではなく、画面説明用のサンプルです。</p>
         </div>
       </section>
 
       <section className="landing-section">
-        <h2 className="landing-section-title">こんな悩みはありませんか?</h2>
+        <h2 className="landing-section-title">こんな悩みをまとめて解決</h2>
         <ul className="landing-pain-list">
-          {PAIN_POINTS.map((point) => (
-            <li key={point}>{point}</li>
-          ))}
+          {PAIN_POINTS.map((point) => <li key={point}>{point}</li>)}
         </ul>
       </section>
 
@@ -150,9 +165,7 @@ export default function LandingPage() {
             const Icon = feature.icon;
             return (
               <div key={feature.title} className="card card-pad landing-feature-card">
-                <span className="landing-feature-icon">
-                  <Icon />
-                </span>
+                <span className="landing-feature-icon"><Icon /></span>
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>
               </div>
@@ -162,7 +175,7 @@ export default function LandingPage() {
       </section>
 
       <section id="how-it-works" className="landing-section">
-        <h2 className="landing-section-title">使い方</h2>
+        <h2 className="landing-section-title">今日から使い始めるまで</h2>
         <ol className="landing-steps">
           {STEPS.map((step, i) => (
             <li key={step}>
@@ -174,40 +187,41 @@ export default function LandingPage() {
       </section>
 
       <section id="plan" className="landing-section">
-        <h2 className="landing-section-title">ご利用プラン</h2>
+        <h2 className="landing-section-title">料金</h2>
         <div className="card card-pad landing-plan-card">
           <div className="landing-plan-header">
-            <strong>先行導入プラン</strong>
-            <span className="badge">案</span>
-            <span className="badge ok">初月無料</span>
+            <strong>スタンダード</strong>
+            {pricing && <span className="badge ok">{pricing.trialDays}日間無料</span>}
           </div>
           <div className="landing-plan-price">
-            <span className="landing-plan-price-amount">¥9,800</span>
-            <span className="landing-plan-price-unit">/月(税別)</span>
+            <span className="landing-plan-price-amount">{signupReady ? priceLabel(pricing) : "新規受付準備中"}</span>
           </div>
           <ul className="landing-plan-limits">
             <li>商品登録数 300点まで</li>
             <li>AI出品ドラフト生成 月100回まで</li>
-            <li>BASE / eBay 連携、在庫同期、ダッシュボードなど全機能利用可能</li>
+            <li>BASE / eBay連携、在庫・注文同期、分析、監査ログ、同期エラー管理</li>
           </ul>
           <p className="landing-plan-note">
-            登録から30日間は無料でご利用いただけます。初期設定費用 ¥19,800(税別)。金額は正式リリースに向けて検討中の案であり、確定した料金ではありません。商品登録数・AI生成回数の上限は実際に運用している値です。現在はベータ期間中のため、招待コードをお持ちの方のみご登録いただけます。
+            実際の請求額・通貨・請求周期はStripe Checkoutに表示される内容が最終確認画面です。
+            無料期間終了前に解約した場合、その後の継続課金は行われません。
           </p>
+          <Link href="/signup" className="landing-cta-primary">アカウントを作成する</Link>
         </div>
       </section>
 
       <section className="landing-section landing-footer-cta">
-        <h2 className="landing-section-title">招待コードをお持ちの方へ</h2>
-        <p className="landing-hero-lead">今すぐ登録して、AIによる自動出品を試してみましょう。</p>
-        <Link href="/signup" className="landing-cta-primary">
-          招待コードで登録する
-        </Link>
+        <h2 className="landing-section-title">BASEから海外販売を始める</h2>
+        <p className="landing-hero-lead">登録からメール確認、決済設定、BASE/eBay接続までオンラインで完結します。</p>
+        <Link href="/signup" className="landing-cta-primary">無料で始める</Link>
       </section>
 
-      <footer className="landing-footer">
+      <footer className="landing-footer" style={{ flexWrap: "wrap" }}>
         <span>© BASE eBay Sync</span>
+        <Link href="/terms">利用規約</Link>
+        <Link href="/privacy">プライバシー</Link>
+        <Link href="/legal">特商法表記</Link>
+        <Link href="/support">サポート</Link>
         <Link href="/login">ログイン</Link>
-        <Link href="/signup">新規登録</Link>
       </footer>
     </div>
   );

@@ -127,7 +127,7 @@ const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
     ebay: secrets.ebayAppCredentials,
     openai: secrets.openAiApiKey,
     stripe: secrets.stripeAppCredentials,
-    signup: secrets.signupCredentials,
+    signup: secrets.signupOtpCredentials,
   },
   oauthTokenSecretArnPattern: `arn:aws:secretsmanager:${env.region}:${env.account}:secret:${secrets.oauthTokenPrefix}*`,
   apiUrl,

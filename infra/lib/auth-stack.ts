@@ -13,15 +13,12 @@ export class AuthStack extends cdk.Stack {
 
     this.userPool = new cognito.UserPool(this, "AdminUserPool", {
       userPoolName: `ai-ec-platform-admin-${config.envName}`,
-      // No self-signup: operator accounts are provisioned by an administrator only.
+      // Public registration is brokered by our signup Lambda. Cognito self-signup stays
+      // disabled so an attacker cannot bypass our verified-email/tenant-creation gate and
+      // submit an arbitrary custom:tenant_id directly to Cognito.
       selfSignUpEnabled: false,
       signInAliases: { email: true },
       standardAttributes: { email: { required: true, mutable: false } },
-      // Which tenant this operator account belongs to (see packages/db's tenants table).
-      // Mutable rather than immutable: lets a mis-provisioned account be corrected without
-      // deleting/recreating it. HttpJwtAuthorizer passes every ID-token claim through to
-      // admin-api automatically, so no API Gateway changes are needed for this to arrive as
-      // `custom:tenant_id` in event.requestContext.authorizer.jwt.claims.
       customAttributes: {
         tenant_id: new cognito.StringAttribute({ mutable: true }),
       },
@@ -36,10 +33,6 @@ export class AuthStack extends cdk.Stack {
       mfaSecondFactor: { otp: true, sms: false },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy: config.envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-      // Threat Protection (the current name for what was "Advanced Security Features"),
-      // prod only: per-MAU cost, so dev's handful of throwaway test accounts skip it.
-      // FULL_FUNCTION actively blocks/challenges risky sign-ins (impossible travel,
-      // compromised-credential lists) rather than only logging them.
       featurePlan: config.envName === "prod" ? cognito.FeaturePlan.PLUS : undefined,
       standardThreatProtectionMode:
         config.envName === "prod" ? cognito.StandardThreatProtectionMode.FULL_FUNCTION : undefined,
@@ -52,5 +45,10 @@ export class AuthStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.hours(1),
       refreshTokenValidity: cdk.Duration.days(7),
     });
+
+    // Deployment workflow consumes these outputs to build the static admin application
+    // with the exact Cognito identifiers belonging to the target environment.
+    new cdk.CfnOutput(this, "UserPoolId", { value: this.userPool.userPoolId });
+    new cdk.CfnOutput(this, "UserPoolClientId", { value: this.userPoolClient.userPoolClientId });
   }
 }

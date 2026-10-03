@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
-import { planLabel } from "@/lib/format";
+import { formatStripeAmount, planLabel } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -27,13 +27,8 @@ const STATUS_MESSAGE: Record<BillingStatus["status"], string | null> = {
 };
 
 function formatPrice(amount: number, currency: string, interval: string | null): string {
-  const major = amount / 100;
-  const formatted = new Intl.NumberFormat("ja-JP", { style: "currency", currency: currency.toUpperCase() }).format(major);
+  const formatted = formatStripeAmount(amount, currency);
   return interval ? `${formatted} / ${interval === "month" ? "月" : interval === "year" ? "年" : interval}` : formatted;
-}
-
-function usdFromCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function UsageRow({ label, used, limit }: { label: string; used: number; limit: number }) {
@@ -67,6 +62,7 @@ export default function PlanTab() {
   const [savingTenant, setSavingTenant] = useState(false);
   const [loading, setLoading] = useState(true);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [openingCheckout, setOpeningCheckout] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
@@ -96,6 +92,17 @@ export default function PlanTab() {
     } catch (err) {
       notify(`Stripeポータルを開けませんでした: ${(err as Error).message}`);
       setOpeningPortal(false);
+    }
+  }
+
+  async function resumeCheckout() {
+    setOpeningCheckout(true);
+    try {
+      const { url } = await apiPost<{ url: string }>("/admin/billing/checkout-session");
+      window.location.href = url;
+    } catch (err) {
+      notify(`お支払い設定を再開できませんでした: ${(err as Error).message}`);
+      setOpeningCheckout(false);
     }
   }
 
@@ -231,9 +238,15 @@ export default function PlanTab() {
           {STATUS_MESSAGE[billing.status] && (
             <p style={{ marginTop: "1rem", fontSize: "0.85rem", color: "var(--fg-muted)" }}>{STATUS_MESSAGE[billing.status]}</p>
           )}
-          <button type="button" onClick={openPortal} disabled={openingPortal} style={{ marginTop: "1.25rem", width: "100%" }}>
-            {openingPortal ? "開いています..." : "Stripeでお支払い方法を管理"}
-          </button>
+          {billing.status === "pending_payment" ? (
+            <button type="button" onClick={resumeCheckout} disabled={openingCheckout} style={{ marginTop: "1.25rem", width: "100%" }}>
+              {openingCheckout ? "開いています..." : "Stripeでお支払い設定を続ける"}
+            </button>
+          ) : (
+            <button type="button" onClick={openPortal} disabled={openingPortal} style={{ marginTop: "1.25rem", width: "100%" }}>
+              {openingPortal ? "開いています..." : "Stripeでお支払い方法を管理"}
+            </button>
+          )}
           <p style={{ marginTop: "0.6rem", fontSize: "0.76rem", color: "var(--fg-subtle)" }}>
             現在はスタンダードプランのみご提供しています。他プランへの変更はご用意がありません。
           </p>
@@ -308,7 +321,7 @@ export default function PlanTab() {
                   <tr key={inv.id}>
                     <td>{inv.number ?? inv.id}</td>
                     <td>{new Date(inv.createdAt).toLocaleDateString("ja-JP")}</td>
-                    <td>{usdFromCents(inv.amountUsdCents)}</td>
+                    <td>{formatStripeAmount(inv.amountMinorUnits, inv.currency)}</td>
                     <td>
                       <Badge tone={inv.status === "paid" ? "ok" : "neutral"}>{inv.status ?? "—"}</Badge>
                     </td>

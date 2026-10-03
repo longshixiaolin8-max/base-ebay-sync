@@ -82,5 +82,17 @@ export class GithubOidcStack extends cdk.Stack {
         ],
       }),
     );
+
+    // The normal deploy workflow now publishes apps/admin/out to the existing manual-mode
+    // Amplify Hosting app after backend/CDK validation. These are data-plane deployment
+    // calls made directly by the GitHub OIDC role, so they are intentionally separate from
+    // the CDK bootstrap-role permissions above.
+    this.deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "PublishAdminFrontend",
+        actions: ["amplify:CreateDeployment", "amplify:StartDeployment", "amplify:GetJob"],
+        resources: [`arn:aws:amplify:*:${this.account}:apps/*`],
+      }),
+    );
   }
 }

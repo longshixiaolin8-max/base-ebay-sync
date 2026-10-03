@@ -28,6 +28,7 @@ export class SecretsStack extends cdk.Stack {
   readonly openAiApiKey: secretsmanager.Secret;
   readonly stripeAppCredentials: secretsmanager.Secret;
   readonly signupCredentials: secretsmanager.Secret;
+  readonly signupOtpCredentials: secretsmanager.Secret;
   readonly cloudfrontSharedSecret: secretsmanager.Secret;
   readonly oauthTokenPrefix: string;
 
@@ -76,11 +77,27 @@ export class SecretsStack extends cdk.Stack {
       description: "Stripe test-mode secretKey/publishableKey/priceId/webhookSigningSecret. Fill in manually after deploy.",
     });
 
-    // { inviteCode } -- the one shared beta invite code /signup checks against. A single
-    // shared string, not per-invitee tracking; revisit if that's ever needed.
+    // Legacy beta invite secret. Kept in place during the public-SaaS migration so
+    // deploying this release never mutates or replaces an existing manually-populated
+    // secret as a side effect.
     this.signupCredentials = new secretsmanager.Secret(this, "SignupCredentials", {
       secretName: `ai-ec-platform/${envSegment}app-credentials/signup`,
-      description: "Shared invite code required by the public /signup flow. Fill in manually after deploy.",
+      description: "Legacy beta signup secret. No longer read by the public signup flow.",
+    });
+
+    // Dedicated, newly-named HMAC pepper for short-lived public-signup email OTPs. A
+    // separate resource/name guarantees every existing dev/prod environment receives a
+    // generated pepper rather than depending on how CloudFormation updates an old secret
+    // that used to contain a manually-entered inviteCode.
+    this.signupOtpCredentials = new secretsmanager.Secret(this, "SignupOtpCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/signup-otp`,
+      description: "Auto-generated HMAC pepper for public signup email verification codes.",
+      generateSecretString: {
+        secretStringTemplate: "{}",
+        generateStringKey: "otpPepper",
+        excludePunctuation: true,
+        passwordLength: 48,
+      },
     });
 
     // Round 15 hardening ("WAFを実際の本番経路に適用"). Unlike every secret above, this one
@@ -107,6 +124,7 @@ export class SecretsStack extends cdk.Stack {
       this.openAiApiKey,
       this.stripeAppCredentials,
       this.signupCredentials,
+      this.signupOtpCredentials,
       this.cloudfrontSharedSecret,
     ]) {
       secret.applyRemovalPolicy(secretRemovalPolicy);

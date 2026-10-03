@@ -104,6 +104,22 @@ export const tenants = pgTable("tenants", {
 });
 
 /**
+ * Short-lived email verification challenges for public SaaS signup. No password, company
+ * name, payment data, or tenant id is stored here. The six-digit code is HMACed with a
+ * Secrets Manager pepper before storage so a database-only compromise cannot recover it.
+ * The corresponding SQL migration is generated from this schema by Drizzle Kit.
+ */
+export const signupVerifications = pgTable("signup_verifications", {
+  email: text("email").primaryKey(),
+  codeHash: text("code_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  resendAvailableAt: timestamp("resend_available_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * Dedup ledger for inbound webhook deliveries (Stripe today; source is kept generic in
  * case another webhook provider needs the same guard later). A provider's own event id is
  * the key: `INSERT ... ON CONFLICT DO NOTHING` lets a handler tell a genuinely-new

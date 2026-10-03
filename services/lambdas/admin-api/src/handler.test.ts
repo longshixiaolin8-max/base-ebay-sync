@@ -2423,6 +2423,7 @@ describe("admin-api handler", () => {
             id: "in_1",
             number: "INV-202404",
             amountUsdCents: 980000,
+            amountMinorUnits: 980000,
             createdAt: new Date(1735689600 * 1000).toISOString(),
             status: "paid",
             hostedInvoiceUrl: "https://invoice.stripe.example/in_1",

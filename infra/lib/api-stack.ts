@@ -68,6 +68,7 @@ export class ApiStack extends cdk.Stack {
     // admin-api's own handler serves.
     addRoute("AdminApiGet", apigwv2.HttpMethod.GET, "/admin/{proxy+}", adminIntegration, true);
     addRoute("AdminApiPost", apigwv2.HttpMethod.POST, "/admin/{proxy+}", adminIntegration, true);
+    addRoute("AdminApiPatch", apigwv2.HttpMethod.PATCH, "/admin/{proxy+}", adminIntegration, true);
 
     // Round 12 hardening ("public OAuth authorize routeを廃止"): the old public
     // GET /oauth/{base,ebay}/authorize routes (unauthenticated, minted state for the fixed
@@ -149,33 +150,41 @@ export class ApiStack extends cdk.Stack {
     // Route already exists in AWS and the Stage update can reference it successfully. See
     // README's "eBay Platform Notification abuse対策" section for the exact steps.
     const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
-    if (cfnStage && props.enableEbayPlatformNotificationThrottle) {
-      // Unlike defaultRouteSettings (a plain typed property CDK's own mapper translates
-      // camelCase -> PascalCase for), routeSettings is a free-form
-      // { [routeKey]: RouteSettingsProperty } map that CDK passes through to CloudFormation
-      // without translating each value's keys -- the real API Gateway resource handler only
-      // accepts the PascalCase CloudFormation property names here ("Unrecognized field
-      // \"throttlingBurstLimit\"... 5 known properties: \"ThrottlingBurstLimit\",
-      // \"ThrottlingRateLimit\", ..."). Cast past the (misleadingly camelCase-typed)
-      // interface to use the names CloudFormation actually expects.
+    if (cfnStage) {
+      // /signup is already present in every deployed environment, so this can safely be
+      // enforced in one deploy (unlike the first-ever platform-notification route rollout).
+      // Global 2 rps / burst 5 is intentionally conservative for a human signup form and
+      // bounds SES/DB abuse before the per-email 60s cooldown in the Lambda is even reached.
+      const signupRouteSettings = {
+        "POST /signup": {
+          ThrottlingRateLimit: 2,
+          ThrottlingBurstLimit: 5,
+        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+      };
+      const ebayRouteSettings = props.enableEbayPlatformNotificationThrottle
+        ? {
+            "POST /webhooks/ebay/platform-notifications/{token}": {
+              ThrottlingRateLimit: 5,
+              ThrottlingBurstLimit: 10,
+            } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+          }
+        : {};
+
+      // routeSettings is a free-form map and CloudFormation expects PascalCase property
+      // names inside each value.
       cfnStage.routeSettings = {
         ...cfnStage.routeSettings,
-        "POST /webhooks/ebay/platform-notifications/{token}": {
-          ThrottlingRateLimit: 5,
-          ThrottlingBurstLimit: 10,
-        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+        ...signupRouteSettings,
+        ...ebayRouteSettings,
       };
     }
 
-    // Public: this is what creates a Cognito session in the first place, so no session can
-    // exist yet. Gated instead by a shared invite code checked inside the handler.
-    addRoute(
-      "Signup",
-      apigwv2.HttpMethod.POST,
-      "/signup",
-      new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn),
-      false,
-    );
+    // Public acquisition endpoints. POST /signup uses Cognito's native verification
+    // code flow before Stripe Checkout; GET /public/pricing returns only non-secret Stripe
+    // price metadata so the landing/signup UI never hardcodes a price that can drift.
+    const signupIntegration = new HttpLambdaIntegration("SignupIntegration", props.signupHandlerFn);
+    addRoute("Signup", apigwv2.HttpMethod.POST, "/signup", signupIntegration, false);
+    addRoute("PublicPricing", apigwv2.HttpMethod.GET, "/public/pricing", signupIntegration, false);
 
     // Public: hit directly by Stripe, which carries no Cognito session either -- authenticity
     // relies on the Stripe-Signature verification inside the handler, same pattern as the
