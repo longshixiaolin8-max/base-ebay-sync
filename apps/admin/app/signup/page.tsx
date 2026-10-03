@@ -112,14 +112,24 @@ export default function SignupPage() {
       const { checkoutUrl } = await publicApiPost<{ checkoutUrl: string }>("/signup", {
         action: "confirm",
         companyName,
+        name: name || undefined,
         email,
+        password,
         confirmationCode: value,
         acceptedTerms,
       });
       window.location.href = checkoutUrl;
     } catch (err) {
-      if (err instanceof ApiError && err.status === 503) {
-        setError("現在、新規のお支払い受付を準備中です。しばらくしてからもう一度お試しください。");
+      if (err instanceof ApiError && err.status === 503 && err.message.includes('"accountCreated":true')) {
+        window.location.href = "/login?signup=pending-payment";
+        return;
+      }
+      if (err instanceof ApiError && err.status === 409 && err.message.includes("already_registered")) {
+        setError("このメールアドレスはすでに登録済みです。ログインしてください。");
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError("確認回数の上限に達しました。確認コードを再送してやり直してください。");
+      } else if (err instanceof ApiError && err.status === 503) {
+        setError("現在、新規登録メールまたは決済を利用できません。しばらくしてからもう一度お試しください。");
       } else {
         setError("確認コードを確認できませんでした。最新の6桁コードを入力してください。");
       }
@@ -133,8 +143,12 @@ export default function SignupPage() {
     setError(null);
     try {
       await publicApiPost("/signup", { action: "resend", email });
-    } catch {
-      setError("確認コードを再送できませんでした。しばらくしてからお試しください。");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        setError("確認コードは1分後に再送できます。");
+      } else {
+        setError("確認コードを再送できませんでした。しばらくしてからお試しください。");
+      }
     } finally {
       setResending(false);
     }
