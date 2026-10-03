@@ -19,3 +19,26 @@ export function relativeTime(date: Date | string): string {
 export function planLabel(plan: string): string {
   return plan === "standard" ? "スタンダードプラン" : plan;
 }
+
+const STRIPE_ZERO_DECIMAL_CURRENCIES = new Set([
+  "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga",
+  "pyg", "rwf", "ugx", "vnd", "vuv", "xaf", "xof", "xpf",
+]);
+
+/** Stripe reports amounts in the currency's smallest unit. JPY and the other zero-decimal
+ * currencies are already whole units, while USD/EUR/etc. need division by 100. */
+export function stripeMinorToMajor(amount: number, currency: string): number {
+  return STRIPE_ZERO_DECIMAL_CURRENCIES.has(currency.toLowerCase()) ? amount : amount / 100;
+}
+
+export function formatStripeAmount(
+  amount: number,
+  currency: string,
+  locale = "ja-JP",
+): string {
+  const normalizedCurrency = currency.toUpperCase();
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: normalizedCurrency,
+  }).format(stripeMinorToMajor(amount, currency));
+}
