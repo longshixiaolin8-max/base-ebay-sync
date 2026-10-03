@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  AdminDeleteUserCommand,
   AdminGetUserCommand,
   CognitoIdentityProviderClient,
   ConfirmSignUpCommand,
@@ -36,6 +35,11 @@ interface SignupRequestBody {
   acceptedTerms?: boolean;
 }
 
+interface CognitoSignupState {
+  status: string | undefined;
+  tenantId: string | null;
+}
+
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
   return { statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
@@ -57,11 +61,14 @@ function assertLiveBillingInProd(creds: StripeAppCredentials): APIGatewayProxyRe
   return null;
 }
 
-async function getConfirmedTenantId(email: string): Promise<string | null> {
-  const userPoolId = requireEnv("COGNITO_USER_POOL_ID");
-  const user = await cognitoClient.send(new AdminGetUserCommand({ UserPoolId: userPoolId, Username: email }));
-  if (user.UserStatus !== "CONFIRMED") return null;
-  return user.UserAttributes?.find((attr) => attr.Name === "custom:tenant_id")?.Value ?? null;
+async function getCognitoSignupState(email: string): Promise<CognitoSignupState> {
+  const user = await cognitoClient.send(
+    new AdminGetUserCommand({ UserPoolId: requireEnv("COGNITO_USER_POOL_ID"), Username: email }),
+  );
+  return {
+    status: user.UserStatus,
+    tenantId: user.UserAttributes?.find((attr) => attr.Name === "custom:tenant_id")?.Value ?? null,
+  };
 }
 
 async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
@@ -74,9 +81,11 @@ async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResu
     return json(400, { error: "missing_fields_or_terms" });
   }
 
+  // The tenant id is reserved inside Cognito first but NO Aurora row or Stripe Customer is
+  // created until the email code is actually confirmed. That prevents arbitrary public
+  // requests from filling the commercial DB/Stripe account with unverified signups.
   const tenantId = randomUUID();
   const clientId = requireEnv("COGNITO_USER_POOL_CLIENT_ID");
-  const db = getDb();
 
   try {
     await cognitoClient.send(
@@ -92,28 +101,17 @@ async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResu
       }),
     );
   } catch (err) {
-    if (err instanceof UsernameExistsException) return json(409, { error: "already_registered" });
-    throw err;
-  }
+    if (!(err instanceof UsernameExistsException)) throw err;
 
-  try {
-    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email });
-    await recordAuditLog(db, {
-      tenantId,
-      actor: `signup:${email}`,
-      action: "terms_accepted",
-      entityType: "tenant",
-      entityId: tenantId,
-      after: { termsVersion: TERMS_VERSION, privacyVersion: PRIVACY_VERSION },
-    });
-  } catch (err) {
-    // Cognito and Aurora cannot share one transaction. Compensate the Cognito side if the
-    // tenant/audit write fails so a retry is not blocked by an orphaned Cognito username.
-    await cognitoClient
-      .send(new AdminDeleteUserCommand({ UserPoolId: requireEnv("COGNITO_USER_POOL_ID"), Username: email }))
-      .catch(() => {});
-    await deletePendingTenant(db, tenantId).catch(() => {});
-    throw err;
+    // Recover a browser refresh during email verification. If this address is still
+    // UNCONFIRMED, re-send the code and continue instead of stranding the user behind a
+    // duplicate-email error. A confirmed account must sign in instead.
+    const existing = await getCognitoSignupState(email);
+    if (existing.status !== "UNCONFIRMED") {
+      return json(409, { error: "already_registered" });
+    }
+    await cognitoClient.send(new ResendConfirmationCodeCommand({ ClientId: clientId, Username: email }));
+    return json(200, { confirmationRequired: true, email, resumed: true });
   }
 
   return json(200, { confirmationRequired: true, email });
@@ -122,35 +120,66 @@ async function startSignup(body: SignupRequestBody): Promise<APIGatewayProxyResu
 async function resendConfirmation(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
   const email = body.email ? normalizeEmail(body.email) : "";
   if (!email) return json(400, { error: "email_required" });
-  await cognitoClient.send(new ResendConfirmationCodeCommand({ ClientId: requireEnv("COGNITO_USER_POOL_CLIENT_ID"), Username: email }));
+  await cognitoClient.send(
+    new ResendConfirmationCodeCommand({ ClientId: requireEnv("COGNITO_USER_POOL_CLIENT_ID"), Username: email }),
+  );
   return json(200, { resent: true });
 }
 
 async function confirmSignup(body: SignupRequestBody): Promise<APIGatewayProxyResultV2> {
+  const companyName = body.companyName?.trim();
   const email = body.email ? normalizeEmail(body.email) : "";
   const code = body.confirmationCode?.trim();
-  if (!email || !code) return json(400, { error: "confirmation_required" });
+  if (!companyName || !email || !code || body.acceptedTerms !== true) {
+    return json(400, { error: "confirmation_required" });
+  }
 
   const clientId = requireEnv("COGNITO_USER_POOL_CLIENT_ID");
 
   try {
-    await cognitoClient.send(new ConfirmSignUpCommand({ ClientId: clientId, Username: email, ConfirmationCode: code }));
+    await cognitoClient.send(
+      new ConfirmSignUpCommand({ ClientId: clientId, Username: email, ConfirmationCode: code }),
+    );
   } catch (err) {
-    // A browser retry after confirmation but before Stripe returned must remain recoverable.
-    // Only continue when Cognito itself confirms the account is already CONFIRMED.
-    if (!(err instanceof NotAuthorizedException) || !(await getConfirmedTenantId(email))) throw err;
+    // Re-running confirmation after the first confirmation already succeeded is intentional:
+    // it lets an interrupted Stripe redirect be recreated without a support ticket.
+    if (!(err instanceof NotAuthorizedException)) throw err;
+    const state = await getCognitoSignupState(email);
+    if (state.status !== "CONFIRMED") throw err;
   }
 
-  const tenantId = await getConfirmedTenantId(email);
-  if (!tenantId) return json(409, { error: "signup_state_missing" });
+  const state = await getCognitoSignupState(email);
+  if (state.status !== "CONFIRMED" || !state.tenantId) {
+    return json(409, { error: "signup_state_missing" });
+  }
+  const tenantId = state.tenantId;
+  const db = getDb();
+
+  let billing = await getTenantBillingStatus(db, tenantId);
+  if (!billing) {
+    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email });
+    try {
+      await recordAuditLog(db, {
+        tenantId,
+        actor: `signup:${email}`,
+        action: "terms_accepted",
+        entityType: "tenant",
+        entityId: tenantId,
+        after: { termsVersion: TERMS_VERSION, privacyVersion: PRIVACY_VERSION },
+      });
+    } catch (err) {
+      // Keep the confirmed Cognito identity, but roll back the unpaid tenant so the same
+      // confirmation request can cleanly retry if audit persistence had a transient error.
+      await deletePendingTenant(db, tenantId).catch(() => {});
+      throw err;
+    }
+    billing = await getTenantBillingStatus(db, tenantId);
+  }
+  if (!billing) return json(409, { error: "signup_state_missing" });
 
   const stripeCreds = await getAppCredentials<StripeAppCredentials>("stripe");
   const liveBillingError = assertLiveBillingInProd(stripeCreds);
   if (liveBillingError) return liveBillingError;
-
-  const db = getDb();
-  const billing = await getTenantBillingStatus(db, tenantId);
-  if (!billing) return json(409, { error: "signup_state_missing" });
 
   const stripe = createStripeClient(stripeCreds);
   let customerId = billing.stripeCustomerId;
@@ -197,9 +226,9 @@ async function publicPricing(): Promise<APIGatewayProxyResultV2> {
 /**
  * Public acquisition endpoint.
  * GET /public/pricing exposes only Stripe's non-secret price metadata.
- * POST /signup action=start starts Cognito SignUp and sends Cognito's verification code.
- * POST /signup action=confirm verifies ownership, then creates/reuses Stripe Customer and
- * redirects to Checkout. action=resend re-sends Cognito's verification code.
+ * POST /signup action=start sends Cognito's ownership-verification code without writing to
+ * Aurora/Stripe. action=confirm verifies ownership, creates the pending tenant, then creates
+ * or reuses the Stripe Customer and redirects to Checkout. action=resend re-sends the code.
  */
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const cloudFrontRejection = requireCloudFrontOrigin(event);
