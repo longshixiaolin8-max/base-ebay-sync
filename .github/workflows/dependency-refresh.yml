@@ -1,0 +1,55 @@
+name: Dependency Refresh
+
+on:
+  push:
+    branches:
+      - codex/public-saas-readiness-20261003
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: ${{ "!contains(github.event.head_commit.message, '[deps-refreshed]')" }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/public-saas-readiness-20261003
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Upgrade security-sensitive dependencies
+        run: |
+          set -euo pipefail
+          sed -i 's/"packageManager": "pnpm@9.12.0"/"packageManager": "pnpm@10.34.0"/' package.json
+          sed -i 's/"next": "\^14.2.15"/"next": "^15.5.27"/' apps/admin/package.json
+          find . -name package.json -not -path './node_modules/*' -print0 | xargs -0 sed -i 's/"vitest": "\^2.1.4"/"vitest": "^3.2.6"/g'
+          pnpm install --no-frozen-lockfile
+
+      - name: Validate upgraded dependency graph
+        run: |
+          pnpm -r --if-present run lint
+          pnpm -r --if-present run typecheck
+          pnpm -r --if-present run test
+          pnpm -r --if-present run build
+
+      - name: Commit refreshed lockfile
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --cached --quiet; then
+            echo "No dependency changes to commit."
+            exit 0
+          fi
+          git commit -m "[deps-refreshed] Upgrade Next, Vitest and pnpm"
+          git push origin HEAD:codex/public-saas-readiness-20261003
