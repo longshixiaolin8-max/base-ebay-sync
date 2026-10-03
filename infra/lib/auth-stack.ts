@@ -13,10 +13,10 @@ export class AuthStack extends cdk.Stack {
 
     this.userPool = new cognito.UserPool(this, "AdminUserPool", {
       userPoolName: `ai-ec-platform-admin-${config.envName}`,
-      // Public SaaS signup uses Cognito's native SignUp/ConfirmSignUp flow so the email
-      // address is actually verified before a customer can proceed to Stripe checkout.
-      selfSignUpEnabled: true,
-      autoVerify: { email: true },
+      // Public registration is brokered by our signup Lambda. Cognito self-signup stays
+      // disabled so an attacker cannot bypass our verified-email/tenant-creation gate and
+      // submit an arbitrary custom:tenant_id directly to Cognito.
+      selfSignUpEnabled: false,
       signInAliases: { email: true },
       standardAttributes: { email: { required: true, mutable: false } },
       customAttributes: {
