@@ -36,10 +36,10 @@ export interface LambdaStackProps extends cdk.StackProps {
   /** Only actually read (as CLOUDFRONT_SHARED_SECRET) when config.apiEntrypoint is
    *  "cloudfront" -- see requireCloudFrontOrigin in services/lambdas/shared/src. */
   cloudFrontSharedSecret: secretsmanager.Secret;
-  /** Scoped IAM resource for the signup Lambda's AdminCreateUser/AdminSetUserPassword grant --
-   *  narrower than a wildcard, matching this stack's existing scoped-secret-ARN pattern. */
+  /** Scoped Cognito identifiers used by the public verified-signup saga. */
   userPoolArn: string;
   userPoolId: string;
+  userPoolClientId: string;
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
@@ -380,19 +380,24 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
-    // --- Phase 2 of the SaaS conversion ("self-service signup + Stripe test-mode billing") ---
+    // Public SaaS acquisition: native Cognito SignUp sends/verifies the email code before
+    // Stripe Checkout is created. AdminGetUser reads the tenant claim after confirmation;
+    // AdminDeleteUser is the compensating action if Aurora tenant creation fails.
     this.signupHandlerFn = makeFn(
       "SignupHandler",
       "services/lambdas/signup/src/handler.ts",
       "handler",
-      { COGNITO_USER_POOL_ID: props.userPoolId, ADMIN_APP_URL: props.adminAppUrl },
+      {
+        COGNITO_USER_POOL_ID: props.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.userPoolClientId,
+        ADMIN_APP_URL: props.adminAppUrl,
+      },
       cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.stripe.grantRead(this.signupHandlerFn);
-    props.appCredentialSecrets.signup.grantRead(this.signupHandlerFn);
     this.signupHandlerFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword"],
+        actions: ["cognito-idp:AdminGetUser", "cognito-idp:AdminDeleteUser"],
         resources: [props.userPoolArn],
       }),
     );
