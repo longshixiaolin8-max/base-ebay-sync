@@ -191,7 +191,7 @@ export class EbayAdapter implements ChannelAdapter {
    * is NOT served from this.apiBaseUrl.
    */
   async getAuthenticatedUserId(accessToken: string): Promise<string> {
-    const res = await fetch(`${this.identityApiBaseUrl}/commerce/identity/v1/user/`, {
+    const res = await fetchWithRetry(`${this.identityApiBaseUrl}/commerce/identity/v1/user/`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -235,7 +235,7 @@ export class EbayAdapter implements ChannelAdapter {
   /** Lists real eBay Notification API topics (id, description, filterable) — used to find the
    * correct topicId to subscribe to instead of guessing one. */
   async listNotificationTopics(appAccessToken: string): Promise<unknown> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/topic?limit=100`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/topic?limit=100`, {
       headers: { Authorization: `Bearer ${appAccessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -248,7 +248,7 @@ export class EbayAdapter implements ChannelAdapter {
    * for notifications" until this is set).
    */
   async updateNotificationConfig(appAccessToken: string, alertEmail: string): Promise<void> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/config`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/config`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ alertEmail }),
@@ -267,7 +267,7 @@ export class EbayAdapter implements ChannelAdapter {
     endpoint: string,
     verificationToken: string,
   ): Promise<{ destinationId: string }> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/destination`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/destination`, {
       method: "POST",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -293,7 +293,7 @@ export class EbayAdapter implements ChannelAdapter {
     topicId: string,
     destinationId: string,
   ): Promise<{ subscriptionId: string }> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/subscription`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/subscription`, {
       method: "POST",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ topicId, destinationId, status: "ENABLED", payload: { format: "JSON", schemaVersion: "1.0" } }),
@@ -307,7 +307,7 @@ export class EbayAdapter implements ChannelAdapter {
 
   /** Fetches the public key used to verify an inbound notification's X-EBAY-SIGNATURE header. */
   async getNotificationPublicKey(appAccessToken: string, keyId: string): Promise<EbayPublicKey> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/public_key/${keyId}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/public_key/${keyId}`, {
       headers: { Authorization: `Bearer ${appAccessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -354,7 +354,7 @@ export class EbayAdapter implements ChannelAdapter {
       "</SetNotificationPreferencesRequest>",
     ].join("\n");
 
-    const res = await fetch(`${this.apiBaseUrl}/ws/api.dll`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/ws/api.dll`, {
       method: "POST",
       headers: {
         "Content-Type": "text/xml",
@@ -379,7 +379,7 @@ export class EbayAdapter implements ChannelAdapter {
     appAccessToken: string,
     query: string,
   ): Promise<Array<{ ebayCategoryId: string; label: string }>> {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=${encodeURIComponent(query)}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -399,7 +399,7 @@ export class EbayAdapter implements ChannelAdapter {
    * a publish attempt on it, instead of only discovering a missing one from a live 400.
    */
   async getRequiredItemAspects(appAccessToken: string, categoryId: string): Promise<string[]> {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -420,7 +420,7 @@ export class EbayAdapter implements ChannelAdapter {
     categoryId: string,
   ): Promise<Array<{ conditionId: string; conditionDescription: string }>> {
     const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=categoryIds:{${encodeURIComponent(categoryId)}}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -436,7 +436,7 @@ export class EbayAdapter implements ChannelAdapter {
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);
-    const res = await fetch(`${this.apiBaseUrl}/identity/v1/oauth2/token`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/identity/v1/oauth2/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -518,7 +518,7 @@ export class EbayAdapter implements ChannelAdapter {
       "Accept-Language": "en-US",
     };
     const step = async (path: string) => {
-      const res = await fetch(`${this.apiBaseUrl}${path}`, { headers });
+      const res = await fetchWithRetry(`${this.apiBaseUrl}${path}`, { headers });
       const body = await res.text();
       return { status: res.status, body };
     };
@@ -546,7 +546,7 @@ export class EbayAdapter implements ChannelAdapter {
       "Content-Language": "en-US",
       "Accept-Language": "en-US",
     };
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/sell/account/v1/payments_program/${marketplaceId}/payments_program/${paymentsProgramType}`,
       { headers },
     );
@@ -840,7 +840,7 @@ export class EbayAdapter implements ChannelAdapter {
    * Safe to call again if already opted in (eBay returns an error we ignore).
    */
   async optInToBusinessPolicies(accessToken: string): Promise<void> {
-    const res = await fetch(`${this.apiBaseUrl}/sell/account/v1/program/opt_in`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/sell/account/v1/program/opt_in`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ programType: "SELLING_POLICY_MANAGEMENT" }),

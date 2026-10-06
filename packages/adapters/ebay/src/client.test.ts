@@ -227,6 +227,24 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("getRequiredItemAspects survives a transient 500 via fetchWithRetry instead of failing the whole publish preflight", async () => {
+    // Called before every publish/update (see ebay-sync-worker's publish()) -- before this
+    // was routed through fetchWithRetry, one transient 500 here failed the entire attempt
+    // and sent it through the full SQS-redelivery/DLQ cycle (minutes of delay) for what a
+    // single automatic retry would have resolved immediately.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "temporary" }] }, 500))
+      .mockResolvedValueOnce(jsonResponse({ aspects: [{ localizedAspectName: "Brand", aspectConstraint: { aspectRequired: true } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const required = await adapter.getRequiredItemAspects("app-token", "262003");
+
+    expect(required).toEqual(["Brand"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("creates a notification destination and returns its id from the Location header", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(createdResponse("dest-123"));
     vi.stubGlobal("fetch", fetchMock);
