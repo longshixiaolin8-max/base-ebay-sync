@@ -97,6 +97,45 @@ describe("computeSyncConfidence", () => {
     expect(result.score).toBe(100);
   });
 
+  it("counts repeated failures of the same stuck product as one failure, not one per retry", async () => {
+    // Confirmed live: one SKU blocked by a persistent external cause (eBay requiring extra
+    // seller registration) got retried by SQS redelivery/DLQ redrive/manual retry, producing
+    // 6 sync_errors rows for that single product within minutes. Counting raw rows crashed
+    // the whole tenant's score to 0 and blocked every *other* product's publish too, even
+    // though nothing else had failed even once.
+    const db = fakeDb({
+      syncErrors: [
+        { id: "e1", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e2", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e3", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e4", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e5", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e6", productId: "stuck-sku", errorMessage: "eBay API error 400: selling privilege required" },
+      ],
+      channelListings: [],
+      inventoryEvents: [],
+    });
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
+
+    expect(result.failureCount).toBe(1);
+    expect(result.score).toBe(0); // still 0: one product, zero successes this window
+  });
+
+  it("counts failures for two different stuck products separately", async () => {
+    const db = fakeDb({
+      syncErrors: [
+        { id: "e1", productId: "sku-a", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e2", productId: "sku-a", errorMessage: "eBay API error 400: selling privilege required" },
+        { id: "e3", productId: "sku-b", errorMessage: "eBay API error 500: internal server error" },
+      ],
+      channelListings: [],
+      inventoryEvents: [],
+    });
+    const result = await computeSyncConfidence(db, "tenant-a", "ebay");
+
+    expect(result.failureCount).toBe(2);
+  });
+
   it("does not let ordinary 'nothing changed' BASE polls count against the reversal rate", async () => {
     // Confirmed live: a product polled twice with no real BASE change in between produced
     // a skippedReason:"unchanged" event every time -- that must not read as sync trouble.
