@@ -1,4 +1,4 @@
-import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
+import { EbayApiError, EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import {
   applyStandardAspectFallbacks,
   buildIdempotencyKey,
@@ -256,6 +256,17 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
     } catch (err) {
       const error = err as Error;
       if (error.name !== "IdempotencyInProgressError") {
+        // sync_errors keeps the raw error.message (full status+body) for ops debugging;
+        // channel_listings.lastError is seller-facing, so when eBay's response carries its
+        // own human-readable message (and sometimes an actionable URL, e.g. a seller
+        // registration link for SELLING_PRIVILEGE_REQUIRED), show that instead of a raw
+        // JSON blob no seller using this platform could otherwise act on.
+        const displayError =
+          error instanceof EbayApiError && error.userMessage
+            ? error.actionUrl
+              ? `${error.userMessage}\n\n次のステップ: ${error.actionUrl}`
+              : error.userMessage
+            : error.message;
         await recordSyncError(db, {
           tenantId: message.tenantId,
           channel: "ebay",
@@ -266,7 +277,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         });
         await db
           .update(channelListings)
-          .set({ status: "error", lastError: error.message, updatedAt: new Date() })
+          .set({ status: "error", lastError: displayError, updatedAt: new Date() })
           .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
       }
       failures.push({ itemIdentifier: record.messageId });

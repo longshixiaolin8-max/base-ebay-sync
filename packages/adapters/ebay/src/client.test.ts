@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { EbayAdapter } from "./client.js";
+import { EbayAdapter, EbayApiError } from "./client.js";
 
 const config = {
   clientId: "cid",
@@ -856,6 +856,68 @@ describe("EbayAdapter", () => {
       const result = await adapter.refreshToken("original-refresh-token");
 
       expect(result.refreshToken).toBe("rotated-refresh-token");
+    });
+  });
+
+  describe("EbayApiError's parsed detail", () => {
+    it("extracts the human-readable message and actionable URL from a SELLING_PRIVILEGE_REQUIRED response (confirmed live shape)", async () => {
+      const sellingPrivilegeBody = {
+        errors: [
+          {
+            errorId: 25002,
+            domain: "API_INVENTORY",
+            subdomain: "Selling",
+            category: "Request",
+            message: "A user error has occurred. Before you can list this item we need some additional information to create a seller's account.",
+            parameters: [
+              { name: "0", value: "You need to create a seller's account." },
+              { name: "1", value: "Before you can list this item we need some additional information to create a seller's account." },
+              { name: "2", value: "1013" },
+              { name: "3", value: "https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API" },
+              { name: "4", value: "SELLING_PRIVILEGE_REQUIRED" },
+            ],
+          },
+        ],
+      };
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ offers: [] }))
+        .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" }))
+        .mockResolvedValueOnce(jsonResponse(sellingPrivilegeBody, 400));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const adapter = new EbayAdapter(config);
+      const promise = adapter.createListing("token", {
+        productId: "p1",
+        sku: "SKU-1",
+        titleEn: "Vintage Jacket",
+        descriptionHtmlEn: "<p>desc</p>",
+        priceUsd: 49.99,
+        quantity: 2,
+        images: [],
+        categoryId: "12345",
+        itemSpecifics: {},
+        condition: "NEW",
+      });
+
+      await expect(promise).rejects.toBeInstanceOf(EbayApiError);
+      try {
+        await promise;
+        expect.unreachable();
+      } catch (err) {
+        const error = err as EbayApiError;
+        expect(error.userMessage).toBe(
+          "A user error has occurred. Before you can list this item we need some additional information to create a seller's account.",
+        );
+        expect(error.actionUrl).toBe("https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API");
+      }
+    });
+
+    it("leaves userMessage/actionUrl undefined for a body that isn't eBay's error JSON shape", () => {
+      const error = new EbayApiError(500, "Internal Server Error");
+      expect(error.userMessage).toBeUndefined();
+      expect(error.actionUrl).toBeUndefined();
     });
   });
 });

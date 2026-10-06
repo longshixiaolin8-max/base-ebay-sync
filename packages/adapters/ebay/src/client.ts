@@ -83,13 +83,43 @@ interface EbayOrdersResponse {
   next?: string;
 }
 
-class EbayApiError extends Error {
+/**
+ * eBay's error payload bundles a human-readable message with, for some errors (confirmed
+ * live on errorId 25002/SELLING_PRIVILEGE_REQUIRED), a `parameters` array that embeds the
+ * exact URL the seller needs to visit to resolve it -- e.g. "You need to create a seller's
+ * account" plus "https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API".
+ * Without this, that actionable detail was buried in a raw JSON blob only visible by
+ * querying the database directly; no seller using this platform could self-serve it.
+ */
+function parseEbayErrorDetail(body: string): { userMessage: string; actionUrl?: string } | null {
+  let parsed: { errors?: Array<{ message?: string; longMessage?: string; parameters?: Array<{ value?: string }> }> };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const first = parsed.errors?.[0];
+  const userMessage = first?.longMessage ?? first?.message;
+  if (!userMessage) return null;
+  const actionUrl = first?.parameters?.map((p) => p.value).find((v) => typeof v === "string" && /^https?:\/\//.test(v));
+  return { userMessage, actionUrl };
+}
+
+export class EbayApiError extends Error {
+  /** eBay's own human-readable message for this error, when its body parses as eBay's error JSON shape. */
+  readonly userMessage?: string;
+  /** A URL eBay's error parameters point the seller to, when the error includes one (e.g. seller-registration flows). */
+  readonly actionUrl?: string;
+
   constructor(
     readonly status: number,
     readonly body: string,
   ) {
     super(`eBay API error ${status}: ${body}`);
     this.name = "EbayApiError";
+    const detail = parseEbayErrorDetail(body);
+    this.userMessage = detail?.userMessage;
+    this.actionUrl = detail?.actionUrl;
   }
 }
 
