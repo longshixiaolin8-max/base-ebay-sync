@@ -1172,6 +1172,21 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, state);
     }
 
+    // Ops diagnostic, no frontend UI: eBay's own Account API answer for what's actually
+    // blocking a SELLING_PRIVILEGE_REQUIRED (errorId 25002) rejection, which Seller Hub's own
+    // task list can show as fully complete while the Third-Party API still rejects every
+    // publish -- this calls eBay directly instead of guessing from the adapter's one bundled
+    // error message.
+    if (method === "GET" && path === "/admin/ebay/debug/payments-program") {
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+      const state = await adapter.getPaymentsProgramOnboarding(accessToken);
+      return json(200, state);
+    }
+
     if (method === "GET" && path === "/admin/ebay/location") {
       // Confirmed live: a seller who already registered their ship-from address directly
       // in eBay's own Seller Hub has a real location sitting on their account already --

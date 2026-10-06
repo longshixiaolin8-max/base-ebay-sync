@@ -498,6 +498,32 @@ export class EbayAdapter implements ChannelAdapter {
     };
   }
 
+  /**
+   * Diagnostic-only: eBay's own Account API answer for "what's actually missing" behind a
+   * SELLING_PRIVILEGE_REQUIRED (errorId 25002) block, which Seller Hub's task list can show
+   * as fully complete while the Third-Party API listing path still rejects every publish.
+   * Never throws on a non-2xx -- a seller who isn't even in the payments program for this
+   * marketplace gets a 404 here, which is itself diagnostic information, not a failure.
+   */
+  async getPaymentsProgramOnboarding(
+    accessToken: string,
+    paymentsProgramType = "EBAY_PAYMENTS",
+  ): Promise<Record<string, unknown>> {
+    const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "Content-Language": "en-US",
+      "Accept-Language": "en-US",
+    };
+    const res = await fetch(
+      `${this.apiBaseUrl}/sell/account/v1/payments_program/${marketplaceId}/payments_program/${paymentsProgramType}`,
+      { headers },
+    );
+    const body = await res.text();
+    return { marketplaceId, paymentsProgramType, status: res.status, body };
+  }
+
   async createListing(accessToken: string, input: CreateListingInput): Promise<{ externalId: string }> {
     await this.authedFetch(accessToken, `/sell/inventory/v1/inventory_item/${input.sku}`, {
       method: "PUT",
