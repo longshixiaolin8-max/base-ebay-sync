@@ -40,6 +40,12 @@ const predictStockoutRiskMock = vi.fn().mockResolvedValue({
   windowDays: 7,
 });
 const isChannelIsolatedMock = vi.fn().mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
+const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard" });
+// Defaults to "quota available" so every pre-existing test (none of which cares about
+// eBay-sync quota) keeps passing unaffected -- tests that specifically exercise the quota
+// gate override this per-test.
+const tryReserveMonthlyEbaySyncMock = vi.fn().mockResolvedValue(true);
+const releaseMonthlyEbaySyncReservationMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -55,6 +61,9 @@ vi.mock("@ai-ec/db", () => ({
   predictStockoutRisk: (...args: unknown[]) => predictStockoutRiskMock(...args),
   PREEMPTIVE_STOCKOUT_BUFFER: 1,
   isChannelIsolated: (...args: unknown[]) => isChannelIsolatedMock(...args),
+  getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
+  tryReserveMonthlyEbaySync: (...args: unknown[]) => tryReserveMonthlyEbaySyncMock(...args),
+  releaseMonthlyEbaySyncReservation: (...args: unknown[]) => releaseMonthlyEbaySyncReservationMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
@@ -166,6 +175,12 @@ describe("publish", () => {
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
     fetchFxRateMock.mockClear();
     fetchFxRateMock.mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+    getTenantBillingStatusMock.mockClear();
+    getTenantBillingStatusMock.mockResolvedValue({ plan: "standard" });
+    tryReserveMonthlyEbaySyncMock.mockClear();
+    tryReserveMonthlyEbaySyncMock.mockResolvedValue(true);
+    releaseMonthlyEbaySyncReservationMock.mockClear();
+    releaseMonthlyEbaySyncReservationMock.mockResolvedValue(undefined);
   });
 
   function ebayAdapter(overrides: Partial<Record<string, unknown>> = {}) {
@@ -176,6 +191,38 @@ describe("publish", () => {
       ...overrides,
     } as unknown as EbayAdapter;
   }
+
+  it("refuses to publish once the tenant's plan eBay-sync quota is exhausted, without ever calling createListing", async () => {
+    tryReserveMonthlyEbaySyncMock.mockResolvedValue(false);
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await expect(publish(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1")).rejects.toThrow(
+      /monthly eBay sync limit/,
+    );
+    expect(adapter.createListing).not.toHaveBeenCalled();
+  });
+
+  it("reserves one unit of eBay-sync quota from the tenant's actual plan limit before publishing", async () => {
+    getTenantBillingStatusMock.mockResolvedValue({ plan: "pro" });
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter();
+
+    await publish(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1");
+
+    expect(tryReserveMonthlyEbaySyncMock).toHaveBeenCalledWith(expect.anything(), TENANT_ID, 3000);
+    expect(releaseMonthlyEbaySyncReservationMock).not.toHaveBeenCalled();
+  });
+
+  it("refunds the reserved eBay-sync quota when the publish call to eBay itself fails", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const adapter = ebayAdapter({ createListing: vi.fn().mockRejectedValue(new Error("eBay rejected it")) });
+
+    await expect(publish(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1")).rejects.toThrow(
+      "eBay rejected it",
+    );
+    expect(releaseMonthlyEbaySyncReservationMock).toHaveBeenCalledWith(expect.anything(), TENANT_ID);
+  });
 
   it("withholds the freshly-computed dynamic safety stock buffer from the quantity pushed to eBay", async () => {
     computeDynamicSafetyStockMock.mockResolvedValue({
@@ -521,6 +568,43 @@ describe("update", () => {
     isChannelIsolatedMock.mockResolvedValue({ channel: "ebay", isolated: false, reasons: [], windowMinutes: 15 });
     fetchFxRateMock.mockClear();
     fetchFxRateMock.mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+    getTenantBillingStatusMock.mockClear();
+    getTenantBillingStatusMock.mockResolvedValue({ plan: "standard" });
+    tryReserveMonthlyEbaySyncMock.mockClear();
+    tryReserveMonthlyEbaySyncMock.mockResolvedValue(true);
+    releaseMonthlyEbaySyncReservationMock.mockClear();
+    releaseMonthlyEbaySyncReservationMock.mockResolvedValue(undefined);
+  });
+
+  it("refuses to update once the tenant's plan eBay-sync quota is exhausted, without ever calling updateListing", async () => {
+    tryReserveMonthlyEbaySyncMock.mockResolvedValue(false);
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockResolvedValue(undefined);
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1", "base-1"),
+    ).rejects.toThrow(/monthly eBay sync limit/);
+    expect(updateListing).not.toHaveBeenCalled();
+  });
+
+  it("refunds the reserved eBay-sync quota when the update call to eBay itself fails", async () => {
+    const inventory = { quantity: 5, safetyStockBuffer: 0 };
+    const updateListing = vi.fn().mockRejectedValue(new Error("eBay rejected it"));
+    const adapter = {
+      updateListing,
+      getApplicationAccessToken: vi.fn().mockResolvedValue("app-token"),
+      getRequiredItemAspects: vi.fn().mockResolvedValue([]),
+    } as unknown as EbayAdapter;
+
+    await expect(
+      update(createFakeDb([[product], [draft], [listing], [inventory]]), TENANT_ID, adapter, "token", "p1", "base-1"),
+    ).rejects.toThrow("eBay rejected it");
+    expect(releaseMonthlyEbaySyncReservationMock).toHaveBeenCalledWith(expect.anything(), TENANT_ID);
   });
 
   it("blocks update when eBay is isolated, without calling updateListing", async () => {

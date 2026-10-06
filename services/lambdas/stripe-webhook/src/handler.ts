@@ -14,6 +14,7 @@ import {
   getAppCredentials,
   getDb,
   requireCloudFrontOrigin,
+  resolvePlanFromPriceId,
   sendEmail,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
@@ -132,7 +133,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
           const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
           if (tenantId && customerId && subscriptionId) {
-            await markTenantActive(tx, tenantId, { stripeCustomerId: customerId, stripeSubscriptionId: subscriptionId }, eventCreatedAt);
+            // The Checkout Session event payload never carries the subscription's price
+            // (only its id), so resolving which plan was actually paid for needs this one
+            // extra retrieve -- the subscription's own price id is what Stripe actually
+            // charges, never trusted from client-supplied metadata.
+            const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+            const priceId = subscription.items?.data?.[0]?.price?.id;
+            const plan = priceId ? resolvePlanFromPriceId(creds, priceId) : undefined;
+            await markTenantActive(tx, tenantId, { stripeCustomerId: customerId, stripeSubscriptionId: subscriptionId, plan }, eventCreatedAt);
           }
           break;
         }
@@ -142,7 +150,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           const tenant = await findTenantByStripeCustomerId(tx, customerId);
           if (tenant) {
             if (subscription.status === "active" || subscription.status === "trialing") {
-              await markTenantActive(tx, tenant.id, { stripeCustomerId: customerId, stripeSubscriptionId: subscription.id }, eventCreatedAt);
+              // Unlike checkout.session.completed, this event's own subscription object
+              // already carries its current price -- e.g. after a plan switch via the
+              // Stripe customer portal -- so no extra API call is needed to resolve plan.
+              const priceId = subscription.items?.data?.[0]?.price?.id;
+              const plan = priceId ? resolvePlanFromPriceId(creds, priceId) : undefined;
+              await markTenantActive(tx, tenant.id, { stripeCustomerId: customerId, stripeSubscriptionId: subscription.id, plan }, eventCreatedAt);
             } else if (subscription.status === "past_due" || subscription.status === "unpaid") {
               const applied = await markTenantPastDue(tx, tenant.id, eventCreatedAt);
               if (applied) billingNotice = { tenantId: tenant.id, kind: "past_due" };

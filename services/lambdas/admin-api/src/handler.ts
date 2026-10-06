@@ -16,6 +16,7 @@ import {
   ItemCondition,
   matchProductIdentity,
   OrderStatus,
+  PLAN_LIMITS,
   type ProductIdentityCandidate,
   ProductStatus,
 } from "@ai-ec/core";
@@ -37,6 +38,7 @@ import {
   getLatestSyncedAt,
   getLiveOrderProfit,
   getMonthlyAiGenerationCount,
+  getMonthlyEbaySyncCount,
   getSnsContent,
   getTenantBillingStatus,
   InvalidOrderTransitionError,
@@ -76,6 +78,7 @@ import {
   recordAuditLog,
   requireCloudFrontOrigin,
   requireEnv,
+  resolvePlanPriceIds,
   signState,
   signWebhookDestinationToken,
   type EbayAppCredentials,
@@ -233,6 +236,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       const stripe = createStripeClient(creds);
 
+      // Multi-tier commercial launch: an optional plan choice, defaulting to "standard" so
+      // this stays backward-compatible with a frontend that doesn't pass one yet. Only a
+      // real PLAN_LIMITS entry is accepted -- an unrecognized name would otherwise resolve
+      // (via resolvePlanPriceIds's own fallback) to "standard"'s price while the tenant
+      // believes they're buying something else, a real-money mismatch worth rejecting
+      // outright rather than silently defaulting.
+      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan ?? "standard";
+      if (!(requestedPlan in PLAN_LIMITS)) return json(400, { error: "unknown_plan", plan: requestedPlan });
+      const priceId = resolvePlanPriceIds(creds)[requestedPlan];
+      if (!priceId) return json(409, { error: "plan_not_available", plan: requestedPlan });
+
       let customerId = billing.stripeCustomerId;
       if (!customerId) {
         const [tenant] = await db
@@ -252,13 +266,58 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         customer: customerId,
-        line_items: [{ price: creds.priceId, quantity: 1 }],
+        line_items: [{ price: priceId, quantity: 1 }],
         success_url: `${requireEnv("ADMIN_APP_URL")}/login?checkout=success`,
         cancel_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
         metadata: { tenantId },
         subscription_data: { trial_period_days: 30 },
       });
       return json(200, { url: session.url });
+    }
+
+    // Multi-tier commercial launch: lets an already-active tenant actually move between
+    // plans, which the Stripe customer portal link alone can't be relied on for -- whether
+    // the portal even offers a plan switch depends on Stripe Dashboard configuration this
+    // codebase has no control over. Updates the live subscription's price directly instead;
+    // Stripe's own customer.subscription.updated webhook (see stripe-webhook's handler)
+    // is what actually persists the new plan onto tenants.plan once Stripe confirms it,
+    // so this endpoint never writes tenants.plan itself -- it only requests the change.
+    if (method === "POST" && path === "/admin/billing/change-plan") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      // billing.status is already guaranteed "active" here -- this route isn't in
+      // billingExemptRoutes above, so the global gate itself already 402s any other
+      // status before this code ever runs.
+      if (!billing?.stripeSubscriptionId) return json(400, { error: "no_active_subscription" });
+
+      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan;
+      if (!requestedPlan || !(requestedPlan in PLAN_LIMITS)) return json(400, { error: "unknown_plan", plan: requestedPlan });
+      if (requestedPlan === billing.plan) return json(409, { error: "already_on_plan", plan: requestedPlan });
+
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      const priceId = resolvePlanPriceIds(creds)[requestedPlan];
+      if (!priceId) return json(409, { error: "plan_not_available", plan: requestedPlan });
+
+      const stripe = createStripeClient(creds);
+      const subscription = await stripe.subscriptions.retrieve(billing.stripeSubscriptionId);
+      const itemId = subscription.items.data[0]?.id;
+      if (!itemId) return json(409, { error: "subscription_has_no_items" });
+
+      await stripe.subscriptions.update(billing.stripeSubscriptionId, {
+        items: [{ id: itemId, price: priceId }],
+        proration_behavior: "create_prorations",
+      });
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "plan_change_requested",
+        entityType: "tenant",
+        entityId: tenantId,
+        before: { plan: billing.plan },
+        after: { plan: requestedPlan },
+      });
+
+      return json(202, { requestedPlan });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
@@ -494,9 +553,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/usage") {
       const billing = await getTenantBillingStatus(db, tenantId);
       const limits = getPlanLimits(billing?.plan ?? "standard");
-      const [productsUsed, aiGenerationsUsed] = await Promise.all([
+      const [productsUsed, aiGenerationsUsed, ebaySyncsUsed] = await Promise.all([
         countProducts(db, tenantId),
         getMonthlyAiGenerationCount(db, tenantId),
+        getMonthlyEbaySyncCount(db, tenantId),
       ]);
       const now = new Date();
       const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -506,6 +566,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         // 在庫監視ページの「監視対象商品数」と同じ real signal -- この基盤には商品カタログ
         // 全体とは別の「監視SKU」概念がないため、同じ数値・上限を再利用する。
         monitoredSkus: { used: productsUsed, limit: limits.maxProducts },
+        ebaySyncs: { used: ebaySyncsUsed, limit: limits.maxEbaySyncsPerMonth, periodStart: periodStart.toISOString() },
       });
     }
 

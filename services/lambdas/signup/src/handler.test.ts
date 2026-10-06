@@ -51,6 +51,7 @@ const createStripeClientMock = vi.fn(() => ({
   checkout: { sessions: { create: checkoutSessionsCreateMock } },
   prices: { retrieve: pricesRetrieveMock },
 }));
+const resolvePlanPriceIdsMock = vi.fn((creds: { priceId: string }): Record<string, string> => ({ standard: creds.priceId }));
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: () => getDbMock(),
@@ -59,6 +60,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   requireEnv: (name: string) => requireEnvMock(name),
   sendEmail: (...args: unknown[]) => sendEmailMock(...args),
   createStripeClient: () => createStripeClientMock(),
+  resolvePlanPriceIds: (...args: unknown[]) => resolvePlanPriceIdsMock(...(args as [{ priceId: string }])),
 }));
 
 const { handler } = await import("./handler.js");
@@ -305,6 +307,43 @@ describe("public signup", () => {
       }),
     );
     expect(JSON.parse(res.body!)).toEqual({ checkoutUrl: "https://checkout.stripe.example/session" });
+  });
+
+  it("uses the requested plan's own Stripe price for checkout when one is specified", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1", pro: "price_pro" });
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+  });
+
+  it("rejects an unknown plan name before creating any Cognito user or tenant row", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "enterprise-deluxe",
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body!)).toEqual({ error: "unknown_plan", plan: "enterprise-deluxe" });
+    expect(cognitoSendMock).not.toHaveBeenCalled();
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
   });
 
   it("compensates Cognito if tenant/audit persistence fails", async () => {

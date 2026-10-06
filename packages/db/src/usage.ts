@@ -3,9 +3,47 @@ import type { Database } from "./client.js";
 import { productMaster, usageCounters } from "./schema.js";
 
 const AI_GENERATION_METRIC = "ai_generation";
+/** Commercial-launch metric: publish+update calls to eBay, the other metered, real-cost
+ *  action besides AI generation -- see ebay-sync-worker's publish()/update(). */
+const EBAY_SYNC_METRIC = "ebay_sync";
 
 function startOfMonthUtc(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+async function getMonthlyUsageCount(db: Database, tenantId: string, metric: string, now: Date): Promise<number> {
+  const periodStart = startOfMonthUtc(now);
+  const [row] = await db
+    .select({ count: usageCounters.count })
+    .from(usageCounters)
+    .where(and(eq(usageCounters.tenantId, tenantId), eq(usageCounters.metric, metric), eq(usageCounters.periodStart, periodStart)))
+    .limit(1);
+  return row?.count ?? 0;
+}
+
+/** Shared by every metered action (AI generation, eBay sync, ...): see
+ *  tryReserveMonthlyAiGeneration's doc comment for the atomicity rationale -- one INSERT
+ *  ... ON CONFLICT DO UPDATE ... WHERE statement, never a separate read-then-write pair. */
+async function tryReserveMonthlyUsage(db: Database, tenantId: string, metric: string, limit: number, now: Date): Promise<boolean> {
+  const periodStart = startOfMonthUtc(now);
+  const rows = await db
+    .insert(usageCounters)
+    .values({ tenantId, metric, periodStart, count: 1 })
+    .onConflictDoUpdate({
+      target: [usageCounters.tenantId, usageCounters.metric, usageCounters.periodStart],
+      set: { count: sql`${usageCounters.count} + 1` },
+      where: sql`${usageCounters.count} < ${limit}`,
+    })
+    .returning({ count: usageCounters.count });
+  return rows.length > 0;
+}
+
+async function releaseMonthlyUsageReservation(db: Database, tenantId: string, metric: string, now: Date): Promise<void> {
+  const periodStart = startOfMonthUtc(now);
+  await db
+    .update(usageCounters)
+    .set({ count: sql`greatest(${usageCounters.count} - 1, 0)` })
+    .where(and(eq(usageCounters.tenantId, tenantId), eq(usageCounters.metric, metric), eq(usageCounters.periodStart, periodStart)));
 }
 
 /** Structural subset of Database that a Drizzle transaction callback's `tx` handle also
@@ -37,13 +75,7 @@ export async function countProductsByStatus(db: Queryable, tenantId: string, sta
 }
 
 export async function getMonthlyAiGenerationCount(db: Database, tenantId: string, now: Date = new Date()): Promise<number> {
-  const periodStart = startOfMonthUtc(now);
-  const [row] = await db
-    .select({ count: usageCounters.count })
-    .from(usageCounters)
-    .where(and(eq(usageCounters.tenantId, tenantId), eq(usageCounters.metric, AI_GENERATION_METRIC), eq(usageCounters.periodStart, periodStart)))
-    .limit(1);
-  return row?.count ?? 0;
+  return getMonthlyUsageCount(db, tenantId, AI_GENERATION_METRIC, now);
 }
 
 /**
@@ -66,31 +98,27 @@ export async function tryReserveMonthlyAiGeneration(
   limit: number,
   now: Date = new Date(),
 ): Promise<boolean> {
-  const periodStart = startOfMonthUtc(now);
-  const rows = await db
-    .insert(usageCounters)
-    .values({ tenantId, metric: AI_GENERATION_METRIC, periodStart, count: 1 })
-    .onConflictDoUpdate({
-      target: [usageCounters.tenantId, usageCounters.metric, usageCounters.periodStart],
-      set: { count: sql`${usageCounters.count} + 1` },
-      where: sql`${usageCounters.count} < ${limit}`,
-    })
-    .returning({ count: usageCounters.count });
-  return rows.length > 0;
+  return tryReserveMonthlyUsage(db, tenantId, AI_GENERATION_METRIC, limit, now);
 }
 
 /** Refunds one unit reserved by tryReserveMonthlyAiGeneration when the generation attempt
  *  that followed it failed. Never lets the count go below 0. */
 export async function releaseMonthlyAiGenerationReservation(db: Database, tenantId: string, now: Date = new Date()): Promise<void> {
-  const periodStart = startOfMonthUtc(now);
-  await db
-    .update(usageCounters)
-    .set({ count: sql`greatest(${usageCounters.count} - 1, 0)` })
-    .where(
-      and(
-        eq(usageCounters.tenantId, tenantId),
-        eq(usageCounters.metric, AI_GENERATION_METRIC),
-        eq(usageCounters.periodStart, periodStart),
-      ),
-    );
+  return releaseMonthlyUsageReservation(db, tenantId, AI_GENERATION_METRIC, now);
+}
+
+/** Same atomic reserve/release pattern as AI generation, metered separately so a tenant's
+ *  eBay-sync quota and AI-generation quota each run out independently. Call before the
+ *  real eBay publish/update API call and release on failure -- see ebay-sync-worker's
+ *  publish()/update(). */
+export async function getMonthlyEbaySyncCount(db: Database, tenantId: string, now: Date = new Date()): Promise<number> {
+  return getMonthlyUsageCount(db, tenantId, EBAY_SYNC_METRIC, now);
+}
+
+export async function tryReserveMonthlyEbaySync(db: Database, tenantId: string, limit: number, now: Date = new Date()): Promise<boolean> {
+  return tryReserveMonthlyUsage(db, tenantId, EBAY_SYNC_METRIC, limit, now);
+}
+
+export async function releaseMonthlyEbaySyncReservation(db: Database, tenantId: string, now: Date = new Date()): Promise<void> {
+  return releaseMonthlyUsageReservation(db, tenantId, EBAY_SYNC_METRIC, now);
 }
