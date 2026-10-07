@@ -231,6 +231,10 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "ProductFetchSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
       targets: [new targets.LambdaFunction(this.productFetchFn)],
+      // Paused during pre-launch development, same reasoning as SalesPollerSchedule below:
+      // no real customers/BASE shops exist yet, so there is nothing new to fetch. Re-enable
+      // once real sellers are onboarded.
+      enabled: false,
     });
 
     this.aiGenerateWorkerFn = makeFn(
@@ -335,6 +339,10 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
+      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above:
+      // no real customers/inventory exist yet to drift. Re-enable once real sellers are
+      // onboarded.
+      enabled: false,
     });
 
     // Tenant lifecycle (round 11 hardening, "解約済みテナントのworker動作を修正"): delists a
@@ -355,6 +363,10 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "TenantOffboardingSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
       targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
+      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above:
+      // no real customers exist yet to cancel/offboard. Re-enable once real sellers are
+      // onboarded.
+      enabled: false,
     });
 
     // --- Automatic recovery after API failures (item #4) ---
@@ -391,6 +403,11 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "DlqRedriveSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
+      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above.
+      // Note this means a message already stuck in a DLQ (e.g. SEKIRO's eBay-registration
+      // block) will not auto-retry anymore -- trigger it manually once the underlying issue
+      // is actually fixed, or re-enable this schedule once real sellers are onboarded.
+      enabled: false,
     });
 
     // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
