@@ -300,6 +300,13 @@ export class LambdaStack extends cdk.Stack {
       // sell.listing[.read] scope this app's Sandbox keyset does not currently have access to.
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new targets.LambdaFunction(this.salesPollerFn)],
+      // Paused during pre-launch development: no real customers/listings exist yet, so
+      // polling every minute, 24/7, finds nothing to sync and only spends Lambda free-tier
+      // allowance (see this function's own timeout comment above -- it alone burned 97% of
+      // the account's monthly GB-second allowance before that separate fix). Flip back to
+      // true (or delete this line) once real sellers are onboarded and double-sell
+      // prevention actually matters.
+      enabled: false,
     });
 
     this.inventorySyncWorkerFn = makeFn(
