@@ -82,7 +82,7 @@ async function isStale(db: BillingWriteDb, tenantId: string, eventCreatedAt: Dat
 export async function markTenantActive(
   db: BillingWriteDb,
   tenantId: string,
-  stripe: { stripeCustomerId: string; stripeSubscriptionId: string },
+  stripe: { stripeCustomerId: string; stripeSubscriptionId: string; plan?: string },
   eventCreatedAt: Date,
 ): Promise<boolean> {
   if (await isStale(db, tenantId, eventCreatedAt)) return false;
@@ -94,6 +94,12 @@ export async function markTenantActive(
       stripeSubscriptionId: stripe.stripeSubscriptionId,
       gracePeriodEndsAt: null,
       lastBillingEventAt: eventCreatedAt,
+      // Multi-tier commercial launch: resolved from the subscription's actual Stripe Price
+      // id (see resolvePlanFromPriceId), never from client-supplied metadata -- the price
+      // id is what Stripe actually charges, so it's the only trustworthy source for which
+      // plan this payment was really for. Optional so a caller that hasn't resolved a plan
+      // (or doesn't need to touch it) leaves the tenant's existing plan untouched.
+      ...(stripe.plan !== undefined ? { plan: stripe.plan } : {}),
     })
     .where(eq(tenants.id, tenantId));
   return true;

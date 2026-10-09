@@ -107,6 +107,32 @@ describe("markTenantActive", () => {
     });
   });
 
+  it("also sets plan when the caller resolved one from the subscription's actual Stripe Price id", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+    const eventCreatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456", plan: "pro" }, eventCreatedAt);
+
+    expect(sink.patch).toEqual({
+      status: "active",
+      stripeCustomerId: "cus_123",
+      stripeSubscriptionId: "sub_456",
+      gracePeriodEndsAt: null,
+      lastBillingEventAt: eventCreatedAt,
+      plan: "pro",
+    });
+  });
+
+  it("leaves the tenant's existing plan untouched when the caller passes no plan", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+
+    await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" }, new Date("2026-01-01T00:00:00Z"));
+
+    expect(sink.patch).not.toHaveProperty("plan");
+  });
+
   it("does not apply an event older than the tenant's already-applied event (out-of-order guard)", async () => {
     const sink: { patch?: Record<string, unknown> } = {};
     const db = dbWithLastBillingEventAt(new Date("2026-02-01T00:00:00Z"), sink);

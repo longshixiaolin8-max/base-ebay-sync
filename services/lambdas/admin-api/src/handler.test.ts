@@ -64,6 +64,8 @@ const countProductsMock = vi.fn().mockResolvedValue(0);
 const countProductsByStatusMock = vi.fn().mockResolvedValue(0);
 const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
+const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
+const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
@@ -103,6 +105,8 @@ vi.mock("@ai-ec/db", () => ({
   countProductsByStatus: (...args: unknown[]) => countProductsByStatusMock(...args),
   countChannelListingsByStatus: (...args: unknown[]) => countChannelListingsByStatusMock(...args),
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
+  getMonthlyEbaySyncCount: (...args: unknown[]) => getMonthlyEbaySyncCountMock(...args),
+  listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
   DEFAULT_NOTIFICATION_PREFERENCES: {
@@ -153,12 +157,16 @@ const subscriptionsUpdateMock = vi.fn().mockResolvedValue({
   cancel_at_period_end: true,
   items: { data: [{ current_period_end: 1735689600 }] },
 });
+const checkoutSessionsCreateMock = vi.fn().mockResolvedValue({ url: "https://checkout.stripe.example/session" });
+const customersCreateMock = vi.fn().mockResolvedValue({ id: "cus_new" });
 const createStripeClientMock = vi.fn(() => ({
   billingPortal: { sessions: { create: billingPortalSessionsCreateMock } },
-  customers: { retrieve: customersRetrieveMock },
+  customers: { retrieve: customersRetrieveMock, create: customersCreateMock },
   invoices: { list: invoicesListMock },
   subscriptions: { retrieve: subscriptionsRetrieveMock, update: subscriptionsUpdateMock },
+  checkout: { sessions: { create: checkoutSessionsCreateMock } },
 }));
+const resolvePlanPriceIdsMock = vi.fn().mockReturnValue({ standard: "price_standard" });
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
@@ -221,6 +229,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
   deleteOAuthConnectionsForTenant: (...args: unknown[]) => deleteOAuthConnectionsForTenantMock(...args),
+  resolvePlanPriceIds: (...args: unknown[]) => resolvePlanPriceIdsMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -312,6 +321,9 @@ describe("admin-api handler", () => {
     countProductsByStatusMock.mockClear().mockResolvedValue(0);
     countChannelListingsByStatusMock.mockClear().mockResolvedValue(0);
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
+    getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
+    listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
+    delete process.env.OPERATOR_EMAIL;
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
     requireCloudFrontOriginMock.mockReturnValue(null);
@@ -2267,6 +2279,12 @@ describe("admin-api handler", () => {
       getTenantBillingStatusMock.mockClear();
       getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
       billingPortalSessionsCreateMock.mockClear();
+      checkoutSessionsCreateMock.mockClear();
+      subscriptionsUpdateMock.mockClear();
+      subscriptionsRetrieveMock.mockClear();
+      resolvePlanPriceIdsMock.mockClear();
+      resolvePlanPriceIdsMock.mockReturnValue({ standard: "price_standard" });
+      recordAuditLogMock.mockClear();
     });
 
     it("blocks every other route with 402 when the tenant isn't active", async () => {
@@ -2628,6 +2646,96 @@ describe("admin-api handler", () => {
       expect(billingPortalSessionsCreateMock).not.toHaveBeenCalled();
     });
 
+    it("POST /admin/billing/checkout-session defaults to the standard plan's price when no plan is specified", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session"));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ line_items: [{ price: "price_standard", quantity: 1 }] }),
+      );
+      expect(JSON.parse(res.body!)).toEqual({ url: "https://checkout.stripe.example/session" });
+    });
+
+    it("POST /admin/billing/checkout-session uses the requested plan's own price when one is specified", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+    });
+
+    it("POST /admin/billing/checkout-session rejects a plan name that isn't a real plan", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "enterprise-deluxe" }));
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "unknown_plan", plan: "enterprise-deluxe" });
+      expect(checkoutSessionsCreateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/checkout-session returns 409 when the requested plan has no configured Stripe price yet", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard" }); // no "pro" entry
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toEqual({ error: "plan_not_available", plan: "pro" });
+      expect(checkoutSessionsCreateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/change-plan updates the live subscription's price and audit-logs the request", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeSubscriptionId: "sub_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+      subscriptionsRetrieveMock.mockResolvedValueOnce({ items: { data: [{ id: "si_1" }] } });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(202);
+      expect(subscriptionsUpdateMock).toHaveBeenCalledWith("sub_1", {
+        items: [{ id: "si_1", price: "price_pro" }],
+        proration_behavior: "create_prorations",
+      });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ action: "plan_change_requested", before: { plan: "standard" }, after: { plan: "pro" } }),
+      );
+    });
+
+    it("POST /admin/billing/change-plan returns 409 when already on the requested plan", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "pro", status: "active", stripeSubscriptionId: "sub_1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toEqual({ error: "already_on_plan", plan: "pro" });
+      expect(subscriptionsUpdateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/change-plan is blocked by the global billing gate (402) when the tenant isn't active", async () => {
+      // /admin/billing/change-plan is deliberately not in billingExemptRoutes -- the global
+      // gate at the top of the handler already 402s any non-active tenant before this
+      // route's own code ever runs, for any write method (not just GET's grace-period
+      // carve-out), so there's no separate "not active" check to test inside the route.
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "past_due", stripeSubscriptionId: "sub_1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(402);
+      expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "past_due", gracePeriodEndsAt: null });
+      expect(subscriptionsUpdateMock).not.toHaveBeenCalled();
+    });
+
     it("allows normal routes through once the tenant is active again", async () => {
       fakeDb = createFakeDb([[]]);
 
@@ -2636,9 +2744,10 @@ describe("admin-api handler", () => {
       expect(res.statusCode).toBe(200);
     });
 
-    it("GET /admin/usage returns product and AI-generation usage against the plan's limits", async () => {
+    it("GET /admin/usage returns product, AI-generation, and eBay-sync usage against the plan's limits", async () => {
       countProductsMock.mockResolvedValueOnce(12);
       getMonthlyAiGenerationCountMock.mockResolvedValueOnce(3);
+      getMonthlyEbaySyncCountMock.mockResolvedValueOnce(7);
 
       const res = await callHandler(makeEvent("GET", "/admin/usage"));
 
@@ -2647,6 +2756,8 @@ describe("admin-api handler", () => {
       expect(body.products).toEqual({ used: 12, limit: 300 });
       expect(body.aiGenerations).toMatchObject({ used: 3, limit: 100 });
       expect(typeof body.aiGenerations.periodStart).toBe("string");
+      expect(body.ebaySyncs).toMatchObject({ used: 7, limit: 300 });
+      expect(typeof body.ebaySyncs.periodStart).toBe("string");
     });
 
     it("GET /admin/usage is blocked (402) when the tenant isn't active, like every other non-billing route", async () => {
@@ -2655,6 +2766,97 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/usage"));
 
       expect(res.statusCode).toBe(402);
+    });
+  });
+
+  describe("operator dashboard (/admin/ops/*)", () => {
+    const OPERATOR_EMAIL = "operator@example.com";
+    function opsEvent(method: string, path: string, body?: unknown, email = OPERATOR_EMAIL) {
+      return makeEvent(method, path, {}, body, { email, "custom:tenant_id": TENANT_A });
+    }
+
+    it("403s every /admin/ops/* route when OPERATOR_EMAIL isn't configured", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(403);
+      expect(listTenantsOpsSummaryMock).not.toHaveBeenCalled();
+    });
+
+    it("403s a caller whose email doesn't match the configured operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants", undefined, "someone-else@example.com"));
+
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("GET /admin/ops/tenants returns the cross-tenant summary for the operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      listTenantsOpsSummaryMock.mockResolvedValueOnce([
+        { id: "tenant-b", name: "Shop B", plan: "standard", status: "active", contactEmail: "b@example.com", unresolvedErrorCount24h: 2, isolatedChannels: ["ebay"], lastActivityAt: null },
+      ]);
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).tenants).toHaveLength(1);
+      expect(listTenantsOpsSummaryMock).toHaveBeenCalledWith(fakeDb);
+    });
+
+    it("GET /admin/ops/tenants/{id}/sync-errors lists unresolved errors for the chosen tenant, not the caller's own", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([[{ error: { id: "err-1", tenantId: "tenant-b" }, productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants/tenant-b/sync-errors"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).syncErrors).toEqual([{ id: "err-1", tenantId: "tenant-b", productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]);
+    });
+
+    it("POST /admin/ops/tenants/{id}/sync-errors/{id}/retry re-queues the original job and marks the error resolved", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([
+        [{ id: "err-1", jobId: "job-1", tenantId: "tenant-b" }],
+        [{ id: "job-1", type: "ebay_update", productId: "product-1", payload: { foo: "bar" } }],
+      ]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/sync-errors/err-1/retry"));
+
+      expect(res.statusCode).toBe(202);
+      expect(enqueueMock).toHaveBeenCalledWith(
+        "ebay-sync-url",
+        expect.objectContaining({ type: "ebay_update", tenantId: "tenant-b", productId: "product-1", foo: "bar" }),
+        expect.stringContaining("tenant-b:ops-retry:err-1:"),
+      );
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "sync_error_retried", entityId: "err-1" }),
+      );
+    });
+
+    it("POST /admin/ops/tenants/{id}/channel-isolation/{channel}/clear resolves that tenant's recent channel errors", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/ebay/clear"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", cleared: true });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "channel_isolation_cleared", entityId: "ebay" }),
+      );
+    });
+
+    it("rejects an unknown channel on the isolation-clear route", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/shopify/clear"));
+
+      expect(res.statusCode).toBe(400);
     });
   });
 });

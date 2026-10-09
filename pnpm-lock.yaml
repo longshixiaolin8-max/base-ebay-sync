@@ -587,6 +587,9 @@ importers:
 
   services/lambdas/signup:
     dependencies:
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../../packages/core
       '@ai-ec/db':
         specifier: workspace:*
         version: link:../../../packages/db

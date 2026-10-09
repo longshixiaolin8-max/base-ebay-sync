@@ -9,6 +9,7 @@ export interface UsageStatus {
   products: { used: number; limit: number };
   aiGenerations: { used: number; limit: number; periodStart: string };
   monitoredSkus: { used: number; limit: number };
+  ebaySyncs: { used: number; limit: number; periodStart: string };
 }
 
 export interface PaymentMethod {

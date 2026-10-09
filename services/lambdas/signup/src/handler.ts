@@ -6,6 +6,7 @@ import {
   CognitoIdentityProviderClient,
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { PLAN_LIMITS } from "@ai-ec/core";
 import {
   claimSignupVerification,
   createPendingTenant,
@@ -24,6 +25,7 @@ import {
   recordAuditLog,
   requireCloudFrontOrigin,
   requireEnv,
+  resolvePlanPriceIds,
   sendEmail,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
@@ -41,6 +43,10 @@ interface SignupRequestBody {
   password?: string;
   confirmationCode?: string;
   acceptedTerms?: boolean;
+  /** Multi-tier commercial launch: which plan to check out for. Optional and defaults to
+   *  "standard" (see confirmSignup) so an older frontend build that never sends this field
+   *  still works exactly as before. */
+  plan?: string;
 }
 
 type JsonResult = {
@@ -207,6 +213,7 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
   const email = body.email ? normalizeEmail(body.email) : "";
   const password = body.password ?? "";
   const code = body.confirmationCode?.trim() ?? "";
+  const plan = body.plan ?? "standard";
 
   if (
     !companyName ||
@@ -216,6 +223,11 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
     body.acceptedTerms !== true
   ) {
     return json(400, { error: "confirmation_required" });
+  }
+  // Validated before any Cognito user/tenant row is created below -- an invalid plan name
+  // fails fast with no side effects to roll back, unlike every check after account creation.
+  if (!(plan in PLAN_LIMITS)) {
+    return json(400, { error: "unknown_plan", plan });
   }
 
   const db = getDb();
@@ -311,6 +323,11 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
     return json(503, { error: "billing_not_live", accountCreated: true });
   }
 
+  // Resolved from the already-validated plan name, falling back to the always-present
+  // "standard" price if this account has no real Stripe price configured yet for the
+  // requested tier -- same safe fallback resolvePlanPriceIds itself documents.
+  const priceId = resolvePlanPriceIds(stripeCreds)[plan] ?? stripeCreds.priceId;
+
   try {
     const stripe = createStripeClient(stripeCreds);
     const customer = await stripe.customers.create({ email, metadata: { tenantId } });
@@ -320,7 +337,7 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: customer.id,
-      line_items: [{ price: stripeCreds.priceId, quantity: 1 }],
+      line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${adminAppUrl}/login?checkout=success`,
       cancel_url: `${adminAppUrl}/login?signup=pending-payment`,
       metadata: { tenantId },

@@ -282,7 +282,14 @@ export class LambdaStack extends cdk.Stack {
       "services/lambdas/sales-poller/src/handler.ts",
       "handler",
       {},
-      cdk.Duration.minutes(2),
+      // Confirmed live: this used to loop internally for ~45-50s per invocation (see the
+      // handler's own doc comment) to approximate a sub-minute effective poll interval --
+      // billed the whole time, which alone burned 97% of the AWS Lambda free tier's
+      // 400,000 GB-second/month allowance in the first week of October. Now a single pass
+      // per invocation; 30s is generous headroom over the real work (a couple of HTTP
+      // calls per tenant/channel) while still failing fast if something hangs, rather than
+      // silently billing for a full 2 minutes on every stuck invocation.
+      cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.base.grantRead(this.salesPollerFn);
     props.appCredentialSecrets.ebay.grantRead(this.salesPollerFn);
@@ -491,6 +498,10 @@ export class LambdaStack extends cdk.Stack {
         // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
         // billing portal session it creates.
         ADMIN_APP_URL: props.adminAppUrl,
+        // Gates the cross-tenant /admin/ops/* routes (requireOperator() in handler.ts) --
+        // see PlatformConfig.operatorEmail's own doc comment. Omitted entirely (rather than
+        // set to "") when unconfigured, so requireOperator's undefined-check fails closed.
+        ...(props.config.operatorEmail ? { OPERATOR_EMAIL: props.config.operatorEmail } : {}),
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out

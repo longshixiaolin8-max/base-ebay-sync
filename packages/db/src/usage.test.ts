@@ -4,8 +4,11 @@ import {
   countProducts,
   countProductsByStatus,
   getMonthlyAiGenerationCount,
+  getMonthlyEbaySyncCount,
   releaseMonthlyAiGenerationReservation,
+  releaseMonthlyEbaySyncReservation,
   tryReserveMonthlyAiGeneration,
+  tryReserveMonthlyEbaySync,
 } from "./usage.js";
 
 describe("countProducts", () => {
@@ -86,6 +89,20 @@ describe("getMonthlyAiGenerationCount", () => {
   });
 });
 
+describe("getMonthlyEbaySyncCount", () => {
+  it("returns the stored count, independent of getMonthlyAiGenerationCount's own metric", async () => {
+    const db = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [{ count: 17 }] }),
+        }),
+      }),
+    } as unknown as Database;
+
+    expect(await getMonthlyEbaySyncCount(db, "tenant-a", new Date("2026-09-15T00:00:00Z"))).toBe(17);
+  });
+});
+
 /**
  * A minimal in-memory stand-in for usage_counters that implements the real query's
  * semantics: `INSERT ... ON CONFLICT (tenant_id, metric, period_start) DO UPDATE SET
@@ -123,7 +140,11 @@ class FakeUsageTable {
   }
 }
 
-function fakeDb(table: FakeUsageTable, limit: number, releaseTarget?: { tenantId: string; periodStart: Date }): Database {
+function fakeDb(
+  table: FakeUsageTable,
+  limit: number,
+  releaseTarget?: { tenantId: string; metric: string; periodStart: Date },
+): Database {
   return {
     insert: () => ({
       values: (values: { tenantId: string; metric: string; periodStart: Date }) => ({
@@ -138,12 +159,12 @@ function fakeDb(table: FakeUsageTable, limit: number, releaseTarget?: { tenantId
     update: () => ({
       set: () => ({
         where: async () => {
-          // releaseMonthlyAiGenerationReservation always targets exactly the one
-          // (tenantId, metric, periodStart) row its own arguments compute -- the fake
-          // takes that same target directly rather than parsing Drizzle's `and(eq(...))`
-          // condition tree, since the function under test has no branching on its shape.
+          // release* always targets exactly the one (tenantId, metric, periodStart) row
+          // its own arguments compute -- the fake takes that same target directly rather
+          // than parsing Drizzle's `and(eq(...))` condition tree, since the function
+          // under test has no branching on its shape.
           if (releaseTarget) {
-            table.release(releaseTarget.tenantId, "ai_generation", releaseTarget.periodStart);
+            table.release(releaseTarget.tenantId, releaseTarget.metric, releaseTarget.periodStart);
           }
         },
       }),
@@ -225,7 +246,7 @@ describe("releaseMonthlyAiGenerationReservation", () => {
     const table = new FakeUsageTable();
     const now = new Date("2026-09-15T00:00:00Z");
     const periodStart = new Date(Date.UTC(2026, 8, 1));
-    const db = fakeDb(table, 100, { tenantId: "tenant-a", periodStart });
+    const db = fakeDb(table, 100, { tenantId: "tenant-a", metric: "ai_generation", periodStart });
 
     await tryReserveMonthlyAiGeneration(db, "tenant-a", 100, now);
     expect(table.rows.get(table.key("tenant-a", "ai_generation", periodStart))).toBe(1);
@@ -238,9 +259,43 @@ describe("releaseMonthlyAiGenerationReservation", () => {
     const table = new FakeUsageTable();
     const now = new Date("2026-09-15T00:00:00Z");
     const periodStart = new Date(Date.UTC(2026, 8, 1));
-    const db = fakeDb(table, 100, { tenantId: "tenant-a", periodStart });
+    const db = fakeDb(table, 100, { tenantId: "tenant-a", metric: "ai_generation", periodStart });
 
     await releaseMonthlyAiGenerationReservation(db, "tenant-a", now);
     expect(table.rows.get(table.key("tenant-a", "ai_generation", periodStart))).toBe(0);
+  });
+});
+
+describe("monthly eBay-sync quota (getMonthlyEbaySyncCount / tryReserveMonthlyEbaySync / releaseMonthlyEbaySyncReservation)", () => {
+  it("reserves, counts, and releases independently of the ai_generation metric", async () => {
+    const table = new FakeUsageTable();
+    const now = new Date("2026-09-15T00:00:00Z");
+    const periodStart = new Date(Date.UTC(2026, 8, 1));
+
+    const reserveDb = fakeDb(table, 300, undefined);
+    await tryReserveMonthlyAiGeneration(reserveDb, "tenant-a", 100, now); // unrelated metric, same tenant/month
+    expect(await tryReserveMonthlyEbaySync(reserveDb, "tenant-a", 300, now)).toBe(true);
+    expect(await tryReserveMonthlyEbaySync(reserveDb, "tenant-a", 300, now)).toBe(true);
+
+    expect(table.rows.get(table.key("tenant-a", "ai_generation", periodStart))).toBe(1);
+    expect(table.rows.get(table.key("tenant-a", "ebay_sync", periodStart))).toBe(2);
+
+    const releaseDb = fakeDb(table, 300, { tenantId: "tenant-a", metric: "ebay_sync", periodStart });
+    await releaseMonthlyEbaySyncReservation(releaseDb, "tenant-a", now);
+    expect(table.rows.get(table.key("tenant-a", "ebay_sync", periodStart))).toBe(1);
+    // ai_generation's count must be untouched by releasing the ebay_sync reservation.
+    expect(table.rows.get(table.key("tenant-a", "ai_generation", periodStart))).toBe(1);
+  });
+
+  it("refuses the reservation once the eBay-sync count is at the limit", async () => {
+    const table = new FakeUsageTable();
+    const db = fakeDb(table, 2, undefined);
+    const now = new Date("2026-09-15T00:00:00Z");
+
+    expect(await tryReserveMonthlyEbaySync(db, "tenant-a", 2, now)).toBe(true); // -> 1
+    expect(await tryReserveMonthlyEbaySync(db, "tenant-a", 2, now)).toBe(true); // -> 2, at limit
+    expect(await tryReserveMonthlyEbaySync(db, "tenant-a", 2, now)).toBe(false); // refused
+
+    expect(table.rows.get(table.key("tenant-a", "ebay_sync", new Date(Date.UTC(2026, 8, 1))))).toBe(2);
   });
 });

@@ -31,14 +31,24 @@ const getAppCredentialsMock = vi.fn().mockResolvedValue({
 const fakeDb = { transaction: async (fn: (tx: unknown) => unknown) => fn(fakeDb) };
 const getDbMock = vi.fn(() => fakeDb);
 const constructEventMock = vi.fn();
-const createStripeClientMock = vi.fn(() => ({ webhooks: { constructEvent: constructEventMock } }));
+// Default: no price data, matching every pre-existing test's expectation that
+// markTenantActive is called with no `plan` key at all (resolvePlanFromPriceId is never
+// reached when there's no price to resolve). Tests specifically covering plan resolution
+// override this per-test.
+const subscriptionsRetrieveMock = vi.fn().mockResolvedValue({ items: { data: [] } });
+const createStripeClientMock = vi.fn(() => ({
+  webhooks: { constructEvent: constructEventMock },
+  subscriptions: { retrieve: subscriptionsRetrieveMock },
+}));
 const sendEmailMock = vi.fn().mockResolvedValue(undefined);
+const resolvePlanFromPriceIdMock = vi.fn().mockReturnValue("standard");
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: () => getAppCredentialsMock(),
   getDb: () => getDbMock(),
   createStripeClient: () => createStripeClientMock(),
   requireCloudFrontOrigin: () => null,
   sendEmail: (...args: unknown[]) => sendEmailMock(...args),
+  resolvePlanFromPriceId: (...args: unknown[]) => resolvePlanFromPriceIdMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -76,6 +86,8 @@ describe("POST /webhooks/stripe", () => {
       notificationPreferences: { inventoryDiffAlert: true, aiDraftCompleted: true, billingNotice: true, oauthExpiryNotice: true, importantNotice: true },
     });
     sendEmailMock.mockReset().mockResolvedValue(undefined);
+    subscriptionsRetrieveMock.mockReset().mockResolvedValue({ items: { data: [] } });
+    resolvePlanFromPriceIdMock.mockReset().mockReturnValue("standard");
   });
 
   it("rejects a delivery with no Stripe-Signature header", async () => {
@@ -142,6 +154,50 @@ describe("POST /webhooks/stripe", () => {
     expect(completeWebhookEventMock).toHaveBeenCalledWith(expect.anything(), "stripe", "evt_1");
     expect(failWebhookEventMock).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(200);
+  });
+
+  it("resolves and persists the plan from the subscription's actual Stripe Price id on checkout.session.completed", async () => {
+    constructEventMock.mockReturnValue({
+      id: "evt_1",
+      created: EVENT_CREATED_UNIX,
+      type: "checkout.session.completed",
+      data: { object: { metadata: { tenantId: "tenant-new" }, customer: "cus_1", subscription: "sub_1" } },
+    });
+    subscriptionsRetrieveMock.mockResolvedValue({ items: { data: [{ price: { id: "price_pro" } }] } });
+    resolvePlanFromPriceIdMock.mockReturnValue("pro");
+
+    await callHandler("{}", "sig_valid");
+
+    expect(subscriptionsRetrieveMock).toHaveBeenCalledWith("sub_1");
+    expect(resolvePlanFromPriceIdMock).toHaveBeenCalledWith(expect.anything(), "price_pro");
+    expect(markTenantActiveMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "tenant-new",
+      { stripeCustomerId: "cus_1", stripeSubscriptionId: "sub_1", plan: "pro" },
+      EVENT_CREATED_DATE,
+    );
+  });
+
+  it("resolves and persists the plan from the event's own subscription price on customer.subscription.updated, with no extra retrieve call", async () => {
+    findTenantByStripeCustomerIdMock.mockResolvedValue({ id: "tenant-a" });
+    constructEventMock.mockReturnValue({
+      id: "evt_1",
+      created: EVENT_CREATED_UNIX,
+      type: "customer.subscription.updated",
+      data: { object: { customer: "cus_1", id: "sub_1", status: "active", items: { data: [{ price: { id: "price_starter" } }] } } },
+    });
+    resolvePlanFromPriceIdMock.mockReturnValue("starter");
+
+    await callHandler("{}", "sig_valid");
+
+    expect(subscriptionsRetrieveMock).not.toHaveBeenCalled();
+    expect(resolvePlanFromPriceIdMock).toHaveBeenCalledWith(expect.anything(), "price_starter");
+    expect(markTenantActiveMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "tenant-a",
+      { stripeCustomerId: "cus_1", stripeSubscriptionId: "sub_1", plan: "starter" },
+      EVENT_CREATED_DATE,
+    );
   });
 
   it("does nothing (but still marks completed and returns 200) when checkout.session.completed is missing tenant metadata", async () => {

@@ -83,13 +83,43 @@ interface EbayOrdersResponse {
   next?: string;
 }
 
-class EbayApiError extends Error {
+/**
+ * eBay's error payload bundles a human-readable message with, for some errors (confirmed
+ * live on errorId 25002/SELLING_PRIVILEGE_REQUIRED), a `parameters` array that embeds the
+ * exact URL the seller needs to visit to resolve it -- e.g. "You need to create a seller's
+ * account" plus "https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API".
+ * Without this, that actionable detail was buried in a raw JSON blob only visible by
+ * querying the database directly; no seller using this platform could self-serve it.
+ */
+function parseEbayErrorDetail(body: string): { userMessage: string; actionUrl?: string } | null {
+  let parsed: { errors?: Array<{ message?: string; longMessage?: string; parameters?: Array<{ value?: string }> }> };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const first = parsed.errors?.[0];
+  const userMessage = first?.longMessage ?? first?.message;
+  if (!userMessage) return null;
+  const actionUrl = first?.parameters?.map((p) => p.value).find((v) => typeof v === "string" && /^https?:\/\//.test(v));
+  return { userMessage, actionUrl };
+}
+
+export class EbayApiError extends Error {
+  /** eBay's own human-readable message for this error, when its body parses as eBay's error JSON shape. */
+  readonly userMessage?: string;
+  /** A URL eBay's error parameters point the seller to, when the error includes one (e.g. seller-registration flows). */
+  readonly actionUrl?: string;
+
   constructor(
     readonly status: number,
     readonly body: string,
   ) {
     super(`eBay API error ${status}: ${body}`);
     this.name = "EbayApiError";
+    const detail = parseEbayErrorDetail(body);
+    this.userMessage = detail?.userMessage;
+    this.actionUrl = detail?.actionUrl;
   }
 }
 
@@ -161,7 +191,7 @@ export class EbayAdapter implements ChannelAdapter {
    * is NOT served from this.apiBaseUrl.
    */
   async getAuthenticatedUserId(accessToken: string): Promise<string> {
-    const res = await fetch(`${this.identityApiBaseUrl}/commerce/identity/v1/user/`, {
+    const res = await fetchWithRetry(`${this.identityApiBaseUrl}/commerce/identity/v1/user/`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -205,7 +235,7 @@ export class EbayAdapter implements ChannelAdapter {
   /** Lists real eBay Notification API topics (id, description, filterable) — used to find the
    * correct topicId to subscribe to instead of guessing one. */
   async listNotificationTopics(appAccessToken: string): Promise<unknown> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/topic?limit=100`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/topic?limit=100`, {
       headers: { Authorization: `Bearer ${appAccessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -218,7 +248,7 @@ export class EbayAdapter implements ChannelAdapter {
    * for notifications" until this is set).
    */
   async updateNotificationConfig(appAccessToken: string, alertEmail: string): Promise<void> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/config`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/config`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ alertEmail }),
@@ -237,7 +267,7 @@ export class EbayAdapter implements ChannelAdapter {
     endpoint: string,
     verificationToken: string,
   ): Promise<{ destinationId: string }> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/destination`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/destination`, {
       method: "POST",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -263,7 +293,7 @@ export class EbayAdapter implements ChannelAdapter {
     topicId: string,
     destinationId: string,
   ): Promise<{ subscriptionId: string }> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/subscription`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/subscription`, {
       method: "POST",
       headers: { Authorization: `Bearer ${appAccessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ topicId, destinationId, status: "ENABLED", payload: { format: "JSON", schemaVersion: "1.0" } }),
@@ -277,7 +307,7 @@ export class EbayAdapter implements ChannelAdapter {
 
   /** Fetches the public key used to verify an inbound notification's X-EBAY-SIGNATURE header. */
   async getNotificationPublicKey(appAccessToken: string, keyId: string): Promise<EbayPublicKey> {
-    const res = await fetch(`${this.apiBaseUrl}/commerce/notification/v1/public_key/${keyId}`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/commerce/notification/v1/public_key/${keyId}`, {
       headers: { Authorization: `Bearer ${appAccessToken}` },
     });
     if (!res.ok) throw new EbayApiError(res.status, await res.text());
@@ -324,7 +354,7 @@ export class EbayAdapter implements ChannelAdapter {
       "</SetNotificationPreferencesRequest>",
     ].join("\n");
 
-    const res = await fetch(`${this.apiBaseUrl}/ws/api.dll`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/ws/api.dll`, {
       method: "POST",
       headers: {
         "Content-Type": "text/xml",
@@ -349,7 +379,7 @@ export class EbayAdapter implements ChannelAdapter {
     appAccessToken: string,
     query: string,
   ): Promise<Array<{ ebayCategoryId: string; label: string }>> {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=${encodeURIComponent(query)}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -369,7 +399,7 @@ export class EbayAdapter implements ChannelAdapter {
    * a publish attempt on it, instead of only discovering a missing one from a live 400.
    */
   async getRequiredItemAspects(appAccessToken: string, categoryId: string): Promise<string[]> {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -390,7 +420,7 @@ export class EbayAdapter implements ChannelAdapter {
     categoryId: string,
   ): Promise<Array<{ conditionId: string; conditionDescription: string }>> {
     const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `${this.apiBaseUrl}/sell/metadata/v1/marketplace/${marketplaceId}/get_item_condition_policies?filter=categoryIds:{${encodeURIComponent(categoryId)}}`,
       { headers: { Authorization: `Bearer ${appAccessToken}` } },
     );
@@ -406,7 +436,7 @@ export class EbayAdapter implements ChannelAdapter {
   private async requestToken(extra: Record<string, string>): Promise<OAuthTokenSet> {
     const basicAuth = Buffer.from(`${this.config.clientId}:${this.config.clientSecret}`).toString("base64");
     const body = new URLSearchParams(extra);
-    const res = await fetch(`${this.apiBaseUrl}/identity/v1/oauth2/token`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/identity/v1/oauth2/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -488,7 +518,7 @@ export class EbayAdapter implements ChannelAdapter {
       "Accept-Language": "en-US",
     };
     const step = async (path: string) => {
-      const res = await fetch(`${this.apiBaseUrl}${path}`, { headers });
+      const res = await fetchWithRetry(`${this.apiBaseUrl}${path}`, { headers });
       const body = await res.text();
       return { status: res.status, body };
     };
@@ -496,6 +526,32 @@ export class EbayAdapter implements ChannelAdapter {
       inventoryItem: await step(`/sell/inventory/v1/inventory_item/${sku}`),
       offersBySku: await step(`/sell/inventory/v1/offer?sku=${sku}`),
     };
+  }
+
+  /**
+   * Diagnostic-only: eBay's own Account API answer for "what's actually missing" behind a
+   * SELLING_PRIVILEGE_REQUIRED (errorId 25002) block, which Seller Hub's task list can show
+   * as fully complete while the Third-Party API listing path still rejects every publish.
+   * Never throws on a non-2xx -- a seller who isn't even in the payments program for this
+   * marketplace gets a 404 here, which is itself diagnostic information, not a failure.
+   */
+  async getPaymentsProgramOnboarding(
+    accessToken: string,
+    paymentsProgramType = "EBAY_PAYMENTS",
+  ): Promise<Record<string, unknown>> {
+    const marketplaceId = this.config.marketplaceId ?? "EBAY_US";
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "Content-Language": "en-US",
+      "Accept-Language": "en-US",
+    };
+    const res = await fetchWithRetry(
+      `${this.apiBaseUrl}/sell/account/v1/payments_program/${marketplaceId}/payments_program/${paymentsProgramType}`,
+      { headers },
+    );
+    const body = await res.text();
+    return { marketplaceId, paymentsProgramType, status: res.status, body };
   }
 
   async createListing(accessToken: string, input: CreateListingInput): Promise<{ externalId: string }> {
@@ -784,7 +840,7 @@ export class EbayAdapter implements ChannelAdapter {
    * Safe to call again if already opted in (eBay returns an error we ignore).
    */
   async optInToBusinessPolicies(accessToken: string): Promise<void> {
-    const res = await fetch(`${this.apiBaseUrl}/sell/account/v1/program/opt_in`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/sell/account/v1/program/opt_in`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ programType: "SELLING_POLICY_MANAGEMENT" }),

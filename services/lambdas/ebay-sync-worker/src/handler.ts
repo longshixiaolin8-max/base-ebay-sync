@@ -1,4 +1,4 @@
-import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
+import { EbayApiError, EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import {
   applyStandardAspectFallbacks,
   buildIdempotencyKey,
@@ -8,6 +8,7 @@ import {
   findMissingRequiredAspects,
   finalSafetyCheckForNewListing,
   finalSafetyCheckForUpdate,
+  getPlanLimits,
   withIdempotency,
 } from "@ai-ec/core";
 import {
@@ -18,11 +19,14 @@ import {
   computeSyncConfidence,
   detectInventoryAnomaly,
   detectPriceAnomaly,
+  getTenantBillingStatus,
   inventoryMaster,
   isChannelIsolated,
   predictStockoutRisk,
   PREEMPTIVE_STOCKOUT_BUFFER,
   productMaster,
+  releaseMonthlyEbaySyncReservation,
+  tryReserveMonthlyEbaySync,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -92,6 +96,31 @@ const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
  * noise, not evidence the whole channel is unreliable.
  */
 const MIN_FAILURES_TO_PAUSE_PUBLISHING = 3;
+
+/**
+ * Commercial-launch quota enforcement: thrown when a tenant has used up this calendar
+ * month's plan-limited eBay publish+update calls. Not retryable until next month -- the
+ * SQS handler's catch block below recognizes this by name and doesn't push it to
+ * batchItemFailures, matching ai-generate-worker's own AiQuotaExceededError handling.
+ */
+class EbaySyncQuotaExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Tenant has reached its plan's monthly eBay sync limit (${limit})`);
+    this.name = "EbaySyncQuotaExceededError";
+  }
+}
+
+/** Shared by publish() and update(): reserves one unit of this tenant's monthly eBay-sync
+ *  quota, throwing EbaySyncQuotaExceededError if the plan's maxEbaySyncsPerMonth limit is
+ *  already used up. Call immediately before the real eBay API call it's gating. */
+async function reserveEbaySyncQuota(db: ReturnType<typeof getDb>, tenantId: string): Promise<void> {
+  const billing = await getTenantBillingStatus(db, tenantId);
+  const limit = getPlanLimits(billing?.plan ?? "standard").maxEbaySyncsPerMonth;
+  const reserved = await tryReserveMonthlyEbaySync(db, tenantId, limit);
+  if (!reserved) {
+    throw new EbaySyncQuotaExceededError(limit);
+  }
+}
 
 /**
  * Item #2 of the hardening list ("動的安全在庫"): recomputes and persists the product's
@@ -255,7 +284,39 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
       }
     } catch (err) {
       const error = err as Error;
+      if (error instanceof EbaySyncQuotaExceededError) {
+        // Not retryable until next month -- not pushed to `failures`, matching how
+        // ai-generate-worker's own AiQuotaExceededError is handled.
+        await recordSyncError(db, {
+          tenantId: message.tenantId,
+          channel: "ebay",
+          productId: message.productId,
+          errorCode: "ebay_sync_quota_exceeded",
+          errorMessage: error.message,
+          payload: { messageId: record.messageId, limit: error.limit },
+        });
+        await db
+          .update(channelListings)
+          .set({
+            status: "error",
+            lastError: `今月のeBay同期回数の上限(${error.limit}件)に達しました。来月になると自動的にリセットされます。`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
+        continue;
+      }
       if (error.name !== "IdempotencyInProgressError") {
+        // sync_errors keeps the raw error.message (full status+body) for ops debugging;
+        // channel_listings.lastError is seller-facing, so when eBay's response carries its
+        // own human-readable message (and sometimes an actionable URL, e.g. a seller
+        // registration link for SELLING_PRIVILEGE_REQUIRED), show that instead of a raw
+        // JSON blob no seller using this platform could otherwise act on.
+        const displayError =
+          error instanceof EbayApiError && error.userMessage
+            ? error.actionUrl
+              ? `${error.userMessage}\n\n次のステップ: ${error.actionUrl}`
+              : error.userMessage
+            : error.message;
         await recordSyncError(db, {
           tenantId: message.tenantId,
           channel: "ebay",
@@ -266,7 +327,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         });
         await db
           .update(channelListings)
-          .set({ status: "error", lastError: error.message, updatedAt: new Date() })
+          .set({ status: "error", lastError: displayError, updatedAt: new Date() })
           .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
       }
       failures.push({ itemIdentifier: record.messageId });
@@ -366,12 +427,22 @@ export async function publish(
     throw new Error(`Refusing to publish product ${productId} to eBay: ${safetyCheck.violations.join("; ")}`);
   }
 
-  const { externalId } = await adapter.createListing(accessToken, {
-    productId,
-    sku: product.sku,
-    ...listingPayload,
-    itemSpecifics,
-  });
+  await reserveEbaySyncQuota(db, tenantId);
+  let externalId: string;
+  try {
+    ({ externalId } = await adapter.createListing(accessToken, {
+      productId,
+      sku: product.sku,
+      ...listingPayload,
+      itemSpecifics,
+    }));
+  } catch (err) {
+    // The reservation above already consumed one unit of quota; refund it so a failed
+    // attempt (eBay rejection, network error) isn't charged against the tenant's monthly
+    // limit -- same "no charge on failure" guarantee as AI generation's own quota.
+    await releaseMonthlyEbaySyncReservation(db, tenantId);
+    throw err;
+  }
 
   await db
     .update(channelListings)
@@ -470,6 +541,7 @@ export async function update(
     throw new Error(`Refusing to update product ${productId} on eBay: ${safetyCheck.violations.join("; ")}`);
   }
 
+  await reserveEbaySyncQuota(db, tenantId);
   try {
     await adapter.updateListing(accessToken, externalId, {
       ...updatePayload,
@@ -481,6 +553,8 @@ export async function update(
       itemSpecifics,
     });
   } catch (err) {
+    // Same "no charge on failure" refund as publish() -- see reserveEbaySyncQuota's doc comment.
+    await releaseMonthlyEbaySyncReservation(db, tenantId);
     if (err instanceof EbayPartialUpdateRolledBackError) {
       // Item #3 of the second hardening round ("自動ロールバック"): the adapter already
       // reverted eBay's live listing content back to its prior state. Record that it

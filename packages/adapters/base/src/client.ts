@@ -159,7 +159,7 @@ export class BaseAdapter implements ChannelAdapter {
       client_secret: this.config.clientSecret,
       ...extra,
     });
-    const res = await fetch(`${this.apiBaseUrl}/1/oauth/token`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/1/oauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,

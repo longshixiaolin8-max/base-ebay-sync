@@ -13,11 +13,18 @@ export function relativeTime(date: Date | string): string {
   return `${days}日前`;
 }
 
-/** This platform currently offers exactly one plan tier (packages/core/src/plan-limits.ts);
- *  falls back to the raw plan id so a future new tier still renders something instead of
- *  silently showing nothing. Shared between /billing and the sidebar's plan-usage widget. */
+/** Every plan tier this platform currently sells (packages/core/src/plan-limits.ts's own
+ *  PLAN_LIMITS keys); falls back to the raw plan id so an unrecognized future tier still
+ *  renders something instead of silently showing nothing. Shared between /billing and the
+ *  sidebar's plan-usage widget. */
+const PLAN_LABELS: Record<string, string> = {
+  starter: "スタータープラン",
+  standard: "スタンダードプラン",
+  pro: "プロプラン",
+};
+
 export function planLabel(plan: string): string {
-  return plan === "standard" ? "スタンダードプラン" : plan;
+  return PLAN_LABELS[plan] ?? plan;
 }
 
 const STRIPE_ZERO_DECIMAL_CURRENCIES = new Set([

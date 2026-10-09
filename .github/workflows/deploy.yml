@@ -19,6 +19,17 @@ on:
         required: false
         type: boolean
         default: false
+      enableLambdaConcurrencyLimits:
+        description: >-
+          Apply each SQS-driven worker's reservedConcurrentExecutions cap. Confirmed live
+          (2026-10-09, AWS Support case): this account's Lambda Concurrent executions quota
+          in us-east-2 was raised from AWS's default minimum (10) to 1000, so these caps
+          (totaling 35) no longer exceed the account's own quota. Leave unchecked only if
+          that quota was ever lowered back down -- ANY reservedConcurrentExecutions value
+          fails deployment outright once the account-wide quota can't cover it.
+        required: false
+        type: boolean
+        default: true
       targetStacks:
         description: >-
           Advanced/one-off use only: space-separated stack names to deploy with
@@ -184,6 +195,8 @@ jobs:
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
+              --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
           else
             npx cdk deploy --all \
@@ -194,6 +207,8 @@ jobs:
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
+              --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
           fi
 
@@ -300,6 +315,7 @@ jobs:
           NEXT_PUBLIC_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
           NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
           NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          NEXT_PUBLIC_OPERATOR_EMAIL: ${{ vars.OPERATOR_EMAIL }}
         run: |
           set -euo pipefail
           USER_POOL_ID=$(aws cloudformation describe-stacks \
