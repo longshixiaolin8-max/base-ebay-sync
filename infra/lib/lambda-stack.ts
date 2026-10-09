@@ -231,10 +231,6 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "ProductFetchSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
       targets: [new targets.LambdaFunction(this.productFetchFn)],
-      // Paused during pre-launch development, same reasoning as SalesPollerSchedule below:
-      // no real customers/BASE shops exist yet, so there is nothing new to fetch. Re-enable
-      // once real sellers are onboarded.
-      enabled: false,
     });
 
     this.aiGenerateWorkerFn = makeFn(
@@ -304,13 +300,6 @@ export class LambdaStack extends cdk.Stack {
       // sell.listing[.read] scope this app's Sandbox keyset does not currently have access to.
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new targets.LambdaFunction(this.salesPollerFn)],
-      // Paused during pre-launch development: no real customers/listings exist yet, so
-      // polling every minute, 24/7, finds nothing to sync and only spends Lambda free-tier
-      // allowance (see this function's own timeout comment above -- it alone burned 97% of
-      // the account's monthly GB-second allowance before that separate fix). Flip back to
-      // true (or delete this line) once real sellers are onboarded and double-sell
-      // prevention actually matters.
-      enabled: false,
     });
 
     this.inventorySyncWorkerFn = makeFn(
@@ -339,10 +328,6 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
-      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above:
-      // no real customers/inventory exist yet to drift. Re-enable once real sellers are
-      // onboarded.
-      enabled: false,
     });
 
     // Tenant lifecycle (round 11 hardening, "解約済みテナントのworker動作を修正"): delists a
@@ -363,10 +348,6 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "TenantOffboardingSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
       targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
-      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above:
-      // no real customers exist yet to cancel/offboard. Re-enable once real sellers are
-      // onboarded.
-      enabled: false,
     });
 
     // --- Automatic recovery after API failures (item #4) ---
@@ -403,11 +384,6 @@ export class LambdaStack extends cdk.Stack {
     new events.Rule(this, "DlqRedriveSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
-      // Paused during pre-launch development, same reasoning as SalesPollerSchedule above.
-      // Note this means a message already stuck in a DLQ (e.g. SEKIRO's eBay-registration
-      // block) will not auto-retry anymore -- trigger it manually once the underlying issue
-      // is actually fixed, or re-enable this schedule once real sellers are onboarded.
-      enabled: false,
     });
 
     // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
