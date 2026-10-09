@@ -196,6 +196,7 @@ jobs:
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
+              --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
           else
             npx cdk deploy --all \
@@ -207,6 +208,7 @@ jobs:
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
               --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
+              --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
           fi
 
@@ -313,6 +315,7 @@ jobs:
           NEXT_PUBLIC_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
           NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
           NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
+          NEXT_PUBLIC_OPERATOR_EMAIL: ${{ vars.OPERATOR_EMAIL }}
         run: |
           set -euo pipefail
           USER_POOL_ID=$(aws cloudformation describe-stacks \

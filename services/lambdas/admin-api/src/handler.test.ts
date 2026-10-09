@@ -65,6 +65,7 @@ const countProductsByStatusMock = vi.fn().mockResolvedValue(0);
 const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
 const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
+const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
@@ -105,6 +106,7 @@ vi.mock("@ai-ec/db", () => ({
   countChannelListingsByStatus: (...args: unknown[]) => countChannelListingsByStatusMock(...args),
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
   getMonthlyEbaySyncCount: (...args: unknown[]) => getMonthlyEbaySyncCountMock(...args),
+  listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
   DEFAULT_NOTIFICATION_PREFERENCES: {
@@ -320,6 +322,8 @@ describe("admin-api handler", () => {
     countChannelListingsByStatusMock.mockClear().mockResolvedValue(0);
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
     getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
+    listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
+    delete process.env.OPERATOR_EMAIL;
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
     requireCloudFrontOriginMock.mockReturnValue(null);
@@ -2762,6 +2766,97 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/usage"));
 
       expect(res.statusCode).toBe(402);
+    });
+  });
+
+  describe("operator dashboard (/admin/ops/*)", () => {
+    const OPERATOR_EMAIL = "operator@example.com";
+    function opsEvent(method: string, path: string, body?: unknown, email = OPERATOR_EMAIL) {
+      return makeEvent(method, path, {}, body, { email, "custom:tenant_id": TENANT_A });
+    }
+
+    it("403s every /admin/ops/* route when OPERATOR_EMAIL isn't configured", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(403);
+      expect(listTenantsOpsSummaryMock).not.toHaveBeenCalled();
+    });
+
+    it("403s a caller whose email doesn't match the configured operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants", undefined, "someone-else@example.com"));
+
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("GET /admin/ops/tenants returns the cross-tenant summary for the operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      listTenantsOpsSummaryMock.mockResolvedValueOnce([
+        { id: "tenant-b", name: "Shop B", plan: "standard", status: "active", contactEmail: "b@example.com", unresolvedErrorCount24h: 2, isolatedChannels: ["ebay"], lastActivityAt: null },
+      ]);
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).tenants).toHaveLength(1);
+      expect(listTenantsOpsSummaryMock).toHaveBeenCalledWith(fakeDb);
+    });
+
+    it("GET /admin/ops/tenants/{id}/sync-errors lists unresolved errors for the chosen tenant, not the caller's own", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([[{ error: { id: "err-1", tenantId: "tenant-b" }, productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants/tenant-b/sync-errors"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).syncErrors).toEqual([{ id: "err-1", tenantId: "tenant-b", productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]);
+    });
+
+    it("POST /admin/ops/tenants/{id}/sync-errors/{id}/retry re-queues the original job and marks the error resolved", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([
+        [{ id: "err-1", jobId: "job-1", tenantId: "tenant-b" }],
+        [{ id: "job-1", type: "ebay_update", productId: "product-1", payload: { foo: "bar" } }],
+      ]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/sync-errors/err-1/retry"));
+
+      expect(res.statusCode).toBe(202);
+      expect(enqueueMock).toHaveBeenCalledWith(
+        "ebay-sync-url",
+        expect.objectContaining({ type: "ebay_update", tenantId: "tenant-b", productId: "product-1", foo: "bar" }),
+        expect.stringContaining("tenant-b:ops-retry:err-1:"),
+      );
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "sync_error_retried", entityId: "err-1" }),
+      );
+    });
+
+    it("POST /admin/ops/tenants/{id}/channel-isolation/{channel}/clear resolves that tenant's recent channel errors", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/ebay/clear"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", cleared: true });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "channel_isolation_cleared", entityId: "ebay" }),
+      );
+    });
+
+    it("rejects an unknown channel on the isolation-clear route", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/shopify/clear"));
+
+      expect(res.statusCode).toBe(400);
     });
   });
 });

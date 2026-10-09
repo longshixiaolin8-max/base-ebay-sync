@@ -498,6 +498,10 @@ export class LambdaStack extends cdk.Stack {
         // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
         // billing portal session it creates.
         ADMIN_APP_URL: props.adminAppUrl,
+        // Gates the cross-tenant /admin/ops/* routes (requireOperator() in handler.ts) --
+        // see PlatformConfig.operatorEmail's own doc comment. Omitted entirely (rather than
+        // set to "") when unconfigured, so requireOperator's undefined-check fails closed.
+        ...(props.config.operatorEmail ? { OPERATOR_EMAIL: props.config.operatorEmail } : {}),
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out

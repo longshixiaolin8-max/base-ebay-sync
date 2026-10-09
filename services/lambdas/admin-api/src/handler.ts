@@ -44,6 +44,7 @@ import {
   InvalidOrderTransitionError,
   inventoryMaster,
   listOrdersForProduct,
+  listTenantsOpsSummary,
   markSnsStatus,
   oauthConnections,
   orders,
@@ -154,6 +155,22 @@ function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
   return tenantId;
 }
 
+/**
+ * Gates every "/admin/ops/*" route (the platform operator's own cross-tenant dashboard) --
+ * unlike every other route in this file, these act on a tenantId taken from the URL path,
+ * not the caller's own `custom:tenant_id` claim, so the normal per-tenant isolation that
+ * claim provides doesn't apply here at all. OPERATOR_EMAIL is only ever set (see
+ * infra/lib/lambda-stack.ts) once PlatformConfig.operatorEmail is configured; left unset,
+ * every "/admin/ops/*" call 403s for everyone, fail-closed rather than fail-open.
+ */
+function requireOperator(event: APIGatewayProxyEventV2): APIGatewayProxyResultV2 | undefined {
+  const operatorEmail = process.env.OPERATOR_EMAIL;
+  if (!operatorEmail || actorFromEvent(event) !== operatorEmail) {
+    return json(403, { error: "not_authorized" });
+  }
+  return undefined;
+}
+
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
   const cloudFrontRejection = requireCloudFrontOrigin(event);
   if (cloudFrontRejection) return cloudFrontRejection;
@@ -183,7 +200,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       "POST /admin/billing/portal-session",
       "POST /admin/billing/checkout-session",
     ]);
-    if (!billingExemptRoutes.has(`${method} ${path}`)) {
+    // The operator dashboard ("/admin/ops/*") acts across every tenant, not just the
+    // caller's own -- its own tenant's billing state (the caller is almost always the
+    // platform operator's own tenant, incidental to this feature) has no bearing on whether
+    // ops access to OTHER tenants' data should work. requireOperator() below is this route
+    // family's real gate.
+    if (!billingExemptRoutes.has(`${method} ${path}`) && !path.startsWith("/admin/ops/")) {
       const billing = await getTenantBillingStatus(db, tenantId);
       const inGracePeriod =
         billing?.status === "canceled_grace" && !!billing.gracePeriodEndsAt && billing.gracePeriodEndsAt.getTime() > Date.now();
@@ -3151,6 +3173,109 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         transformed: { count: transformedRows[0]?.count ?? 0, pending: pendingTransform[0]?.count ?? 0 },
         published: { count: publishedRows[0]?.count ?? 0, pending: pendingPublish[0]?.count ?? 0 },
       });
+    }
+
+    // --- Operator dashboard ("/admin/ops/*"): cross-tenant visibility + action for the
+    // platform operator, built so a customer's sync trouble shows up here before they have
+    // to email support about it (see requireOperator()'s own doc comment for the access model).
+
+    if (method === "GET" && path === "/admin/ops/tenants") {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const summaries = await listTenantsOpsSummary(db);
+      return json(200, { tenants: summaries });
+    }
+
+    if (method === "GET" && /^\/admin\/ops\/tenants\/[^/]+\/sync-errors$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const opsTenantId = path.split("/")[4]!;
+      const rows = await db
+        .select({ error: syncErrors, productTitle: productMaster.title, productSku: productMaster.sku, jobType: syncJobs.type })
+        .from(syncErrors)
+        .leftJoin(productMaster, eq(productMaster.id, syncErrors.productId))
+        .leftJoin(syncJobs, eq(syncJobs.id, syncErrors.jobId))
+        .where(and(eq(syncErrors.tenantId, opsTenantId), eq(syncErrors.resolved, false)))
+        .orderBy(desc(syncErrors.createdAt))
+        .limit(200);
+      const syncErrorsOut = rows.map((r) => ({
+        ...r.error,
+        productTitle: r.productTitle ?? null,
+        productSku: r.productSku ?? null,
+        jobType: r.jobType ?? null,
+      }));
+      return json(200, { syncErrors: syncErrorsOut });
+    }
+
+    // Mirrors POST /admin/sync-errors/{id}/retry exactly, just scoped to an operator-chosen
+    // tenantId from the path instead of the caller's own claim.
+    if (method === "POST" && /^\/admin\/ops\/tenants\/[^/]+\/sync-errors\/[^/]+\/retry$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const [, , , , opsTenantId, , id] = path.split("/");
+      const [error] = await db
+        .select()
+        .from(syncErrors)
+        .where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.id, id!)))
+        .limit(1);
+      if (!error) return json(404, { error: "not_found" });
+      if (!error.jobId) return json(400, { error: "error_has_no_retryable_job" });
+
+      const [job] = await db
+        .select()
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, opsTenantId!), eq(syncJobs.id, error.jobId)))
+        .limit(1);
+      if (!job) return json(404, { error: "original_job_not_found" });
+
+      const queues = getQueueUrls();
+      const queueUrl =
+        job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
+      await enqueue(
+        queueUrl,
+        { type: job.type, tenantId: opsTenantId, productId: job.productId, ...job.payload },
+        `${opsTenantId}:ops-retry:${id}:${Date.now()}`,
+      );
+      await db.update(syncErrors).set({ resolved: true }).where(eq(syncErrors.id, id!));
+
+      await recordAuditLog(db, {
+        tenantId: opsTenantId!,
+        actor: `operator:${actorFromEvent(event)}`,
+        action: "sync_error_retried",
+        entityType: "sync_error",
+        entityId: id!,
+      });
+
+      return json(202, { status: "retry_queued" });
+    }
+
+    // isChannelIsolated (packages/db/channel-isolation.ts) is deliberately stateless -- it
+    // recomputes isolation from recent sync_errors every time, rather than persisting an
+    // "isolated" flag anywhere to remember to clear. So "clear isolation" for an operator
+    // really means: stop those specific errors from counting toward the window any longer,
+    // i.e. mark them resolved. The next isChannelIsolated check then sees none and lifts
+    // isolation immediately, instead of waiting for the window to age out on its own.
+    if (method === "POST" && /^\/admin\/ops\/tenants\/[^/]+\/channel-isolation\/[^/]+\/clear$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const [, , , , opsTenantId, , channel] = path.split("/");
+      const channelParsed = ChannelType.safeParse(channel);
+      if (!channelParsed.success || !IMPLEMENTED_CHANNELS.includes(channelParsed.data)) return json(400, { error: "unknown_channel" });
+
+      await db
+        .update(syncErrors)
+        .set({ resolved: true })
+        .where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.channel, channelParsed.data), eq(syncErrors.resolved, false)));
+
+      await recordAuditLog(db, {
+        tenantId: opsTenantId!,
+        actor: `operator:${actorFromEvent(event)}`,
+        action: "channel_isolation_cleared",
+        entityType: "channel",
+        entityId: channelParsed.data,
+      });
+
+      return json(200, { channel: channelParsed.data, cleared: true });
     }
 
     // --- Commercial-features round: unified commerce dashboard (UI, item requested separately) ---

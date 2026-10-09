@@ -45,6 +45,9 @@ const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefine
 // to enabled. A manual deploy that omits --context can still force it back off by passing
 // lambdaConcurrencyLimitsEnabled=false explicitly, e.g. if the quota is ever lowered again.
 const lambdaConcurrencyLimitsEnabled = (app.node.tryGetContext("lambdaConcurrencyLimitsEnabled") as string | undefined) ?? "true";
+// See PlatformConfig.operatorEmail's own doc comment: unset by default (the /admin/ops/*
+// routes 403 for everyone) until passed here via `--context operatorEmail=you@example.com`.
+const operatorEmail = app.node.tryGetContext("operatorEmail") as string | undefined;
 
 const config = loadConfig(
   envName,
@@ -55,6 +58,7 @@ const config = loadConfig(
   ebayPlatformNotificationThrottleEnabled,
   sesFromEmail,
   lambdaConcurrencyLimitsEnabled,
+  operatorEmail,
 );
 
 // Region is read from CDK context (`--context region=...`), not from

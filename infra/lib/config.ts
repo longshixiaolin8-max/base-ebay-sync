@@ -70,6 +70,15 @@ export interface PlatformConfig {
    * explicitly if that quota is ever lowered again.
    */
   lambdaConcurrencyLimitsEnabled: boolean;
+  /**
+   * The platform operator's own login email -- gates the cross-tenant "/admin/ops/*" routes
+   * (admin-api handler.ts's requireOperator()) and the frontend's /ops nav item. Left unset
+   * by default: those routes 403 unconditionally until this is configured, so a fresh deploy
+   * never accidentally exposes every tenant's data to whichever Cognito user happens to sign
+   * in. Not a secret (it's the same address already public on /legal) -- just an identity
+   * check, so it ships as a plain Lambda env var, not a Secrets Manager entry.
+   */
+  operatorEmail?: string;
 }
 
 export function loadConfig(
@@ -81,6 +90,7 @@ export function loadConfig(
   ebayPlatformNotificationThrottleEnabled?: string,
   sesFromEmail?: string,
   lambdaConcurrencyLimitsEnabled?: string,
+  operatorEmail?: string,
 ): PlatformConfig {
   return {
     envName,
@@ -91,5 +101,6 @@ export function loadConfig(
     ebayPlatformNotificationThrottleEnabled: ebayPlatformNotificationThrottleEnabled === "true",
     sesFromEmail,
     lambdaConcurrencyLimitsEnabled: lambdaConcurrencyLimitsEnabled === "true",
+    operatorEmail,
   };
 }
