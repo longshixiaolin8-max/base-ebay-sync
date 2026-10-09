@@ -38,12 +38,13 @@ const ebayPlatformNotificationThrottleEnabled = app.node.tryGetContext("ebayPlat
 // stay a caught, logged no-op) until an address/domain has been verified in the SES console
 // for this account/region and passed here via `--context sesFromEmail=notifications@yourdomain`.
 const sesFromEmail = app.node.tryGetContext("sesFromEmail") as string | undefined;
-// See PlatformConfig.lambdaConcurrencyLimitsEnabled's own doc comment: false (default) until
-// this account's Lambda "Concurrent executions" quota is confirmed (GetServiceQuota,
-// lambda/L-B99A9384) to be comfortably above the sum of every reservedConcurrency value
-// makeFn sets -- an account still on AWS's low starting quota (as low as 10) cannot reserve
-// concurrency for even one function without violating AWS's own 10-unit unreserved floor.
-const lambdaConcurrencyLimitsEnabled = app.node.tryGetContext("lambdaConcurrencyLimitsEnabled") as string | undefined;
+// See PlatformConfig.lambdaConcurrencyLimitsEnabled's own doc comment. Confirmed live
+// (2026-10-09, AWS Support case) that this account's Lambda "Concurrent executions" quota
+// in us-east-2 was raised from AWS's low starting value (10) to 1000 -- comfortably above
+// the sum of every reservedConcurrency value makeFn sets (35 total) -- so this now defaults
+// to enabled. A manual deploy that omits --context can still force it back off by passing
+// lambdaConcurrencyLimitsEnabled=false explicitly, e.g. if the quota is ever lowered again.
+const lambdaConcurrencyLimitsEnabled = (app.node.tryGetContext("lambdaConcurrencyLimitsEnabled") as string | undefined) ?? "true";
 
 const config = loadConfig(
   envName,
