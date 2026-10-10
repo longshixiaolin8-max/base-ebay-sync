@@ -15,9 +15,9 @@
     "@ai-ec/adapter-ebay": "workspace:*",
     "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
-    "@aws-sdk/client-secrets-manager": "^3.687.0",
-    "@aws-sdk/client-sesv2": "^3.687.0",
-    "@aws-sdk/client-sqs": "^3.687.0",
+    "@aws-sdk/client-secrets-manager": "^3.1147.0",
+    "@aws-sdk/client-sesv2": "^3.1147.0",
+    "@aws-sdk/client-sqs": "^3.1147.0",
     "drizzle-orm": "^0.36.1",
     "stripe": "^22.6.1"
   },

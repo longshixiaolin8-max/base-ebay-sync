@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@ai-ec/core": "workspace:*",
-    "@aws-sdk/client-bedrock-runtime": "^3.687.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1147.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
