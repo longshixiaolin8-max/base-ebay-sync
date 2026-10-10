@@ -14,7 +14,7 @@
   "dependencies": {
     "@ai-ec/core": "workspace:*",
     "@aws-sdk/client-rds-data": "^3.687.0",
-    "drizzle-orm": "0.45.2",
+    "drizzle-orm": "0.45.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {

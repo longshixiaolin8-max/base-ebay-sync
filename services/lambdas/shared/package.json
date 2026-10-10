@@ -18,7 +18,7 @@
     "@aws-sdk/client-secrets-manager": "^3.687.0",
     "@aws-sdk/client-sesv2": "^3.687.0",
     "@aws-sdk/client-sqs": "^3.687.0",
-    "drizzle-orm": "^0.36.1",
+    "drizzle-orm": "^0.45.3",
     "stripe": "^22.6.1"
   },
   "devDependencies": {
