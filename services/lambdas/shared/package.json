@@ -19,7 +19,7 @@
     "@aws-sdk/client-sesv2": "^3.687.0",
     "@aws-sdk/client-sqs": "^3.687.0",
     "drizzle-orm": "^0.36.1",
-    "stripe": "^22.6.1"
+    "stripe": "^23.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
