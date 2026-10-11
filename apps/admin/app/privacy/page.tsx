@@ -5,7 +5,8 @@ export default function PrivacyPage() {
   return (
     <PublicDocument title="プライバシーポリシー">
       <p>制定・改定日: {PRIVACY_VERSION}</p>
-      <p>{LEGAL_INFO.operatorName}（以下「運営者」）は、本サービスで取り扱う情報を以下の方針で管理します。</p>
+      <p>BASE eBay Syncの運営者（以下「運営者」）は、本サービスで取り扱う情報を以下の方針で管理します。</p>
+      <p>運営者の氏名または名称・所在地は、下記の窓口への請求に応じて遅滞なくお知らせします。</p>
       <h2>取得する情報</h2>
       <p>
         氏名・事業者名・メールアドレス、認証情報に関する識別子、契約・請求状態、BASE/eBayから利用者の許可に基づき取得する
@@ -33,7 +34,7 @@ export default function PrivacyPage() {
       <h2>開示等の請求</h2>
       <p>本人からの開示、訂正、利用停止、削除等の請求について、適用法令に従い対応します。</p>
       <h2>お問い合わせ</h2>
-      <p>連絡先: {LEGAL_INFO.email}</p>
+      <p>連絡先: {LEGAL_INFO.email ? <a href={"mailto:" + LEGAL_INFO.email}>{LEGAL_INFO.email}</a> : "未設定（本番公開前に設定が必要です）"}</p>
     </PublicDocument>
   );
 }
