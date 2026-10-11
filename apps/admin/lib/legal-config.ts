@@ -6,4 +6,4 @@ export const LEGAL_INFO = {
 
 export const DISCLOSURE_SUBJECT = "特定商取引法に基づく事業者情報の開示請求";
 export const TERMS_VERSION = "2026-10-03";
-export const PRIVACY_VERSION = "2026-10-03";
+export const PRIVACY_VERSION = "2026-10-11";
