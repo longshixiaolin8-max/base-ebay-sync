@@ -527,6 +527,17 @@ export const orders = pgTable(
      *  hasn't succeeded yet (see sync_errors for why, if one was attempted). */
     ebayTrackingSyncedAt: timestamp("ebay_tracking_synced_at", { withTimezone: true }),
 
+    /** ISO 3166-1 alpha-2 shipping destination, captured at sale-ingestion time from eBay's
+     *  order shipTo address (best-effort -- see SaleEvent.shipToCountryCode). Null for a BASE
+     *  order, or an eBay order synced before this field existed or whose shipTo address came
+     *  back empty. Used by assessDdpRequirement. */
+    shipToCountryCode: text("ship_to_country_code"),
+    /** Set once a human has affirmatively confirmed, while marking a DDP-required order
+     *  SHIPPED, that it was sent via a DDP (Delivered Duty Paid) shipping method -- this
+     *  platform can't verify the shipping method itself, so this is a human attestation kept
+     *  as evidence in case eBay later disputes it (see assessDdpRequirement). */
+    ddpConfirmedAt: timestamp("ddp_confirmed_at", { withTimezone: true }),
+
     /** JPY unit cost, snapshotted from product_master.cost_jpy at sale time. */
     costJpy: integer("cost_jpy"),
     /** Set for a BASE sale (JPY-denominated). */

@@ -72,6 +72,11 @@ const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
 class InvalidOrderTransitionErrorFake extends Error {}
+class DdpConfirmationRequiredErrorFake extends Error {
+  constructor(readonly reasonJa: string) {
+    super("DDP compliance confirmation is required before marking this order SHIPPED");
+  }
+}
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -97,6 +102,7 @@ vi.mock("@ai-ec/db", () => ({
   getLiveOrderProfit: (...args: unknown[]) => getLiveOrderProfitMock(...args),
   getSnsContent: (...args: unknown[]) => getSnsContentMock(...args),
   InvalidOrderTransitionError: InvalidOrderTransitionErrorFake,
+  DdpConfirmationRequiredError: DdpConfirmationRequiredErrorFake,
   listOrdersForProduct: (...args: unknown[]) => listOrdersForProductMock(...args),
   markSnsStatus: (...args: unknown[]) => markSnsStatusMock(...args),
   transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
@@ -1718,6 +1724,33 @@ describe("admin-api handler", () => {
       expect(parsed.avgProfitMarginBasisPoints).toBeNull();
     });
 
+    it("GET /admin/orders flags a DDP-required row via assessDdpRequirement", async () => {
+      const order = {
+        id: "o1",
+        productId: "p1",
+        channel: "ebay",
+        status: "SHIPPED",
+        shipToCountryCode: "US",
+        salePriceUsdCents: 15_000,
+        placedAt: new Date("2026-01-01T00:00:00.000Z"),
+        profitFinalizedAt: null,
+        finalizedNetProfitUsdCents: null,
+        returnRequestedAt: null,
+        ddpConfirmedAt: null,
+      };
+      fakeDb = createFakeDb([
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }],
+        [{ count: 1 }],
+        [],
+        [],
+      ]);
+      getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 150, costUsdCents: 100, netProfitUsdCents: 50, profitMarginBasisPoints: 3333 });
+
+      const res = await callHandler(makeEvent("GET", "/admin/orders"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders[0].ddp).toMatchObject({ status: "required" });
+    });
+
     it("GET /admin/orders flags a row whose product has an unresolved possible_double_sale error", async () => {
       const order = {
         id: "o1",
@@ -1915,6 +1948,28 @@ describe("admin-api handler", () => {
       transitionOrderStatusMock.mockRejectedValueOnce(new InvalidOrderTransitionErrorFake("bad transition"));
       const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
       expect(res.statusCode).toBe(409);
+    });
+
+    it("POST /admin/orders/{id}/status returns 400 when transitionOrderStatus requires DDP confirmation", async () => {
+      transitionOrderStatusMock.mockRejectedValueOnce(
+        new DdpConfirmationRequiredErrorFake("米国向け・単価$2,500未満のため、eBayのDDP義務化の対象です。"),
+      );
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "ddp_confirmation_required" });
+    });
+
+    it("POST /admin/orders/{id}/status passes ddpConfirmed through to transitionOrderStatus", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "ebay", ddpConfirmedAt: new Date() });
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", ddpConfirmed: true }));
+      expect(res.statusCode).toBe(200);
+      expect(transitionOrderStatusMock).toHaveBeenCalledWith(
+        fakeDb,
+        TENANT_A,
+        "o1",
+        "SHIPPED",
+        expect.objectContaining({ ddpConfirmed: true }),
+      );
     });
 
     it("POST /admin/orders/{id}/status pushes tracking info to eBay when marking an eBay order SHIPPED with tracking details", async () => {

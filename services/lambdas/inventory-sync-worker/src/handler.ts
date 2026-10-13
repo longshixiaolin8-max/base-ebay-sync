@@ -181,6 +181,7 @@ export async function runPhaseA(
       ebayLineItemId: sale.externalLineItemId ?? null,
       buyerEmail: sale.buyerEmail ?? null,
       buyerName: sale.buyerName ?? null,
+      shipToCountryCode: sale.shipToCountryCode ?? null,
     });
   } catch (err) {
     await recordSyncError(db, {

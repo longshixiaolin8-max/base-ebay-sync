@@ -155,6 +155,13 @@
       "when": 1791868097779,
       "tag": "0021_optimal_blazing_skull",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791871329943,
+      "tag": "0022_cuddly_nextwave",
+      "breakpoints": true
     }
   ]
 }

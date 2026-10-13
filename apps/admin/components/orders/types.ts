@@ -15,6 +15,13 @@ export interface OrderProfit {
   profitMarginBasisPoints: number | null;
 }
 
+export type DdpComplianceStatus = "required" | "not_required" | "unknown";
+
+export interface OrderDdp {
+  status: DdpComplianceStatus;
+  reasonJa: string;
+}
+
 export interface OrderRow {
   id: string;
   productId: string;
@@ -37,6 +44,9 @@ export interface OrderRow {
   trackingNumber: string | null;
   shippingCarrierCode: string | null;
   ebayTrackingSyncedAt: string | null;
+  shipToCountryCode: string | null;
+  ddpConfirmedAt: string | null;
+  ddp: OrderDdp;
   finalizedNetProfitUsdCents: number | null;
   profitFinalizedAt: string | null;
   placedAt: string;

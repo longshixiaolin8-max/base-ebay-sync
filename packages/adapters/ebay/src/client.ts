@@ -70,10 +70,21 @@ interface EbayOrderLineItem {
   quantity: number;
   total?: EbayAmount;
 }
+/**
+ * Shape per eBay's Fulfillment API type reference (FulfillmentStartInstruction / ContactAddress)
+ * -- NOT verified against a live order response in this codebase, and a community-reported
+ * eBay API issue has shipTo come back with an empty contactAddress on some live orders. Treated
+ * as best-effort everywhere it's read (see shipToCountryCode on SaleEvent/assessDdpRequirement):
+ * a missing countryCode must never be read as "destination confirmed non-US".
+ */
+interface EbayFulfillmentStartInstruction {
+  shippingStep?: { shipTo?: { contactAddress?: { countryCode?: string } } };
+}
 interface EbayOrder {
   orderId: string;
   creationDate: string;
   lineItems: EbayOrderLineItem[];
+  fulfillmentStartInstructions?: EbayFulfillmentStartInstruction[];
 }
 interface EbayOrdersResponse {
   orders: EbayOrder[];
@@ -782,8 +793,9 @@ export class EbayAdapter implements ChannelAdapter {
       }
     }
 
-    return orders.flatMap((order) =>
-      order.lineItems.map((lineItem) => {
+    return orders.flatMap((order) => {
+      const shipToCountryCode = order.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo?.contactAddress?.countryCode;
+      return order.lineItems.map((lineItem) => {
         // USD is this platform's only supported eBay marketplace currency today (see
         // pricing.ts) -- a line item settled in another currency is left unpriced here
         // rather than silently treated as USD.
@@ -799,9 +811,10 @@ export class EbayAdapter implements ChannelAdapter {
           quantitySold: lineItem.quantity,
           occurredAt: new Date(order.creationDate),
           salePriceUsdCents,
+          shipToCountryCode,
         };
-      }),
-    );
+      });
+    });
   }
 
   /**

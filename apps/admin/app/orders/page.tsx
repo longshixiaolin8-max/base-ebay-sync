@@ -80,6 +80,7 @@ export default function OrdersPage() {
   const [activeTab, setActiveTab] = useState<"info" | "customer" | "profit" | "timeline">("info");
   const [nextStatus, setNextStatus] = useState<OrderStatus | null>(null);
   const [extra, setExtra] = useState<ExtraFields>(EMPTY_EXTRA);
+  const [ddpConfirmed, setDdpConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const loadSummary = useCallback(async () => {
@@ -126,8 +127,14 @@ export default function OrdersPage() {
   useEffect(() => {
     setNextStatus(null);
     setExtra(EMPTY_EXTRA);
+    setDdpConfirmed(false);
     setActiveTab("info");
   }, [selectedOrderId]);
+
+  function handleNextStatusChange(status: OrderStatus | null) {
+    setNextStatus(status);
+    setDdpConfirmed(false);
+  }
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -176,6 +183,7 @@ export default function OrdersPage() {
         extra: Object.keys(extraPayload).length > 0 ? extraPayload : undefined,
         trackingNumber: extra.trackingNumber.trim() || undefined,
         shippingCarrierCode: extra.shippingCarrierCode.trim() || undefined,
+        ddpConfirmed: ddpConfirmed || undefined,
       });
       if (res.ebayTrackingSyncStatus === "synced") {
         notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新し、追跡番号をeBayに連携しました。`, "success");
@@ -324,9 +332,11 @@ export default function OrdersPage() {
                 activeTab={activeTab}
                 onTabChange={setActiveTab}
                 nextStatus={nextStatus}
-                onNextStatusChange={setNextStatus}
+                onNextStatusChange={handleNextStatusChange}
                 extra={extra}
                 onExtraChange={setExtra}
+                ddpConfirmed={ddpConfirmed}
+                onDdpConfirmedChange={setDdpConfirmed}
                 onSubmitStatusChange={handleSubmitStatusChange}
                 onFinalizeProfit={handleFinalizeProfit}
                 busy={busy}

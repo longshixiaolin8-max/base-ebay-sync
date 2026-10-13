@@ -1,4 +1,11 @@
-import { computeOrderProfit, isValidOrderTransition, type OrderProfitInputs, type OrderProfitResult, type OrderStatus } from "@ai-ec/core";
+import {
+  assessDdpRequirement,
+  computeOrderProfit,
+  isValidOrderTransition,
+  type OrderProfitInputs,
+  type OrderProfitResult,
+  type OrderStatus,
+} from "@ai-ec/core";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { orders } from "./schema.js";
@@ -9,6 +16,17 @@ export class InvalidOrderTransitionError extends Error {
   constructor(from: OrderStatus, to: OrderStatus) {
     super(`Cannot transition order from ${from} to ${to}`);
     this.name = "InvalidOrderTransitionError";
+  }
+}
+
+/** Thrown by transitionOrderStatus when moving a DDP-required order (see assessDdpRequirement,
+ *  @ai-ec/core) to SHIPPED without options.ddpConfirmed -- the admin-api route maps this to a
+ *  400 carrying reasonJa, rather than letting the transition (and an un-DDP'd shipment) through
+ *  silently. */
+export class DdpConfirmationRequiredError extends Error {
+  constructor(readonly reasonJa: string) {
+    super("DDP compliance confirmation is required before marking this order SHIPPED");
+    this.name = "DdpConfirmationRequiredError";
   }
 }
 
@@ -30,6 +48,9 @@ export interface UpsertOrderReceivedInput {
   /** See @ai-ec/core's SaleEvent.buyerEmail/buyerName -- only ever set for a BASE sale. */
   buyerEmail?: string | null;
   buyerName?: string | null;
+  /** See @ai-ec/core's SaleEvent.shipToCountryCode -- best-effort, only ever attempted for an
+   *  eBay sale, and may still be null/undefined even then. */
+  shipToCountryCode?: string | null;
 }
 
 /**
@@ -58,6 +79,7 @@ export async function upsertOrderReceived(db: Database, input: UpsertOrderReceiv
       ebayLineItemId: input.ebayLineItemId ?? null,
       buyerEmail: input.buyerEmail ?? null,
       buyerName: input.buyerName ?? null,
+      shipToCountryCode: input.shipToCountryCode ?? null,
     })
     .onConflictDoNothing({ target: [orders.channel, orders.externalOrderId, orders.productId] });
 
@@ -118,6 +140,10 @@ export interface TransitionOrderStatusOptions {
       | "shippingCarrierCode"
     >
   >;
+  /** A human's affirmative confirmation (checkbox) that a DDP-required order was shipped via a
+   *  DDP shipping method -- see assessDdpRequirement/DdpConfirmationRequiredError. Ignored for
+   *  any transition other than SHIPPED, and for an order that doesn't require it. */
+  ddpConfirmed?: boolean;
 }
 
 /**
@@ -145,10 +171,34 @@ export async function transitionOrderStatus(
     throw new InvalidOrderTransitionError(fromStatus, toStatus);
   }
 
+  // See assessDdpRequirement (@ai-ec/core) and DdpConfirmationRequiredError's own doc comment.
+  // Gated here (using the `current` row already fetched above) rather than as a separate query
+  // in the admin-api route, so the check and the write happen against the same row and in one
+  // round trip.
+  let justConfirmedDdp = false;
+  if (toStatus === "SHIPPED" && !current.ddpConfirmedAt) {
+    const ddp = assessDdpRequirement({
+      channel: current.channel,
+      shipToCountryCode: current.shipToCountryCode,
+      salePriceUsdCents: current.salePriceUsdCents,
+      placedAt: current.placedAt,
+    });
+    if (ddp.status === "required") {
+      if (!options.ddpConfirmed) throw new DdpConfirmationRequiredError(ddp.reasonJa);
+      justConfirmedDdp = true;
+    }
+  }
+
   const now = new Date();
   const [updated] = await db
     .update(orders)
-    .set({ status: toStatus, ...statusTimestampPatch(toStatus, now), ...options.extra, updatedAt: now })
+    .set({
+      status: toStatus,
+      ...statusTimestampPatch(toStatus, now),
+      ...options.extra,
+      ...(justConfirmedDdp ? { ddpConfirmedAt: now } : {}),
+      updatedAt: now,
+    })
     .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
     .returning();
   if (!updated) throw new Error(`failed to update orders row ${orderId}`);

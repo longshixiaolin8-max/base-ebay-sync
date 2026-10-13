@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Database } from "./client.js";
 import {
+  DdpConfirmationRequiredError,
   finalizeOrderProfit,
   getLiveOrderProfit,
   getTenantMarginHistory,
@@ -141,6 +142,62 @@ describe("transitionOrderStatus", () => {
     expect(updated.status).toBe("RETURNED");
     expect(getSet()?.returnAmountUsdCents).toBe(5000);
     expect(getSet()?.returnedAt).toBeInstanceOf(Date);
+  });
+
+  describe("DDP compliance gate on SHIPPED", () => {
+    function ddpRequiredOrder(overrides: Partial<OrderRow> = {}): OrderRow {
+      return baseOrder({
+        status: "ALLOCATED",
+        channel: "ebay",
+        shipToCountryCode: "US",
+        salePriceUsdCents: 15_000,
+        placedAt: new Date("2026-01-01T00:00:00Z"),
+        ddpConfirmedAt: null,
+        ...overrides,
+      });
+    }
+
+    it("rejects marking a DDP-required order SHIPPED without ddpConfirmed", async () => {
+      const { db } = fakeOrderDb(ddpRequiredOrder());
+
+      await expect(transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED")).rejects.toThrow(DdpConfirmationRequiredError);
+    });
+
+    it("allows marking it SHIPPED once ddpConfirmed is passed, and stamps ddpConfirmedAt", async () => {
+      const { db, getSet } = fakeOrderDb(ddpRequiredOrder());
+
+      const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED", { ddpConfirmed: true });
+
+      expect(updated.status).toBe("SHIPPED");
+      expect(getSet()?.ddpConfirmedAt).toBeInstanceOf(Date);
+    });
+
+    it("does not re-require confirmation for an order already confirmed", async () => {
+      const current = ddpRequiredOrder({ status: "ALLOCATED", ddpConfirmedAt: new Date("2026-01-02T00:00:00Z") });
+      const { db, getSet } = fakeOrderDb(current);
+
+      const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED");
+
+      expect(updated.status).toBe("SHIPPED");
+      // Already confirmed earlier -- this transition shouldn't need to re-stamp it.
+      expect(getSet()?.ddpConfirmedAt).toBeUndefined();
+    });
+
+    it("does not gate a BASE order even if it ships to the US", async () => {
+      const current = ddpRequiredOrder({ channel: "base", status: "ALLOCATED" });
+      const { db } = fakeOrderDb(current);
+
+      const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED");
+      expect(updated.status).toBe("SHIPPED");
+    });
+
+    it("does not gate an eBay order shipping to a non-US destination", async () => {
+      const current = ddpRequiredOrder({ shipToCountryCode: "GB" });
+      const { db } = fakeOrderDb(current);
+
+      const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED");
+      expect(updated.status).toBe("SHIPPED");
+    });
   });
 });
 

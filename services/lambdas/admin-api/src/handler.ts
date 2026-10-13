@@ -6,6 +6,7 @@ import {
   ChannelType,
   IMPLEMENTED_CHANNELS,
   assessCustomsRisk,
+  assessDdpRequirement,
   classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
@@ -35,6 +36,7 @@ import {
   countProducts,
   countProductsByStatus,
   DEFAULT_NOTIFICATION_PREFERENCES,
+  DdpConfirmationRequiredError,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
@@ -2082,6 +2084,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         return {
           ...r.order,
           product: r.product,
+          ddp: assessDdpRequirement({
+            channel: r.order.channel,
+            shipToCountryCode: r.order.shipToCountryCode,
+            salePriceUsdCents: r.order.salePriceUsdCents,
+            placedAt: r.order.placedAt,
+          }),
           profit: {
             finalized: Boolean(r.order.profitFinalizedAt),
             revenueUsdCents: live.revenueUsdCents,
@@ -2717,17 +2725,25 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         extra?: Record<string, number>;
         trackingNumber?: string;
         shippingCarrierCode?: string;
+        ddpConfirmed?: boolean;
       };
       const parsedStatus = OrderStatus.safeParse(body.status);
       if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
 
       try {
+        // transitionOrderStatus itself gates a DDP-required SHIPPED transition on
+        // body.ddpConfirmed (throwing DdpConfirmationRequiredError otherwise) -- see its own
+        // doc comment and assessDdpRequirement (@ai-ec/core) for why: eBay requires DDP
+        // (Delivered Duty Paid) customs clearance for US-bound Japan/Korea shipments under
+        // $2,500 (effective 2025-10-17), and this platform can't verify the shipping method
+        // itself, so a human must affirmatively confirm it was used.
         const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, {
           extra: {
             ...body.extra,
             ...(body.trackingNumber ? { trackingNumber: body.trackingNumber } : {}),
             ...(body.shippingCarrierCode ? { shippingCarrierCode: body.shippingCarrierCode } : {}),
           },
+          ddpConfirmed: body.ddpConfirmed === true,
         });
         await recordAuditLog(db, {
           tenantId,
@@ -2815,6 +2831,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       } catch (err) {
         if (err instanceof InvalidOrderTransitionError) {
           return json(409, { error: "invalid_transition", message: err.message });
+        }
+        if (err instanceof DdpConfirmationRequiredError) {
+          return json(400, { error: "ddp_confirmation_required", message: err.reasonJa });
         }
         throw err;
       }
