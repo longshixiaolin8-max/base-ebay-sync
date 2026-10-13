@@ -74,6 +74,12 @@ export interface SaleEvent {
    *  Fulfillment API (createShippingFulfillment) for this specific line item. Undefined for
    *  a BASE sale, which has no such concept. */
   externalLineItemId?: string;
+  /** The buyer's own contact info, when the channel's order API exposes it. Only BASE does
+   *  (mail_address/first_name/last_name on its order detail response) -- eBay's API doesn't
+   *  expose buyer email at all, and doesn't need to: eBay notifies the buyer itself once
+   *  tracking is uploaded via createShippingFulfillment. */
+  buyerEmail?: string;
+  buyerName?: string;
   quantitySold: number;
   occurredAt: Date;
   /** Total amount actually charged for this line item, in the channel's own native

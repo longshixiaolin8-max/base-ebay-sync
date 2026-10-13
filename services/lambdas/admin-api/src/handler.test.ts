@@ -218,12 +218,14 @@ const signWebhookDestinationTokenMock = vi.fn().mockReturnValue("webhook-token")
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 const deleteOAuthConnectionsForTenantMock = vi.fn().mockResolvedValue([]);
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
+const sendEmailMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
+  sendEmail: (...args: unknown[]) => sendEmailMock(...args),
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
@@ -335,6 +337,7 @@ describe("admin-api handler", () => {
     markEbayTrackingSyncedMock.mockClear();
     recordSyncErrorMock.mockClear();
     createShippingFulfillmentMock.mockClear().mockResolvedValue(undefined);
+    sendEmailMock.mockClear().mockResolvedValue(undefined);
     delete process.env.OPERATOR_EMAIL;
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
@@ -1937,6 +1940,67 @@ describe("admin-api handler", () => {
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("skipped");
       expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status sends a shipping-notice email to the buyer when a BASE order with a known buyer email ships", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "base",
+        externalOrderId: "base-order-1",
+        productId: "product-1",
+        buyerEmail: "buyer@example.com",
+        buyerName: "山田 太郎",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
+      });
+      fakeDb = createFakeDb([[{ name: "My Shop" }]]);
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("sent");
+      expect(sendEmailMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "buyer@example.com",
+          subject: expect.stringContaining("My Shop"),
+          bodyText: expect.stringContaining("base-order-1"),
+        }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status records a sync_error (but still succeeds) when the shipping-notice email itself fails to send", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "base",
+        externalOrderId: "base-order-1",
+        productId: "product-1",
+        buyerEmail: "buyer@example.com",
+      });
+      fakeDb = createFakeDb([[{ name: "My Shop" }]]);
+      sendEmailMock.mockRejectedValueOnce(new Error("SES_FROM_EMAIL is not configured"));
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("failed");
+      expect(recordSyncErrorMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: TENANT_A, channel: "base", errorCode: "shipping_notice_email_failed" }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status skips the shipping-notice email when the BASE order has no known buyer email", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "base", externalOrderId: "base-order-1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("skipped");
+      expect(sendEmailMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/orders/{id}/status skips the eBay push when no tracking number was provided", async () => {

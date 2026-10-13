@@ -148,6 +148,13 @@
       "when": 1791867140948,
       "tag": "0020_harsh_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791868097779,
+      "tag": "0021_optimal_blazing_skull",
+      "breakpoints": true
     }
   ]
 }

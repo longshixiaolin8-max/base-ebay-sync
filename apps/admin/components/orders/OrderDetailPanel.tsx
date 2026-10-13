@@ -219,9 +219,23 @@ export function OrderDetailPanel({
 
       {activeTab === "customer" && (
         <div className="inventory-detail-overview">
-          <EmptyState>
-            購入者名・配送先住所は現在記録されていません。BASE/eBayの注文Webhookが購入者情報を渡していても、このプラットフォームはまだ保存していません。
-          </EmptyState>
+          {order.channel === "base" && order.buyerEmail ? (
+            <dl className="inventory-detail-rows">
+              <div>
+                <dt>購入者名</dt>
+                <dd>{order.buyerName ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>メールアドレス</dt>
+                <dd>{order.buyerEmail}</dd>
+              </div>
+            </dl>
+          ) : order.channel === "ebay" ? (
+            <EmptyState>eBayはプライバシー保護のため、購入者のメールアドレスをAPI経由で提供していません。配送先住所はeBay側の注文画面でご確認ください。</EmptyState>
+          ) : (
+            <EmptyState>購入者情報がまだ記録されていません(この注文がこの機能の追加前に同期された可能性があります)。</EmptyState>
+          )}
+          <p className="inventory-detail-hint">配送先住所は現在記録されていません。</p>
         </div>
       )}
 

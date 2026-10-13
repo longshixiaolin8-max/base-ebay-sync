@@ -27,6 +27,9 @@ export interface UpsertOrderReceivedInput {
   /** eBay's own line-item id, needed later to call createShippingFulfillment -- see
    *  @ai-ec/core's SaleEvent.externalLineItemId. Undefined/null for a BASE sale. */
   ebayLineItemId?: string | null;
+  /** See @ai-ec/core's SaleEvent.buyerEmail/buyerName -- only ever set for a BASE sale. */
+  buyerEmail?: string | null;
+  buyerName?: string | null;
 }
 
 /**
@@ -53,6 +56,8 @@ export async function upsertOrderReceived(db: Database, input: UpsertOrderReceiv
       salePriceJpy: input.salePriceJpy ?? null,
       salePriceUsdCents: input.salePriceUsdCents ?? null,
       ebayLineItemId: input.ebayLineItemId ?? null,
+      buyerEmail: input.buyerEmail ?? null,
+      buyerName: input.buyerName ?? null,
     })
     .onConflictDoNothing({ target: [orders.channel, orders.externalOrderId, orders.productId] });
 

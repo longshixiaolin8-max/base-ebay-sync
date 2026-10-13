@@ -508,6 +508,14 @@ export const orders = pgTable(
     quantity: integer("quantity").notNull(),
     status: text("status").notNull().default("ORDER_RECEIVED"),
 
+    /** Buyer contact captured at sale-ingestion time -- BASE's own order detail API returns
+     *  mail_address/first_name/last_name for the buyer, but eBay's does not expose buyer
+     *  email via API at all (its own Fulfillment API notifies the buyer automatically once
+     *  tracking is uploaded, so this platform never needs it for an eBay order). Null for
+     *  every eBay order, and for a BASE order synced before this field existed. */
+    buyerEmail: text("buyer_email"),
+    buyerName: text("buyer_name"),
+
     /** Set once a human enters it while marking this order SHIPPED. */
     trackingNumber: text("tracking_number"),
     /** Free-text carrier identifier as typed by the merchant (e.g. "Japan Post") -- passed

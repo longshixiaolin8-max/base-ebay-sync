@@ -168,7 +168,10 @@ export default function OrdersPage() {
 
     setBusy(true);
     try {
-      const res = await apiPost<{ ebayTrackingSyncStatus?: "synced" | "skipped" | "failed" }>(`/admin/orders/${selectedOrderId}/status`, {
+      const res = await apiPost<{
+        ebayTrackingSyncStatus?: "synced" | "skipped" | "failed";
+        shippingNoticeEmailStatus?: "sent" | "skipped" | "failed";
+      }>(`/admin/orders/${selectedOrderId}/status`, {
         status: nextStatus,
         extra: Object.keys(extraPayload).length > 0 ? extraPayload : undefined,
         trackingNumber: extra.trackingNumber.trim() || undefined,
@@ -178,6 +181,10 @@ export default function OrdersPage() {
         notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新し、追跡番号をeBayに連携しました。`, "success");
       } else if (res.ebayTrackingSyncStatus === "failed") {
         notify(`注文は「${ORDER_STATUS_LABEL[nextStatus]}」に更新しましたが、eBayへの追跡番号連携に失敗しました。同期エラー一覧をご確認ください。`);
+      } else if (res.shippingNoticeEmailStatus === "sent") {
+        notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新し、購入者に発送通知メールを送信しました。`, "success");
+      } else if (res.shippingNoticeEmailStatus === "failed") {
+        notify(`注文は「${ORDER_STATUS_LABEL[nextStatus]}」に更新しましたが、発送通知メールの送信に失敗しました。同期エラー一覧をご確認ください。`);
       } else {
         notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新しました。`, "success");
       }

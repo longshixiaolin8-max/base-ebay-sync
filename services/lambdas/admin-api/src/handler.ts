@@ -85,6 +85,7 @@ import {
   requireCloudFrontOrigin,
   requireEnv,
   resolvePlanPriceIds,
+  sendEmail,
   signState,
   signWebhookDestinationToken,
   type EbayAppCredentials,
@@ -2745,7 +2746,40 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           }
         }
 
-        return json(200, { order: updated, ebayTrackingSyncStatus });
+        // BASE has no webhook/notification feature of its own (confirmed against BASE's own
+        // help center), and this platform never writes order status back to BASE -- so unlike
+        // an eBay order (which eBay itself notifies the buyer for, once tracking is uploaded
+        // above), a BASE buyer would otherwise never hear that their order shipped at all.
+        // Best-effort, same reasoning as the eBay push: never blocks the status transition.
+        let shippingNoticeEmailStatus: "sent" | "skipped" | "failed" = "skipped";
+        if (parsedStatus.data === "SHIPPED" && updated.channel === "base" && updated.buyerEmail) {
+          try {
+            const [tenant] = await db.select({ name: tenants.name }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+            const tenantName = tenant?.name ?? "ショップ";
+            const greeting = updated.buyerName ? `${updated.buyerName} 様` : "お客様";
+            const trackingLine =
+              updated.trackingNumber && updated.shippingCarrierCode
+                ? `\n■追跡番号: ${updated.trackingNumber}(${updated.shippingCarrierCode})\n`
+                : "\n";
+            await sendEmail({
+              to: updated.buyerEmail,
+              subject: `【${tenantName}】ご注文の商品を発送いたしました`,
+              bodyText: `${greeting}\n\nいつもご利用ありがとうございます。\nご注文いただいた商品を発送いたしました。\n\n■ご注文番号: ${updated.externalOrderId}${trackingLine}\n今後ともよろしくお願いいたします。\n\n${tenantName}`,
+            });
+            shippingNoticeEmailStatus = "sent";
+          } catch (err) {
+            shippingNoticeEmailStatus = "failed";
+            await recordSyncError(db, {
+              tenantId,
+              channel: "base",
+              productId: updated.productId,
+              errorCode: "shipping_notice_email_failed",
+              errorMessage: (err as Error).message,
+            });
+          }
+        }
+
+        return json(200, { order: updated, ebayTrackingSyncStatus, shippingNoticeEmailStatus });
       } catch (err) {
         if (err instanceof InvalidOrderTransitionError) {
           return json(409, { error: "invalid_transition", message: err.message });
