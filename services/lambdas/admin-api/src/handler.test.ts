@@ -1322,6 +1322,47 @@ describe("admin-api handler", () => {
     expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1");
   });
 
+  it("GET /admin/products/{id}/customs-risk flags a lithium-battery keyword found in the product's own title", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "product-1", title: "モバイルバッテリー 10000mAh", descriptionJa: "", material: null }],
+      [], // no AI draft yet
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.hasRisk).toBe(true);
+    expect(body.flags).toEqual([expect.objectContaining({ category: "lithium_battery" })]);
+  });
+
+  it("GET /admin/products/{id}/customs-risk also scans the AI-generated English draft, not just the Japanese source", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "product-1", title: "充電器セット", descriptionJa: "普通の充電器です。", material: null }],
+      [{ titleEn: "Charger Set", descriptionHtmlEn: "Includes a rechargeable lithium battery pack." }],
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!).hasRisk).toBe(true);
+  });
+
+  it("GET /admin/products/{id}/customs-risk reports no risk for an ordinary product", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", title: "陶器の花瓶", descriptionJa: "手作りです。", material: "陶器" }], []]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ flags: [], hasRisk: false });
+  });
+
+  it("GET /admin/products/{id}/customs-risk returns 404 for a product that doesn't exist", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/missing/customs-risk"));
+    expect(res.statusCode).toBe(404);
+  });
+
   it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
     fakeDb = createFakeDb([
       [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],

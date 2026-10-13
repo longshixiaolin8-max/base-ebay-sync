@@ -5,6 +5,7 @@ import {
   applyStandardAspectFallbacks,
   ChannelType,
   IMPLEMENTED_CHANNELS,
+  assessCustomsRisk,
   classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
@@ -1767,6 +1768,37 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const id = path.split("/")[3]!;
       const risk = await predictStockoutRisk(db, tenantId, id);
       return json(200, risk);
+    }
+
+    // Heuristic keyword scan for cross-border shipping red flags (lithium batteries,
+    // CITES-restricted materials, liquids/food, weapons/replicas, magnets) -- see
+    // assessCustomsRisk's own doc comment (@ai-ec/core) for exactly what this is and isn't.
+    // Scans both this product's own Japanese source text and, when one exists, the
+    // AI-generated English listing draft -- a keyword only present in the English draft
+    // (e.g. the AI translating "充電式" as "rechargeable lithium battery") still fires.
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/customs-risk$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const [draft] = await db
+        .select({ titleEn: aiListingDraft.titleEn, descriptionHtmlEn: aiListingDraft.descriptionHtmlEn })
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+
+      const result = assessCustomsRisk({
+        title: product.title,
+        descriptionJa: product.descriptionJa,
+        descriptionEn: draft ? `${draft.titleEn} ${draft.descriptionHtmlEn}` : null,
+        material: product.material,
+      });
+      return json(200, result);
     }
 
     if (method === "GET" && /^\/admin\/products\/[^/]+\/dynamic-price$/.test(path)) {

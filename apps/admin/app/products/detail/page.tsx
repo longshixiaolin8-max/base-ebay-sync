@@ -110,6 +110,18 @@ const MARGIN_BASELINE_LABEL: Record<string, string> = {
   fallback_default: "初期設定の利益率を基準にしています(販売実績が増えると自動で学習します)",
 };
 
+interface CustomsRiskFlag {
+  category: string;
+  matchedKeyword: string;
+  labelJa: string;
+  reasonJa: string;
+}
+
+interface CustomsRiskResult {
+  flags: CustomsRiskFlag[];
+  hasRisk: boolean;
+}
+
 function ProductDetailInner() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
@@ -122,6 +134,7 @@ function ProductDetailInner() {
   const [draft, setDraft] = useState<AiListingDraft | null>(null);
   const [inventory, setInventory] = useState<InventoryBreakdown | null>(null);
   const [dynamicPrice, setDynamicPrice] = useState<DynamicPrice | null>(null);
+  const [customsRisk, setCustomsRisk] = useState<CustomsRiskResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -191,6 +204,13 @@ function ProductDetailInner() {
       .then(setDynamicPrice)
       .catch(() => setDynamicPrice(null));
   }, [id, draft]);
+
+  useEffect(() => {
+    if (!id) return;
+    apiGet<CustomsRiskResult>(`/admin/products/${id}/customs-risk`)
+      .then(setCustomsRisk)
+      .catch(() => setCustomsRisk(null));
+  }, [id]);
 
   const mergedSpecifics = useMemo(() => ({ ...(draft?.itemSpecifics ?? {}), ...edits }), [draft, edits]);
   const editedKeys = useMemo(() => Object.keys(edits).filter((k) => edits[k] !== (draft?.itemSpecifics[k] ?? "")), [edits, draft]);
@@ -366,6 +386,22 @@ function ProductDetailInner() {
           <EmptyStateBlock>商品が見つかりませんでした。</EmptyStateBlock>
         ) : (
           <div className="detail-doc">
+            {customsRisk?.hasRisk && (
+              <section className="card card-pad">
+                <div className="order-margin-alert">
+                  海外発送時に注意が必要な可能性があります
+                  {customsRisk.flags.map((flag) => (
+                    <p key={flag.category}>
+                      ・{flag.labelJa}(該当ワード: 「{flag.matchedKeyword}」) — {flag.reasonJa}
+                    </p>
+                  ))}
+                  <p>
+                    ※これはタイトル・商品説明・素材欄のキーワードを機械的に検出した簡易チェックです。法的な判断ではありません。実際に発送可能か、送り先の国の規制もあわせてご確認ください。
+                  </p>
+                </div>
+              </section>
+            )}
+
             {/* 1. 商品写真 */}
             <section className="card card-pad">
               {product.images[0] ? (
