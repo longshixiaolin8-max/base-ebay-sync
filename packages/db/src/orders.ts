@@ -1,5 +1,5 @@
 import { computeOrderProfit, isValidOrderTransition, type OrderProfitInputs, type OrderProfitResult, type OrderStatus } from "@ai-ec/core";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { orders } from "./schema.js";
 
@@ -181,6 +181,46 @@ export async function finalizeOrderProfit(db: Database, tenantId: string, orderI
     .returning();
   if (!updated) throw new Error(`failed to finalize profit for orders row ${orderId}`);
   return updated;
+}
+
+export interface TenantMarginHistory {
+  /** This tenant's own average realized net-margin ratio (net profit / revenue, same units
+   *  as computeDynamicPrice's netMarginRatio) across its most recent finalized eBay orders.
+   *  Null when there isn't a single usable order yet. */
+  avgMarginRatio: number | null;
+  sampleSize: number;
+}
+
+/**
+ * Feeds computeLearnedTargetMargin's personalized baseline (packages/core/src/margin-
+ * learning.ts) -- a tenant's own track record in place of the platform's one-size-fits-all
+ * DEFAULT_TARGET_MARGIN_RATIO. Scoped to eBay orders only: salePriceUsdCents is already
+ * USD-denominated there, so no FX rate needs to stand in for whatever rate actually applied
+ * back when each order was placed (a BASE/JPY order's margin would need that approximation,
+ * which is fine for a live price *preview* but not for a figure this treats as ground truth).
+ */
+export async function getTenantMarginHistory(db: Database, tenantId: string, limit = 50): Promise<TenantMarginHistory> {
+  const rows = await db
+    .select({ netProfit: orders.finalizedNetProfitUsdCents, revenue: orders.salePriceUsdCents })
+    .from(orders)
+    .where(
+      and(
+        eq(orders.tenantId, tenantId),
+        eq(orders.channel, "ebay"),
+        isNotNull(orders.profitFinalizedAt),
+        isNotNull(orders.salePriceUsdCents),
+      ),
+    )
+    .orderBy(desc(orders.profitFinalizedAt))
+    .limit(limit);
+
+  const ratios = rows
+    .filter((r): r is { netProfit: number; revenue: number } => r.netProfit != null && r.revenue != null && r.revenue > 0)
+    .map((r) => r.netProfit / r.revenue);
+
+  if (ratios.length === 0) return { avgMarginRatio: null, sampleSize: 0 };
+  const avgMarginRatio = ratios.reduce((sum, r) => sum + r, 0) / ratios.length;
+  return { avgMarginRatio, sampleSize: ratios.length };
 }
 
 export async function listOrdersForProduct(db: Database, tenantId: string, productId: string): Promise<OrderRow[]> {

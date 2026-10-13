@@ -97,7 +97,18 @@ interface DynamicPrice {
   netMarginRatio: number;
   costMarkupRatio: number;
   fxRateUsdPerJpy: number;
+  /** Set only when neither this product nor the tenant has an explicit target-margin
+   *  override -- see computeLearnedTargetMargin (@ai-ec/core) and admin-api's
+   *  resolveLearnedMarginRatio. Null whenever a merchant's own deliberate setting was used
+   *  instead, so this UI only ever explains a number it actually personalized. */
+  marginBaselineSource: "tenant_history" | "fallback_default" | null;
+  marginAdjustmentReason: string | null;
 }
+
+const MARGIN_BASELINE_LABEL: Record<string, string> = {
+  tenant_history: "過去の販売実績から学習した利益率を基準にしています",
+  fallback_default: "初期設定の利益率を基準にしています(販売実績が増えると自動で学習します)",
+};
 
 function ProductDetailInner() {
   const { ready } = useRequireAuth();
@@ -526,6 +537,14 @@ function ProductDetailInner() {
                     </div>
                   ) : (
                     <p style={{ color: "var(--fg-subtle)", fontSize: "0.85rem" }}>価格計算に必要な情報が未設定です(送料・目標利益率)。</p>
+                  )}
+                  {dynamicPrice?.marginBaselineSource && (
+                    <p style={{ fontSize: "0.8rem", color: "var(--fg-subtle)" }}>
+                      {MARGIN_BASELINE_LABEL[dynamicPrice.marginBaselineSource]}
+                      {dynamicPrice.marginAdjustmentReason && dynamicPrice.marginAdjustmentReason !== "調整なし"
+                        ? ` ${dynamicPrice.marginAdjustmentReason}。`
+                        : ""}
+                    </p>
                   )}
                   <p style={{ fontSize: "0.76rem", color: "var(--fg-subtle)" }}>
                     為替レート・eBay手数料・送料をもとに算出した見込み値です。確定した利益ではありません。

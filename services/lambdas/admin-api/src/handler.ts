@@ -8,6 +8,8 @@ import {
   classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
+  computeLearnedTargetMargin,
+  daysBetween,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
   draftConfidenceScore,
@@ -41,6 +43,7 @@ import {
   getMonthlyEbaySyncCount,
   getSnsContent,
   getTenantBillingStatus,
+  getTenantMarginHistory,
   InvalidOrderTransitionError,
   inventoryMaster,
   listOrdersForProduct,
@@ -106,7 +109,11 @@ async function currentFxRate(): Promise<number> {
  * デフォルトのみ使う -- eBay向けの価格計算(USD建て)にのみ関係するため、国内(domestic)
  * 送料は無関係。
  */
-async function resolveTenantPricingDefaults(db: Database, tenantId: string, usdPerJpy: number): Promise<{ shippingUsd: number; targetMarginRatio: number }> {
+async function resolveTenantPricingDefaults(
+  db: Database,
+  tenantId: string,
+  usdPerJpy: number,
+): Promise<{ shippingUsd: number; targetMarginRatio: number; hasExplicitTenantDefault: boolean }> {
   const [row] = await db
     .select({ defaultShippingCostJpyIntl: tenants.defaultShippingCostJpyIntl, defaultTargetMarginBasisPoints: tenants.defaultTargetMarginBasisPoints })
     .from(tenants)
@@ -115,7 +122,37 @@ async function resolveTenantPricingDefaults(db: Database, tenantId: string, usdP
   return {
     shippingUsd: row?.defaultShippingCostJpyIntl != null ? row.defaultShippingCostJpyIntl * usdPerJpy : DEFAULT_SHIPPING_USD,
     targetMarginRatio: row?.defaultTargetMarginBasisPoints != null ? row.defaultTargetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO,
+    hasExplicitTenantDefault: row?.defaultTargetMarginBasisPoints != null,
   };
+}
+
+/**
+ * Replaces the flat DEFAULT_TARGET_MARGIN_RATIO fallback (packages/core/src/margin-
+ * learning.ts's computeLearnedTargetMargin) with a margin personalized to this tenant's own
+ * realized sales history, nudged by this specific product's staleness/demand signal. Only
+ * ever reached as the LAST resort: a product's own per-product override and a tenant's own
+ * explicitly configured default (both deliberate choices made via the settings/pricing-
+ * config UI) always win outright before this function is even called -- see both call sites
+ * below, which only call this when `hasExplicitTenantDefault` is false.
+ */
+async function resolveLearnedMarginRatio(
+  db: Database,
+  tenantId: string,
+  product: { id: string; createdAt: Date },
+): Promise<{ targetMarginRatio: number; baselineSource: string; adjustmentReason: string }> {
+  const [marginHistory, stockoutRisk] = await Promise.all([
+    getTenantMarginHistory(db, tenantId),
+    predictStockoutRisk(db, tenantId, product.id),
+  ]);
+  const daysListed = daysBetween(product.createdAt, new Date());
+  const learned = computeLearnedTargetMargin({
+    historicalAvgMarginRatio: marginHistory.avgMarginRatio,
+    sampleSize: marginHistory.sampleSize,
+    fallbackMarginRatio: DEFAULT_TARGET_MARGIN_RATIO,
+    staleness: classifyStaleness(daysListed),
+    highDemand: stockoutRisk.highRisk,
+  });
+  return { targetMarginRatio: learned.targetMarginRatio, baselineSource: learned.baselineSource, adjustmentReason: learned.adjustmentReason };
 }
 
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
@@ -1750,11 +1787,22 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         : product.shippingCostUsdCents !== null
           ? product.shippingCostUsdCents / 100
           : tenantDefaults.shippingUsd;
-      const targetMarginRatio = event.queryStringParameters?.targetMarginRatio
-        ? Number(event.queryStringParameters.targetMarginRatio)
-        : product.targetMarginBasisPoints !== null
-          ? product.targetMarginBasisPoints / 10000
-          : tenantDefaults.targetMarginRatio;
+
+      let targetMarginRatio: number;
+      let marginBaselineSource: string | null = null;
+      let marginAdjustmentReason: string | null = null;
+      if (event.queryStringParameters?.targetMarginRatio) {
+        targetMarginRatio = Number(event.queryStringParameters.targetMarginRatio);
+      } else if (product.targetMarginBasisPoints !== null) {
+        targetMarginRatio = product.targetMarginBasisPoints / 10000;
+      } else if (tenantDefaults.hasExplicitTenantDefault) {
+        targetMarginRatio = tenantDefaults.targetMarginRatio;
+      } else {
+        const learned = await resolveLearnedMarginRatio(db, tenantId, product);
+        targetMarginRatio = learned.targetMarginRatio;
+        marginBaselineSource = learned.baselineSource;
+        marginAdjustmentReason = learned.adjustmentReason;
+      }
 
       const price = computeDynamicPrice({
         costJpy: product.priceJpy,
@@ -1762,7 +1810,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         shippingUsd,
         targetMarginRatio,
       });
-      return json(200, { ...price, fxSource: fx.source });
+      return json(200, { ...price, fxSource: fx.source, marginBaselineSource, marginAdjustmentReason });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/apply-dynamic-price$/.test(path)) {
@@ -1803,7 +1851,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
       const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : tenantDefaults.shippingUsd;
       const targetMarginRatio =
-        product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : tenantDefaults.targetMarginRatio;
+        product.targetMarginBasisPoints !== null
+          ? product.targetMarginBasisPoints / 10000
+          : tenantDefaults.hasExplicitTenantDefault
+            ? tenantDefaults.targetMarginRatio
+            : (await resolveLearnedMarginRatio(db, tenantId, product)).targetMarginRatio;
       const price = computeDynamicPrice({
         costJpy: product.priceJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,

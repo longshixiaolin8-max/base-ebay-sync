@@ -3,6 +3,7 @@ import type { Database } from "./client.js";
 import {
   finalizeOrderProfit,
   getLiveOrderProfit,
+  getTenantMarginHistory,
   InvalidOrderTransitionError,
   listOrders,
   listOrdersForProduct,
@@ -190,5 +191,47 @@ describe("list helpers", () => {
     const db = { select: () => ({ from: () => ({ where: async () => rows }) }) } as unknown as Database;
     const result = await listReservedOrdersForProduct(db, "tenant-a", "product-1");
     expect(result).toEqual(rows);
+  });
+});
+
+describe("getTenantMarginHistory", () => {
+  function dbWithRows(rows: Array<{ netProfit: number | null; revenue: number | null }>) {
+    return {
+      select: () => ({
+        from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => rows }) }) }),
+      }),
+    } as unknown as Database;
+  }
+
+  it("returns null/0 when there's no finalized eBay order history yet", async () => {
+    const result = await getTenantMarginHistory(dbWithRows([]), "tenant-a");
+    expect(result).toEqual({ avgMarginRatio: null, sampleSize: 0 });
+  });
+
+  it("averages net profit over revenue across the rows", async () => {
+    // 20% margin and 30% margin -> average 25%
+    const result = await getTenantMarginHistory(
+      dbWithRows([
+        { netProfit: 2000, revenue: 10000 },
+        { netProfit: 3000, revenue: 10000 },
+      ]),
+      "tenant-a",
+    );
+    expect(result.sampleSize).toBe(2);
+    expect(result.avgMarginRatio).toBeCloseTo(0.25, 5);
+  });
+
+  it("skips rows with no usable revenue (zero or null), without throwing a division-by-zero", async () => {
+    const result = await getTenantMarginHistory(
+      dbWithRows([
+        { netProfit: 2000, revenue: 10000 },
+        { netProfit: null, revenue: 10000 },
+        { netProfit: 500, revenue: 0 },
+        { netProfit: 500, revenue: null },
+      ]),
+      "tenant-a",
+    );
+    expect(result.sampleSize).toBe(1);
+    expect(result.avgMarginRatio).toBeCloseTo(0.2, 5);
   });
 });
