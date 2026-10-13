@@ -65,6 +65,7 @@ interface EbayAmount {
   currency: string;
 }
 interface EbayOrderLineItem {
+  lineItemId: string;
   sku: string;
   quantity: number;
   total?: EbayAmount;
@@ -794,12 +795,39 @@ export class EbayAdapter implements ChannelAdapter {
           channel: "ebay" as const,
           externalProductId: lineItem.sku,
           externalOrderId: order.orderId,
+          externalLineItemId: lineItem.lineItemId,
           quantitySold: lineItem.quantity,
           occurredAt: new Date(order.creationDate),
           salePriceUsdCents,
         };
       }),
     );
+  }
+
+  /**
+   * Marks a specific line item of an eBay order as shipped, with a tracking number eBay
+   * then shows the buyer and counts toward this seller's own Seller Standards (tracking
+   * upload rate). shippingCarrierCode is passed through exactly as given -- eBay accepts a
+   * free-text carrier name here, not a fixed enum verified against this codebase, so this
+   * platform never guesses at a carrier code it can't confirm without a live account.
+   */
+  async createShippingFulfillment(
+    accessToken: string,
+    orderId: string,
+    lineItemId: string,
+    quantity: number,
+    trackingNumber: string,
+    shippingCarrierCode: string,
+  ): Promise<void> {
+    await this.authedFetch(accessToken, `/sell/fulfillment/v1/order/${orderId}/shipping_fulfillment`, {
+      method: "POST",
+      body: JSON.stringify({
+        lineItems: [{ lineItemId, quantity }],
+        shippedDate: new Date().toISOString(),
+        shippingCarrierCode,
+        trackingNumber,
+      }),
+    });
   }
 
   /**

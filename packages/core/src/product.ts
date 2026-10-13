@@ -70,6 +70,10 @@ export interface SaleEvent {
   externalProductId: string;
   /** Idempotency source: same order should never be double-processed. */
   externalOrderId: string;
+  /** eBay's own line-item id within externalOrderId -- needed to later call eBay's
+   *  Fulfillment API (createShippingFulfillment) for this specific line item. Undefined for
+   *  a BASE sale, which has no such concept. */
+  externalLineItemId?: string;
   quantitySold: number;
   occurredAt: Date;
   /** Total amount actually charged for this line item, in the channel's own native

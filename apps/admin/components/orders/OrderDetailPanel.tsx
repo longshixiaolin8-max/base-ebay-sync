@@ -14,6 +14,8 @@ export interface ExtraFields {
   adSpendUsdCents: string;
   fxCostUsdCents: string;
   returnAmountUsdCents: string;
+  trackingNumber: string;
+  shippingCarrierCode: string;
 }
 
 interface OrderDetailPanelProps {
@@ -122,8 +124,26 @@ export function OrderDetailPanel({
               <dt>数量</dt>
               <dd>{order.quantity}</dd>
             </div>
+            {order.trackingNumber && (
+              <div>
+                <dt>追跡番号</dt>
+                <dd>
+                  {order.trackingNumber}({order.shippingCarrierCode ?? "—"})
+                  {order.channel === "ebay" &&
+                    (order.ebayTrackingSyncedAt ? (
+                      <span className="badge ok" style={{ marginLeft: "0.4rem" }}>
+                        eBay連携済み
+                      </span>
+                    ) : (
+                      <span className="badge warn" style={{ marginLeft: "0.4rem" }}>
+                        eBay未連携
+                      </span>
+                    ))}
+                </dd>
+              </div>
+            )}
           </dl>
-          <p className="inventory-detail-hint">支払い方法・配送方法・追跡番号は現在記録されていません。</p>
+          <p className="inventory-detail-hint">支払い方法・配送先住所は現在記録されていません。</p>
 
           {!order.profitFinalizedAt && (
             <>
@@ -171,7 +191,22 @@ export function OrderDetailPanel({
                         <input type="text" inputMode="decimal" value={extra.returnAmountUsdCents} onChange={(e) => onExtraChange({ ...extra, returnAmountUsdCents: e.target.value })} />
                       </label>
                     )}
+                    {nextStatus === "SHIPPED" && (
+                      <>
+                        <label className="specifics-field">
+                          <span>追跡番号</span>
+                          <input type="text" value={extra.trackingNumber} onChange={(e) => onExtraChange({ ...extra, trackingNumber: e.target.value })} />
+                        </label>
+                        <label className="specifics-field">
+                          <span>運送会社</span>
+                          <input type="text" placeholder="例: Japan Post" value={extra.shippingCarrierCode} onChange={(e) => onExtraChange({ ...extra, shippingCarrierCode: e.target.value })} />
+                        </label>
+                      </>
+                    )}
                   </div>
+                  {nextStatus === "SHIPPED" && order.channel === "ebay" && (
+                    <p className="inventory-detail-hint">追跡番号と運送会社の両方を入力すると、eBayに自動連携されます。空欄のままでも発送処理自体は完了します。</p>
+                  )}
                   <button type="button" style={{ marginTop: "0.75rem" }} onClick={onSubmitStatusChange} disabled={busy}>
                     {busy ? "更新中..." : `「${ORDER_STATUS_LABEL[nextStatus]}」に更新`}
                   </button>

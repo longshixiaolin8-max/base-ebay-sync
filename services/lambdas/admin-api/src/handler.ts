@@ -48,6 +48,7 @@ import {
   inventoryMaster,
   listOrdersForProduct,
   listTenantsOpsSummary,
+  markEbayTrackingSynced,
   markSnsStatus,
   oauthConnections,
   orders,
@@ -80,6 +81,7 @@ import {
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
+  recordSyncError,
   requireCloudFrontOrigin,
   requireEnv,
   resolvePlanPriceIds,
@@ -2677,12 +2679,23 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // Every order status change is human-triggered here -- never automatic (matches this
       // platform's existing rule that AI never changes price/listing state without approval).
       const id = path.split("/")[3]!;
-      const body = JSON.parse(event.body ?? "{}") as { status?: string; extra?: Record<string, number> };
+      const body = JSON.parse(event.body ?? "{}") as {
+        status?: string;
+        extra?: Record<string, number>;
+        trackingNumber?: string;
+        shippingCarrierCode?: string;
+      };
       const parsedStatus = OrderStatus.safeParse(body.status);
       if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
 
       try {
-        const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, { extra: body.extra });
+        const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, {
+          extra: {
+            ...body.extra,
+            ...(body.trackingNumber ? { trackingNumber: body.trackingNumber } : {}),
+            ...(body.shippingCarrierCode ? { shippingCarrierCode: body.shippingCarrierCode } : {}),
+          },
+        });
         await recordAuditLog(db, {
           tenantId,
           actor: actorFromEvent(event),
@@ -2691,7 +2704,48 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           entityId: id,
           after: { status: parsedStatus.data },
         });
-        return json(200, { order: updated });
+
+        // eBay's own Fulfillment API push: best-effort, never blocks the status transition
+        // itself (the merchant's own record of "this shipped" is the important fact; the
+        // eBay sync is a secondary, retryable concern surfaced via sync_errors on failure,
+        // same pattern as every other outbound eBay call in this codebase).
+        let ebayTrackingSyncStatus: "synced" | "skipped" | "failed" = "skipped";
+        if (
+          parsedStatus.data === "SHIPPED" &&
+          updated.channel === "ebay" &&
+          updated.ebayLineItemId &&
+          body.trackingNumber &&
+          body.shippingCarrierCode
+        ) {
+          try {
+            const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+            const adapter = createEbayAdapter(creds);
+            const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+            if (!accountId) throw new Error("no eBay account connected");
+            const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+            await adapter.createShippingFulfillment(
+              accessToken,
+              updated.externalOrderId,
+              updated.ebayLineItemId,
+              updated.quantity,
+              body.trackingNumber,
+              body.shippingCarrierCode,
+            );
+            await markEbayTrackingSynced(db, tenantId, id);
+            ebayTrackingSyncStatus = "synced";
+          } catch (err) {
+            ebayTrackingSyncStatus = "failed";
+            await recordSyncError(db, {
+              tenantId,
+              channel: "ebay",
+              productId: updated.productId,
+              errorCode: "ebay_tracking_sync_failed",
+              errorMessage: (err as Error).message,
+            });
+          }
+        }
+
+        return json(200, { order: updated, ebayTrackingSyncStatus });
       } catch (err) {
         if (err instanceof InvalidOrderTransitionError) {
           return json(409, { error: "invalid_transition", message: err.message });

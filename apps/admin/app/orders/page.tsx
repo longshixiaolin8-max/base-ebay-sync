@@ -23,6 +23,8 @@ const EMPTY_EXTRA: ExtraFields = {
   adSpendUsdCents: "",
   fxCostUsdCents: "",
   returnAmountUsdCents: "",
+  trackingNumber: "",
+  shippingCarrierCode: "",
 };
 
 function isoDate(d: Date): string {
@@ -166,11 +168,19 @@ export default function OrdersPage() {
 
     setBusy(true);
     try {
-      await apiPost(`/admin/orders/${selectedOrderId}/status`, {
+      const res = await apiPost<{ ebayTrackingSyncStatus?: "synced" | "skipped" | "failed" }>(`/admin/orders/${selectedOrderId}/status`, {
         status: nextStatus,
         extra: Object.keys(extraPayload).length > 0 ? extraPayload : undefined,
+        trackingNumber: extra.trackingNumber.trim() || undefined,
+        shippingCarrierCode: extra.shippingCarrierCode.trim() || undefined,
       });
-      notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新しました。`, "success");
+      if (res.ebayTrackingSyncStatus === "synced") {
+        notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新し、追跡番号をeBayに連携しました。`, "success");
+      } else if (res.ebayTrackingSyncStatus === "failed") {
+        notify(`注文は「${ORDER_STATUS_LABEL[nextStatus]}」に更新しましたが、eBayへの追跡番号連携に失敗しました。同期エラー一覧をご確認ください。`);
+      } else {
+        notify(`注文を「${ORDER_STATUS_LABEL[nextStatus]}」に更新しました。`, "success");
+      }
       setNextStatus(null);
       setExtra(EMPTY_EXTRA);
       await Promise.all([loadOrders(), loadSummary()]);

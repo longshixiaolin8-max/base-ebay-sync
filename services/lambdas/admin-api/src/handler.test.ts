@@ -67,6 +67,7 @@ const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
 const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
 const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
 const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarginRatio: null, sampleSize: 0 });
+const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
@@ -109,6 +110,7 @@ vi.mock("@ai-ec/db", () => ({
   getMonthlyEbaySyncCount: (...args: unknown[]) => getMonthlyEbaySyncCountMock(...args),
   listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
   getTenantMarginHistory: (...args: unknown[]) => getTenantMarginHistoryMock(...args),
+  markEbayTrackingSynced: (...args: unknown[]) => markEbayTrackingSyncedMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
   DEFAULT_NOTIFICATION_PREFERENCES: {
@@ -186,6 +188,7 @@ const subscribeToFixedPriceTransactionNotificationsMock = vi.fn().mockResolvedVa
 const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
 const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
 const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://ebay.example/oauth?state=signed-state");
+const createShippingFulfillmentMock = vi.fn().mockResolvedValue(undefined);
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   listInventoryLocations: listInventoryLocationsMock,
@@ -202,6 +205,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   subscribeToFixedPriceTransactionNotifications: subscribeToFixedPriceTransactionNotificationsMock,
   listProducts: listProductsMock,
   getRequiredItemAspects: getRequiredItemAspectsMock,
+  createShippingFulfillment: createShippingFulfillmentMock,
 }));
 
 const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
@@ -213,11 +217,13 @@ const signStateMock = vi.fn().mockReturnValue("signed-state");
 const signWebhookDestinationTokenMock = vi.fn().mockReturnValue("webhook-token");
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 const deleteOAuthConnectionsForTenantMock = vi.fn().mockResolvedValue([]);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
@@ -326,6 +332,9 @@ describe("admin-api handler", () => {
     getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
     listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
     getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarginRatio: null, sampleSize: 0 });
+    markEbayTrackingSyncedMock.mockClear();
+    recordSyncErrorMock.mockClear();
+    createShippingFulfillmentMock.mockClear().mockResolvedValue(undefined);
     delete process.env.OPERATOR_EMAIL;
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
@@ -1862,6 +1871,88 @@ describe("admin-api handler", () => {
       transitionOrderStatusMock.mockRejectedValueOnce(new InvalidOrderTransitionErrorFake("bad transition"));
       const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
       expect(res.statusCode).toBe(409);
+    });
+
+    it("POST /admin/orders/{id}/status pushes tracking info to eBay when marking an eBay order SHIPPED with tracking details", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 2,
+        productId: "product-1",
+      });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "1234567890", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("synced");
+      expect(transitionOrderStatusMock).toHaveBeenCalledWith(
+        fakeDb,
+        TENANT_A,
+        "o1",
+        "SHIPPED",
+        expect.objectContaining({ extra: expect.objectContaining({ trackingNumber: "1234567890", shippingCarrierCode: "Japan Post" }) }),
+      );
+      expect(createShippingFulfillmentMock).toHaveBeenCalledWith("token", "ext-order-1", "li-1", 2, "1234567890", "Japan Post");
+      expect(markEbayTrackingSyncedMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "o1");
+      expect(recordSyncErrorMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status records a sync_error (but still succeeds) when the eBay push itself fails", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 1,
+        productId: "product-1",
+      });
+      createShippingFulfillmentMock.mockRejectedValueOnce(new Error("eBay rejected the request"));
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("failed");
+      expect(recordSyncErrorMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: TENANT_A, channel: "ebay", errorCode: "ebay_tracking_sync_failed" }),
+      );
+      expect(markEbayTrackingSyncedMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status skips the eBay push for a BASE order, even when marked SHIPPED", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "base", externalOrderId: "base-order-1" });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Yamato" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("skipped");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status skips the eBay push when no tracking number was provided", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+      });
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("skipped");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/orders/{id}/finalize-profit snapshots the profit", async () => {

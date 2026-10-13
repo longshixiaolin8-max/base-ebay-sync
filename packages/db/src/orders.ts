@@ -24,6 +24,9 @@ export interface UpsertOrderReceivedInput {
   costJpy?: number | null;
   salePriceJpy?: number | null;
   salePriceUsdCents?: number | null;
+  /** eBay's own line-item id, needed later to call createShippingFulfillment -- see
+   *  @ai-ec/core's SaleEvent.externalLineItemId. Undefined/null for a BASE sale. */
+  ebayLineItemId?: string | null;
 }
 
 /**
@@ -49,6 +52,7 @@ export async function upsertOrderReceived(db: Database, input: UpsertOrderReceiv
       costJpy: input.costJpy ?? null,
       salePriceJpy: input.salePriceJpy ?? null,
       salePriceUsdCents: input.salePriceUsdCents ?? null,
+      ebayLineItemId: input.ebayLineItemId ?? null,
     })
     .onConflictDoNothing({ target: [orders.channel, orders.externalOrderId, orders.productId] });
 
@@ -99,7 +103,14 @@ export interface TransitionOrderStatusOptions {
   extra?: Partial<
     Pick<
       typeof orders.$inferInsert,
-      "returnAmountUsdCents" | "ebayFeeUsdCents" | "paymentFeeUsdCents" | "shippingCostJpy" | "adSpendUsdCents" | "fxCostUsdCents"
+      | "returnAmountUsdCents"
+      | "ebayFeeUsdCents"
+      | "paymentFeeUsdCents"
+      | "shippingCostJpy"
+      | "adSpendUsdCents"
+      | "fxCostUsdCents"
+      | "trackingNumber"
+      | "shippingCarrierCode"
     >
   >;
 }
@@ -137,6 +148,15 @@ export async function transitionOrderStatus(
     .returning();
   if (!updated) throw new Error(`failed to update orders row ${orderId}`);
   return updated;
+}
+
+/** Set once createShippingFulfillment has actually succeeded against eBay -- called by the
+ *  admin-api route only after that call returns without throwing, never speculatively. */
+export async function markEbayTrackingSynced(db: Database, tenantId: string, orderId: string): Promise<void> {
+  await db
+    .update(orders)
+    .set({ ebayTrackingSyncedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)));
 }
 
 function buildProfitInputs(order: OrderRow, usdPerJpy: number): OrderProfitInputs {

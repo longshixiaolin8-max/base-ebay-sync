@@ -31,6 +31,10 @@ export interface OrderRow {
   adSpendUsdCents: number | null;
   fxCostUsdCents: number | null;
   returnAmountUsdCents: number | null;
+  ebayLineItemId: string | null;
+  trackingNumber: string | null;
+  shippingCarrierCode: string | null;
+  ebayTrackingSyncedAt: string | null;
   finalizedNetProfitUsdCents: number | null;
   profitFinalizedAt: string | null;
   placedAt: string;

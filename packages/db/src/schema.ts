@@ -500,8 +500,24 @@ export const orders = pgTable(
       .references(() => productMaster.id, { onDelete: "cascade" }),
     channel: text("channel").notNull(),
     externalOrderId: text("external_order_id").notNull(),
+    /** eBay's own line-item id within externalOrderId -- required to call eBay's Fulfillment
+     *  API (createShippingFulfillment) for this specific line item. Captured at sale-ingestion
+     *  time from the Fulfillment getOrders response; null for a BASE sale or any eBay order
+     *  synced before this field existed. */
+    ebayLineItemId: text("ebay_line_item_id"),
     quantity: integer("quantity").notNull(),
     status: text("status").notNull().default("ORDER_RECEIVED"),
+
+    /** Set once a human enters it while marking this order SHIPPED. */
+    trackingNumber: text("tracking_number"),
+    /** Free-text carrier identifier as typed by the merchant (e.g. "Japan Post") -- passed
+     *  through as-is to eBay's shippingCarrierUsed field rather than mapped against a
+     *  hardcoded enum this platform can't verify without a live eBay integration test. */
+    shippingCarrierCode: text("shipping_carrier_code"),
+    /** Set once createShippingFulfillment has actually succeeded against eBay -- null means
+     *  either this isn't an eBay order, no tracking has been entered yet, or the push to eBay
+     *  hasn't succeeded yet (see sync_errors for why, if one was attempted). */
+    ebayTrackingSyncedAt: timestamp("ebay_tracking_synced_at", { withTimezone: true }),
 
     /** JPY unit cost, snapshotted from product_master.cost_jpy at sale time. */
     costJpy: integer("cost_jpy"),

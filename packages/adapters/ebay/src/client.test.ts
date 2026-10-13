@@ -398,6 +398,32 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("createShippingFulfillment posts the line item, quantity, and tracking info to eBay's Fulfillment API", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 201, text: async () => "", json: async () => ({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.createShippingFulfillment("token", "order-1", "li-1", 2, "1234567890", "Japan Post");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/sell/fulfillment/v1/order/order-1/shipping_fulfillment",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body);
+    expect(body.lineItems).toEqual([{ lineItemId: "li-1", quantity: 2 }]);
+    expect(body.trackingNumber).toBe("1234567890");
+    expect(body.shippingCarrierCode).toBe("Japan Post");
+    expect(typeof body.shippedDate).toBe("string");
+  });
+
+  it("createShippingFulfillment throws eBay's own error when the request is rejected", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 400, text: async () => '{"errors":[{"message":"Invalid carrier"}]}' });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.createShippingFulfillment("token", "order-1", "li-1", 1, "123", "Bogus Carrier")).rejects.toThrow();
+  });
+
   it("creates a payment policy and returns its id", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ paymentPolicyId: "pp-1" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -685,14 +711,14 @@ describe("EbayAdapter", () => {
     expect(body.product.aspects).toEqual({ Type: ["Bracelet"] });
   });
 
-  it("listRecentSales captures the line item's USD total as salePriceUsdCents", async () => {
+  it("listRecentSales captures the line item's USD total as salePriceUsdCents, and its lineItemId for later fulfillment", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(
       jsonResponse({
         orders: [
           {
             orderId: "order-1",
             creationDate: "2026-08-01T00:00:00.000Z",
-            lineItems: [{ sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
+            lineItems: [{ lineItemId: "li-1", sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
           },
         ],
       }),
@@ -707,6 +733,7 @@ describe("EbayAdapter", () => {
         channel: "ebay",
         externalProductId: "SKU-1",
         externalOrderId: "order-1",
+        externalLineItemId: "li-1",
         quantitySold: 2,
         occurredAt: new Date("2026-08-01T00:00:00.000Z"),
         salePriceUsdCents: 3998,
