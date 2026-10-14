@@ -193,9 +193,14 @@ export async function transitionOrderStatus(
   const [updated] = await db
     .update(orders)
     .set({
-      status: toStatus,
       ...statusTimestampPatch(toStatus, now),
       ...options.extra,
+      // status is applied last and unconditionally -- options.extra is caller-supplied and
+      // only loosely typed at the call site (see admin-api's own extra-key whitelist), so this
+      // guarantees the state machine's validated toStatus always wins even if extra somehow
+      // carried a stray "status" key, rather than letting a spread ordering accident silently
+      // resurrect or corrupt an order's status.
+      status: toStatus,
       ...(justConfirmedDdp ? { ddpConfirmedAt: now } : {}),
       updatedAt: now,
     })
@@ -217,6 +222,7 @@ export async function markEbayTrackingSynced(db: Database, tenantId: string, ord
 function buildProfitInputs(order: OrderRow, usdPerJpy: number): OrderProfitInputs {
   return {
     costJpy: order.costJpy,
+    quantity: order.quantity,
     salePriceJpy: order.salePriceJpy,
     salePriceUsdCents: order.salePriceUsdCents,
     ebayFeeUsdCents: order.ebayFeeUsdCents,
@@ -259,10 +265,14 @@ export async function finalizeOrderProfit(db: Database, tenantId: string, orderI
 }
 
 export interface TenantMarginHistory {
-  /** This tenant's own average realized net-margin ratio (net profit / revenue, same units
-   *  as computeDynamicPrice's netMarginRatio) across its most recent finalized eBay orders.
-   *  Null when there isn't a single usable order yet. */
-  avgMarginRatio: number | null;
+  /** This tenant's own average realized cost-markup ratio (net profit / cost, same units as
+   *  computeDynamicPrice's targetMarginRatio/costMarkupRatio -- NOT net profit / revenue,
+   *  which is a different ratio computeDynamicPrice would silently underprice against if fed
+   *  in here instead) across its most recent finalized eBay orders. Cost is reconstructed as
+   *  revenue - netProfit (computeOrderProfit's own definition of netProfit), so this needs no
+   *  separate cost column and stays correct however each order was actually priced. Null when
+   *  there isn't a single usable order yet. */
+  avgMarkupRatio: number | null;
   sampleSize: number;
 }
 
@@ -290,12 +300,14 @@ export async function getTenantMarginHistory(db: Database, tenantId: string, lim
     .limit(limit);
 
   const ratios = rows
-    .filter((r): r is { netProfit: number; revenue: number } => r.netProfit != null && r.revenue != null && r.revenue > 0)
-    .map((r) => r.netProfit / r.revenue);
+    .filter((r): r is { netProfit: number; revenue: number } => r.netProfit != null && r.revenue != null)
+    .map((r) => ({ cost: r.revenue - r.netProfit, netProfit: r.netProfit }))
+    .filter((r) => r.cost > 0)
+    .map((r) => r.netProfit / r.cost);
 
-  if (ratios.length === 0) return { avgMarginRatio: null, sampleSize: 0 };
-  const avgMarginRatio = ratios.reduce((sum, r) => sum + r, 0) / ratios.length;
-  return { avgMarginRatio, sampleSize: ratios.length };
+  if (ratios.length === 0) return { avgMarkupRatio: null, sampleSize: 0 };
+  const avgMarkupRatio = ratios.reduce((sum, r) => sum + r, 0) / ratios.length;
+  return { avgMarkupRatio, sampleSize: ratios.length };
 }
 
 export async function listOrdersForProduct(db: Database, tenantId: string, productId: string): Promise<OrderRow[]> {

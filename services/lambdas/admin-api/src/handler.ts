@@ -152,7 +152,7 @@ async function resolveLearnedMarginRatio(
   ]);
   const daysListed = daysBetween(product.createdAt, new Date());
   const learned = computeLearnedTargetMargin({
-    historicalAvgMarginRatio: marginHistory.avgMarginRatio,
+    historicalAvgMarginRatio: marginHistory.avgMarkupRatio,
     sampleSize: marginHistory.sampleSize,
     fallbackMarginRatio: DEFAULT_TARGET_MARGIN_RATIO,
     staleness: classifyStaleness(daysListed),
@@ -1816,6 +1816,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
+      // computeDynamicPrice marks up the product's own acquisition cost (仕入価格), never its
+      // BASE selling price -- a product synced before cost entry existed, or one whose cost
+      // simply hasn't been entered yet, has no meaningful markup to compute until it is.
+      if (product.costJpy === null) return json(409, { error: "cost_not_set" });
 
       const fx = await fetchFxRate();
       const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
@@ -1842,7 +1846,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
 
       const price = computeDynamicPrice({
-        costJpy: product.priceJpy,
+        costJpy: product.costJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
         shippingUsd,
         targetMarginRatio,
@@ -1864,6 +1868,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
+      if (product.costJpy === null) return json(409, { error: "cost_not_set" });
 
       const [ebayListing] = await db
         .select()
@@ -1894,7 +1899,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             ? tenantDefaults.targetMarginRatio
             : (await resolveLearnedMarginRatio(db, tenantId, product)).targetMarginRatio;
       const price = computeDynamicPrice({
-        costJpy: product.priceJpy,
+        costJpy: product.costJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
         shippingUsd,
         targetMarginRatio,
@@ -2730,6 +2735,24 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const parsedStatus = OrderStatus.safeParse(body.status);
       if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
 
+      // body.extra is only ever meant to carry the specific financial fields documented on
+      // TransitionOrderStatusOptions.extra -- picked explicitly here (rather than spread)
+      // so a client can never smuggle an unrelated column (e.g. "status") into the DB update
+      // through this loosely-typed JSON field and bypass the validated state machine below.
+      const ALLOWED_EXTRA_KEYS = [
+        "returnAmountUsdCents",
+        "ebayFeeUsdCents",
+        "paymentFeeUsdCents",
+        "shippingCostJpy",
+        "adSpendUsdCents",
+        "fxCostUsdCents",
+      ] as const;
+      const extraNumeric: Record<string, number> = {};
+      for (const key of ALLOWED_EXTRA_KEYS) {
+        const value = body.extra?.[key];
+        if (typeof value === "number") extraNumeric[key] = value;
+      }
+
       try {
         // transitionOrderStatus itself gates a DDP-required SHIPPED transition on
         // body.ddpConfirmed (throwing DdpConfirmationRequiredError otherwise) -- see its own
@@ -2739,7 +2762,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         // itself, so a human must affirmatively confirm it was used.
         const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, {
           extra: {
-            ...body.extra,
+            ...extraNumeric,
             ...(body.trackingNumber ? { trackingNumber: body.trackingNumber } : {}),
             ...(body.shippingCarrierCode ? { shippingCarrierCode: body.shippingCarrierCode } : {}),
           },

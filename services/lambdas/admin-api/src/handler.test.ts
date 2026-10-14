@@ -66,7 +66,7 @@ const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
 const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
 const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
-const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarginRatio: null, sampleSize: 0 });
+const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
 const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
@@ -339,7 +339,7 @@ describe("admin-api handler", () => {
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
     getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
     listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
-    getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarginRatio: null, sampleSize: 0 });
+    getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
     markEbayTrackingSyncedMock.mockClear();
     recordSyncErrorMock.mockClear();
     createShippingFulfillmentMock.mockClear().mockResolvedValue(undefined);
@@ -1371,7 +1371,7 @@ describe("admin-api handler", () => {
 
   it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
+      [{ id: "product-1", priceJpy: 99999, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set
     ]);
 
@@ -1381,13 +1381,13 @@ describe("admin-api handler", () => {
     expect(fetchFxRateMock).toHaveBeenCalledTimes(1);
     // No tenant-set default and no order history -> falls back to the platform default (0.3),
     // and this fresh, non-high-demand product gets no learned-margin adjustment.
-    // costUsd = 67; P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
+    // costUsd = 67 (from costJpy=10000, NOT priceJpy=99999); P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
     expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 102.94, fxSource: "test", marginBaselineSource: "fallback_default" });
   });
 
   it("GET /admin/products/{id}/dynamic-price uses this product's saved shipping/margin overrides", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
     ]);
 
@@ -1399,7 +1399,7 @@ describe("admin-api handler", () => {
 
   it("GET /admin/products/{id}/dynamic-price lets query params override the saved config for a hypothetical preview", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
     ]);
 
@@ -1410,8 +1410,17 @@ describe("admin-api handler", () => {
     expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
   });
 
+  it("GET /admin/products/{id}/dynamic-price returns 409 when the product has no acquisition cost entered yet", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, costJpy: null, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body!)).toEqual({ error: "cost_not_set" });
+  });
+
   it("GET /admin/products/{id}/dynamic-price learns from the tenant's own order history once there's enough of it, discounted for a stale listing", async () => {
-    getTenantMarginHistoryMock.mockResolvedValueOnce({ avgMarginRatio: 0.2, sampleSize: 10 });
+    getTenantMarginHistoryMock.mockResolvedValueOnce({ avgMarkupRatio: 0.2, sampleSize: 10 });
     predictStockoutRiskMock.mockResolvedValueOnce({
       productId: "product-1",
       daysUntilStockout: null,
@@ -1422,7 +1431,7 @@ describe("admin-api handler", () => {
     });
     const createdAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000); // 40 days ago -> stale_30
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
     ]);
 
@@ -1438,7 +1447,7 @@ describe("admin-api handler", () => {
 
   it("GET /admin/products/{id}/dynamic-price respects a tenant's own explicitly configured default margin over the learned one", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: 4000 }], // tenant explicitly set 40%
     ]);
 
@@ -1481,7 +1490,7 @@ describe("admin-api handler", () => {
 
     it("writes the recommended price onto the draft, enqueues ebay_update, and records an audit log entry", async () => {
       fakeDb = createFakeDb([
-        [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
+        [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
         [{ status: "published", externalId: "ext-1" }],
         [{ id: "draft-1", suggestedPriceUsd: null }],
         [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set

@@ -144,6 +144,18 @@ describe("transitionOrderStatus", () => {
     expect(getSet()?.returnedAt).toBeInstanceOf(Date);
   });
 
+  it("never lets a stray status key inside extra override the validated toStatus", async () => {
+    const current = baseOrder({ status: "ALLOCATED" });
+    const { db, getSet } = fakeOrderDb(current);
+
+    const updated = await transitionOrderStatus(db, "tenant-a", "order-1", "SHIPPED", {
+      extra: { returnAmountUsdCents: 5000, status: "REFUNDED" } as unknown as Record<string, number>,
+    });
+
+    expect(updated.status).toBe("SHIPPED");
+    expect(getSet()?.status).toBe("SHIPPED");
+  });
+
   describe("DDP compliance gate on SHIPPED", () => {
     function ddpRequiredOrder(overrides: Partial<OrderRow> = {}): OrderRow {
       return baseOrder({
@@ -262,33 +274,36 @@ describe("getTenantMarginHistory", () => {
 
   it("returns null/0 when there's no finalized eBay order history yet", async () => {
     const result = await getTenantMarginHistory(dbWithRows([]), "tenant-a");
-    expect(result).toEqual({ avgMarginRatio: null, sampleSize: 0 });
+    expect(result).toEqual({ avgMarkupRatio: null, sampleSize: 0 });
   });
 
-  it("averages net profit over revenue across the rows", async () => {
-    // 20% margin and 30% margin -> average 25%
+  it("reconstructs each order's cost as revenue - netProfit and averages netProfit/cost (a markup ratio, not netProfit/revenue)", async () => {
+    // Row 1: cost = 10000-2000 = 8000, markup = 2000/8000 = 0.25
+    // Row 2: cost = 9000-3000 = 6000, markup = 3000/6000 = 0.5
+    // Average markup = 0.375 -- notably NOT 0.277..., which is what netProfit/revenue would
+    // have given (the exact unit mismatch this function used to have).
     const result = await getTenantMarginHistory(
       dbWithRows([
         { netProfit: 2000, revenue: 10000 },
-        { netProfit: 3000, revenue: 10000 },
+        { netProfit: 3000, revenue: 9000 },
       ]),
       "tenant-a",
     );
     expect(result.sampleSize).toBe(2);
-    expect(result.avgMarginRatio).toBeCloseTo(0.25, 5);
+    expect(result.avgMarkupRatio).toBeCloseTo(0.375, 5);
   });
 
-  it("skips rows with no usable revenue (zero or null), without throwing a division-by-zero", async () => {
+  it("skips rows with no usable revenue/profit data, or whose reconstructed cost is zero or negative", async () => {
     const result = await getTenantMarginHistory(
       dbWithRows([
-        { netProfit: 2000, revenue: 10000 },
+        { netProfit: 2000, revenue: 10000 }, // cost 8000, markup 0.25 -- the only valid row
         { netProfit: null, revenue: 10000 },
-        { netProfit: 500, revenue: 0 },
         { netProfit: 500, revenue: null },
+        { netProfit: 500, revenue: 400 }, // cost = 400-500 = -100, an impossible/corrupt row
       ]),
       "tenant-a",
     );
     expect(result.sampleSize).toBe(1);
-    expect(result.avgMarginRatio).toBeCloseTo(0.2, 5);
+    expect(result.avgMarkupRatio).toBeCloseTo(0.25, 5);
   });
 });

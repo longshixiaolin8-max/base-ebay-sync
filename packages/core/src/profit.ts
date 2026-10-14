@@ -13,8 +13,12 @@
  */
 export interface OrderProfitInputs {
   /** JPY per unit acquisition cost, snapshotted at sale time (product_master.cost_jpy can
-   *  change later; the order's own snapshot is what profit history should reflect). */
+   *  change later; the order's own snapshot is what profit history should reflect). Scaled by
+   *  `quantity` below -- unlike salePriceJpy/salePriceUsdCents, which both channels already
+   *  report as the line-item TOTAL (quantity * unit price), this one is still per-unit. */
   costJpy: number | null;
+  /** Units sold on this order/line item -- see costJpy's own note for why this matters. */
+  quantity: number;
   /** Set for a BASE sale. */
   salePriceJpy: number | null;
   /** Set for an eBay sale. */
@@ -48,7 +52,7 @@ export function computeOrderProfit(inputs: OrderProfitInputs): OrderProfitResult
     inputs.salePriceUsdCents ?? (inputs.salePriceJpy != null ? jpyToUsdCents(inputs.salePriceJpy, inputs.usdPerJpy) : 0);
 
   const costUsdCents =
-    (inputs.costJpy != null ? jpyToUsdCents(inputs.costJpy, inputs.usdPerJpy) : 0) +
+    (inputs.costJpy != null ? jpyToUsdCents(inputs.costJpy * inputs.quantity, inputs.usdPerJpy) : 0) +
     (inputs.shippingCostJpy != null ? jpyToUsdCents(inputs.shippingCostJpy, inputs.usdPerJpy) : 0) +
     (inputs.ebayFeeUsdCents ?? 0) +
     (inputs.paymentFeeUsdCents ?? 0) +
