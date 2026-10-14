@@ -115,6 +115,19 @@ function normalize(text: string): string {
   return text.toLowerCase();
 }
 
+/** True for a keyword made up only of ASCII letters (e.g. "fur", "battery") -- these get
+ *  word-boundary matching below so a short English word doesn't fire on an unrelated word that
+ *  merely contains it as a substring (e.g. "fur" inside "furniture"). Japanese keywords have no
+ *  whitespace-delimited word boundaries to match against, so they keep plain substring matching. */
+const ASCII_WORD = /^[a-z]+$/;
+
+function haystackMatches(haystack: string, normalizedKeyword: string): boolean {
+  if (ASCII_WORD.test(normalizedKeyword)) {
+    return new RegExp(`\\b${normalizedKeyword}\\b`).test(haystack);
+  }
+  return haystack.includes(normalizedKeyword);
+}
+
 /**
  * Scans this product's own already-stored title/description/material text (Japanese source
  * and, when available, the AI-generated English listing draft) for keywords associated with
@@ -129,7 +142,7 @@ export function assessCustomsRisk(input: CustomsRiskInput): CustomsRiskResult {
   const flags: CustomsRiskFlag[] = [];
   for (const def of CATEGORY_DEFS) {
     for (const keyword of def.keywords) {
-      if (haystack.includes(normalize(keyword))) {
+      if (haystackMatches(haystack, normalize(keyword))) {
         flags.push({ category: def.category, matchedKeyword: keyword, labelJa: def.labelJa, reasonJa: def.reasonJa });
         break; // one match per category is enough to warrant a look; avoid noisy duplicates.
       }

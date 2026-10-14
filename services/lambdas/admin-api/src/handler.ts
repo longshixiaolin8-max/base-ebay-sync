@@ -2763,8 +2763,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           parsedStatus.data === "SHIPPED" &&
           updated.channel === "ebay" &&
           updated.ebayLineItemId &&
-          body.trackingNumber &&
-          body.shippingCarrierCode
+          updated.trackingNumber &&
+          updated.shippingCarrierCode
         ) {
           try {
             const creds = await getAppCredentials<EbayAppCredentials>("ebay");
@@ -2777,8 +2777,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
               updated.externalOrderId,
               updated.ebayLineItemId,
               updated.quantity,
-              body.trackingNumber,
-              body.shippingCarrierCode,
+              updated.trackingNumber,
+              updated.shippingCarrierCode,
             );
             await markEbayTrackingSynced(db, tenantId, id);
             ebayTrackingSyncStatus = "synced";

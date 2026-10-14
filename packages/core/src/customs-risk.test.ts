@@ -37,6 +37,11 @@ describe("assessCustomsRisk", () => {
     expect(lithiumFlags).toHaveLength(1);
   });
 
+  it("does not flag an unrelated word that merely contains a short English keyword as a substring", () => {
+    const result = assessCustomsRisk({ title: "Cat Furniture Scratching Post Tower" });
+    expect(result.flags.some((f) => f.category === "cites_restricted_material")).toBe(false);
+  });
+
   it("can report multiple distinct categories for the same item", () => {
     const result = assessCustomsRisk({ title: "象牙の模造刀、バッテリー式ライト付き" });
     const categories = result.flags.map((f) => f.category).sort();

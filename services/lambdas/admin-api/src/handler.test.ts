@@ -1981,6 +1981,8 @@ describe("admin-api handler", () => {
         ebayLineItemId: "li-1",
         quantity: 2,
         productId: "product-1",
+        trackingNumber: "1234567890",
+        shippingCarrierCode: "Japan Post",
       });
 
       const res = await callHandler(
@@ -2010,6 +2012,8 @@ describe("admin-api handler", () => {
         ebayLineItemId: "li-1",
         quantity: 1,
         productId: "product-1",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
       });
       createShippingFulfillmentMock.mockRejectedValueOnce(new Error("eBay rejected the request"));
 

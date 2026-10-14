@@ -66,6 +66,7 @@ export function OrderDetailPanel({
   const feesJpy = usdPerJpy ? Math.round(((order.ebayFeeUsdCents ?? 0) + (order.paymentFeeUsdCents ?? 0)) / 100 / usdPerJpy) : null;
   const netProfitJpy = usdPerJpy ? Math.round(order.profit.netProfitUsdCents / 100 / usdPerJpy) : null;
   const ddpUnconfirmed = order.ddp.status === "required" && !order.ddpConfirmedAt;
+  const ddpUnknown = order.ddp.status === "unknown";
 
   return (
     <div className="card inventory-detail-panel">
@@ -93,6 +94,13 @@ export function OrderDetailPanel({
       {ddpUnconfirmed && (
         <div className="order-margin-alert">
           DDP(関税前払い)対応が必要な可能性があります
+          <p>{order.ddp.reasonJa}</p>
+        </div>
+      )}
+
+      {ddpUnknown && (
+        <div className="order-margin-alert">
+          DDP(関税前払い)対応が必要か判定できません
           <p>{order.ddp.reasonJa}</p>
         </div>
       )}

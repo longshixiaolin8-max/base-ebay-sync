@@ -172,6 +172,11 @@ export function OrdersTable({
                         <Badge tone="warn">DDP要対応</Badge>
                       </div>
                     )}
+                    {o.ddp.status === "unknown" && (
+                      <div>
+                        <Badge tone="warn">DDP要確認</Badge>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <div className="inventory-row-product">
