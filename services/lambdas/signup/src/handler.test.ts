@@ -309,6 +309,29 @@ describe("public signup", () => {
     expect(JSON.parse(res.body!)).toEqual({ checkoutUrl: "https://checkout.stripe.example/session" });
   });
 
+  it("rejects an unconfigured paid tier before consuming OTP or creating an account", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    // Only Standard has a live Price. No fallback to its price for Starter/Pro.
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1" });
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body!)).toEqual({ error: "plan_not_available", plan: "pro" });
+    expect(claimSignupVerificationMock).not.toHaveBeenCalled();
+    expect(cognitoSendMock).not.toHaveBeenCalled();
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
+    expect(customersCreateMock).not.toHaveBeenCalled();
+  });
+
   it("uses the requested plan's own Stripe price for checkout when one is specified", async () => {
     getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
     resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1", pro: "price_pro" });

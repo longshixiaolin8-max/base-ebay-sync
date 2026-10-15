@@ -250,6 +250,15 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
     return json(400, { error: "confirmation_invalid_or_expired", remainingAttempts });
   }
 
+  // Price configuration is checked before consuming the one-time code, creating
+  // a Cognito identity or writing a tenant. A requested paid tier must never
+  // silently check out at Standard's price when no real Stripe Price exists.
+  const stripeCreds = await getAppCredentials<StripeAppCredentials>("stripe");
+  const liveBillingError = assertLiveBillingInProd(stripeCreds);
+  if (liveBillingError) return liveBillingError;
+  const priceId = resolvePlanPriceIds(stripeCreds)[plan];
+  if (!priceId) return json(409, { error: "plan_not_available", plan });
+
   const claimed = await claimSignupVerification(db, {
     email,
     codeHash: expectedHash,
@@ -316,17 +325,6 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
       .catch(() => {});
     throw err;
   }
-
-  const stripeCreds = await getAppCredentials<StripeAppCredentials>("stripe");
-  const liveBillingError = assertLiveBillingInProd(stripeCreds);
-  if (liveBillingError) {
-    return json(503, { error: "billing_not_live", accountCreated: true });
-  }
-
-  // Resolved from the already-validated plan name, falling back to the always-present
-  // "standard" price if this account has no real Stripe price configured yet for the
-  // requested tier -- same safe fallback resolvePlanPriceIds itself documents.
-  const priceId = resolvePlanPriceIds(stripeCreds)[plan] ?? stripeCreds.priceId;
 
   try {
     const stripe = createStripeClient(stripeCreds);
