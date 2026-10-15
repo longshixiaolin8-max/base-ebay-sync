@@ -840,7 +840,7 @@ describe("admin-api handler", () => {
   it("sync-errors retry re-enqueues the original job and marks the error resolved", async () => {
     fakeDb = createFakeDb([
       [{ id: "e1", jobId: "job-1" }],
-      [{ id: "job-1", type: "ai_generate", productId: "p1", payload: {} }],
+      [{ id: "job-1", type: "ai_generate", productId: "p1", payload: { tenantId: "victim-tenant", productId: "victim-product", type: "ebay_update" } }],
     ]);
     const res = await callHandler(makeEvent("POST", "/admin/sync-errors/e1/retry"));
     expect(res.statusCode).toBe(202);
@@ -3145,7 +3145,7 @@ describe("admin-api handler", () => {
       process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
       fakeDb = createFakeDb([
         [{ id: "err-1", jobId: "job-1", tenantId: "tenant-b" }],
-        [{ id: "job-1", type: "ebay_update", productId: "product-1", payload: { foo: "bar" } }],
+        [{ id: "job-1", type: "ebay_update", productId: "product-1", payload: { foo: "bar", tenantId: "victim-tenant", productId: "victim-product", type: "ai_generate" } }],
       ]);
 
       const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/sync-errors/err-1/retry"));

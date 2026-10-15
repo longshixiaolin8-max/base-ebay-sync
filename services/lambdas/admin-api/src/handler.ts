@@ -1274,7 +1274,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
       await enqueue(
         queueUrl,
-        { type: job.type, tenantId, productId: job.productId, ...job.payload },
+        { ...job.payload, type: job.type, tenantId, productId: job.productId },
         `${tenantId}:retry:${id}:${Date.now()}`,
       );
       await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.id, id)));
@@ -3452,7 +3452,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
       await enqueue(
         queueUrl,
-        { type: job.type, tenantId: opsTenantId, productId: job.productId, ...job.payload },
+        { ...job.payload, type: job.type, tenantId: opsTenantId, productId: job.productId },
         `${opsTenantId}:ops-retry:${id}:${Date.now()}`,
       );
       await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.id, id!)));
