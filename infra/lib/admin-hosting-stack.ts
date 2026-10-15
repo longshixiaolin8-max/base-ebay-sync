@@ -33,6 +33,26 @@ export class AdminHostingStack extends cdk.Stack {
 
     const app = new amplify.CfnApp(this, "AdminApp", {
       name: `ai-ec-platform-admin-${props.envName}`,
+      // Headers are configured on the *Amplify* host, not Next.js' runtime:
+      // this admin application is a static export. Avoid a script-src policy
+      // here until nonce/hash coverage is tested against actual Next.js output.
+      customHeaders: [
+        "customHeaders:",
+        "  - pattern: '**/*'",
+        "    headers:",
+        "      - key: 'Strict-Transport-Security'",
+        "        value: 'max-age=31536000; includeSubDomains'",
+        "      - key: 'X-Frame-Options'",
+        "        value: 'DENY'",
+        "      - key: 'X-Content-Type-Options'",
+        "        value: 'nosniff'",
+        "      - key: 'Referrer-Policy'",
+        "        value: 'strict-origin-when-cross-origin'",
+        "      - key: 'Permissions-Policy'",
+        "        value: 'camera=(), microphone=(), geolocation=()'",
+        "      - key: 'Content-Security-Policy'",
+        "        value: \"frame-ancestors 'none'; object-src 'none'; base-uri 'self'; upgrade-insecure-requests\"",
+      ].join("\n"),
       // Client-side routes only (no route params) -- a direct request for e.g. /commerce
       // resolves to /commerce/index.html natively (trailingSlash: true in next.config.mjs),
       // so no SPA-style catch-all rewrite is needed; only a 404 fallback for unknown paths.
