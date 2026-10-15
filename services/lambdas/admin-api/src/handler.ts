@@ -88,6 +88,7 @@ import {
   recordAuditLog,
   recordSyncError,
   requireCloudFrontOrigin,
+  emitSecurityDenialMetric,
   requireEnv,
   resolvePlanPriceIds,
   sendEmail,
@@ -196,7 +197,10 @@ export class MissingTenantClaimError extends Error {
  */
 function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
   const tenantId = claimsFromEvent(event)?.["custom:tenant_id"];
-  if (!tenantId) throw new MissingTenantClaimError();
+  if (!tenantId) {
+    emitSecurityDenialMetric("tenant_claim_missing");
+    throw new MissingTenantClaimError();
+  }
   return tenantId;
 }
 
@@ -211,6 +215,7 @@ function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
 function requireOperator(event: APIGatewayProxyEventV2): APIGatewayProxyResultV2 | undefined {
   const operatorEmail = process.env.OPERATOR_EMAIL;
   if (!operatorEmail || actorFromEvent(event) !== operatorEmail) {
+    emitSecurityDenialMetric("operator_access_denied");
     return json(403, { error: "not_authorized" });
   }
   return undefined;

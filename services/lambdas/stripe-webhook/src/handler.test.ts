@@ -47,6 +47,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   createStripeClient: () => createStripeClientMock(),
   requireCloudFrontOrigin: () => null,
+  emitSecurityDenialMetric: vi.fn(),
   sendEmail: (...args: unknown[]) => sendEmailMock(...args),
   resolvePlanFromPriceId: (...args: unknown[]) => resolvePlanFromPriceIdMock(...args),
 }));

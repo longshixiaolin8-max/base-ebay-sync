@@ -35,6 +35,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   verifyWebhookDestinationToken: (...args: unknown[]) => verifyWebhookDestinationTokenMock(...args),
   requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
+  emitSecurityDenialMetric: vi.fn(),
 }));
 
 const computeChallengeResponseMock = vi.fn((..._args: unknown[]) => "computed-hash");

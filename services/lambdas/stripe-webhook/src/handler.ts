@@ -14,6 +14,7 @@ import {
   getAppCredentials,
   getDb,
   requireCloudFrontOrigin,
+  emitSecurityDenialMetric,
   resolvePlanFromPriceId,
   sendEmail,
   type StripeAppCredentials,
@@ -73,6 +74,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
   const signatureHeader = event.headers?.["stripe-signature"] ?? event.headers?.["Stripe-Signature"];
   if (!signatureHeader) {
+    emitSecurityDenialMetric("stripe_signature_invalid");
     return json(400, { error: "missing_signature" });
   }
 
@@ -85,7 +87,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   try {
     stripeEvent = stripe.webhooks.constructEvent(rawBody, signatureHeader, creds.webhookSigningSecret);
   } catch (err) {
-    console.warn("stripe-webhook: signature verification failed, ignoring delivery", (err as Error).message);
+    emitSecurityDenialMetric("stripe_signature_invalid");
+    console.warn("stripe-webhook: signature verification failed, ignoring delivery");
     return json(400, { error: "invalid_signature" });
   }
 

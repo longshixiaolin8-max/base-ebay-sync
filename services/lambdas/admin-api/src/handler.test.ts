@@ -252,6 +252,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   signState: (...args: unknown[]) => signStateMock(...args),
   signWebhookDestinationToken: (...args: unknown[]) => signWebhookDestinationTokenMock(...args),
   requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
+  emitSecurityDenialMetric: vi.fn(),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
   deleteOAuthConnectionsForTenant: (...args: unknown[]) => deleteOAuthConnectionsForTenantMock(...args),
