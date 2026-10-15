@@ -360,6 +360,9 @@ export class LambdaStack extends cdk.Stack {
         AI_GENERATE_DLQ_ARN: props.dlqs.aiGenerate.queueArn,
         EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
         EBAY_SYNC_DLQ_ARN: props.dlqs.ebaySync.queueArn,
+        // Explicitly disabled: seller-account setup failures must not recycle
+        // through SQS indefinitely. Manual redrive is available after repair.
+        EBAY_SYNC_AUTO_REDRIVE_ENABLED: "false",
         INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
         INVENTORY_SYNC_DLQ_ARN: props.dlqs.inventorySync.queueArn,
       },

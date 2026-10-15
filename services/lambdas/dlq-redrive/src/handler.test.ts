@@ -19,6 +19,7 @@ const ENV_KEYS = [
   "EBAY_SYNC_DLQ_ARN",
   "INVENTORY_SYNC_DLQ_URL",
   "INVENTORY_SYNC_DLQ_ARN",
+  "EBAY_SYNC_AUTO_REDRIVE_ENABLED",
 ] as const;
 
 describe("dlq-redrive handler", () => {
@@ -35,6 +36,7 @@ describe("dlq-redrive handler", () => {
     process.env.EBAY_SYNC_DLQ_ARN = "ebay-sync-dlq-arn";
     process.env.INVENTORY_SYNC_DLQ_URL = "inventory-sync-dlq-url";
     process.env.INVENTORY_SYNC_DLQ_ARN = "inventory-sync-dlq-arn";
+    process.env.EBAY_SYNC_AUTO_REDRIVE_ENABLED = "true";
 
     redriveDlqMock
       .mockResolvedValueOnce({ started: true, taskHandle: "task-1" }) // AI_GENERATE has messages
@@ -62,5 +64,31 @@ describe("dlq-redrive handler", () => {
     await handler();
 
     expect(redriveDlqMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not automatically recycle the eBay DLQ when seller setup may be blocked", async () => {
+    process.env.EBAY_SYNC_DLQ_URL = "ebay-sync-dlq-url";
+    process.env.EBAY_SYNC_DLQ_ARN = "ebay-sync-dlq-arn";
+
+    await handler();
+
+    expect(redriveDlqMock).not.toHaveBeenCalled();
+    expect(recordAuditLogMock).not.toHaveBeenCalled();
+  });
+
+  it("still recovers unrelated AI and inventory queues while leaving eBay held", async () => {
+    process.env.AI_GENERATE_DLQ_URL = "ai-generate-dlq-url";
+    process.env.AI_GENERATE_DLQ_ARN = "ai-generate-dlq-arn";
+    process.env.EBAY_SYNC_DLQ_URL = "ebay-sync-dlq-url";
+    process.env.EBAY_SYNC_DLQ_ARN = "ebay-sync-dlq-arn";
+    process.env.INVENTORY_SYNC_DLQ_URL = "inventory-sync-dlq-url";
+    process.env.INVENTORY_SYNC_DLQ_ARN = "inventory-sync-dlq-arn";
+    redriveDlqMock.mockResolvedValue({ started: false });
+
+    await handler();
+
+    expect(redriveDlqMock).toHaveBeenCalledTimes(2);
+    expect(redriveDlqMock).toHaveBeenCalledWith("ai-generate-dlq-url", "ai-generate-dlq-arn");
+    expect(redriveDlqMock).toHaveBeenCalledWith("inventory-sync-dlq-url", "inventory-sync-dlq-arn");
   });
 });

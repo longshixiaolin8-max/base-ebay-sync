@@ -42,6 +42,7 @@ import {
   recordSyncError,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
+import { isNonRetryableEbaySellerSetupError } from "./retry-policy.js";
 import { desc, eq, and } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
 
@@ -305,6 +306,7 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
           .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
         continue;
       }
+      const sellerSetupRequired = isNonRetryableEbaySellerSetupError(error);
       if (error.name !== "IdempotencyInProgressError") {
         // sync_errors keeps the raw error.message (full status+body) for ops debugging;
         // channel_listings.lastError is seller-facing, so when eBay's response carries its
@@ -321,15 +323,21 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
           tenantId: message.tenantId,
           channel: "ebay",
           productId: message.productId,
-          errorCode: `${message.type}_failed`,
+          errorCode: sellerSetupRequired ? "ebay_seller_setup_required" : `${message.type}_failed`,
           errorMessage: error.message,
-          payload: { messageId: record.messageId },
+          payload: { messageId: record.messageId, retryable: !sellerSetupRequired },
         });
         await db
           .update(channelListings)
           .set({ status: "error", lastError: displayError, updatedAt: new Date() })
           .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
       }
+      // A seller account blocked by eBay cannot recover through SQS retries.
+      // Preserve the actionable error in sync_errors/channel_listings, acknowledge
+      // this job, and let the seller requeue it after completing eBay onboarding.
+      // Only match explicit seller-privilege messages: errorId 25002 alone can
+      // also mean invalid/missing item specifics and is NOT a reliable classifier.
+      if (sellerSetupRequired) continue;
       failures.push({ itemIdentifier: record.messageId });
     }
   }
