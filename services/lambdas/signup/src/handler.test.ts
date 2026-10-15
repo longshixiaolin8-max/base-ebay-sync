@@ -200,7 +200,7 @@ describe("public signup", () => {
   });
 
   it("rate limits verification-code reissue for the same email", async () => {
-    getSignupVerificationMock.mockResolvedValueOnce({
+    getSignupVerificationMock.mockResolvedValue({
       ...validChallenge(),
       resendAvailableAt: new Date(Date.now() + 30_000),
     });
@@ -209,6 +209,29 @@ describe("public signup", () => {
 
     expect(res.statusCode).toBe(429);
     expect(res.headers?.["Retry-After"]).toBeTruthy();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it("never sends a resend OTP to an email without a live prior signup challenge", async () => {
+    const response = await callHandler({ action: "resend", email: "new@example.com" });
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body!)).toEqual({ error: "verification_not_started" });
+    expect(upsertSignupVerificationMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects forged inputs, pathological payloads and invalid emails before touching SES", async () => {
+    const base = { action: "start", companyName: "Acme", password: "Password!123", acceptedTerms: true };
+    for (const bad of [
+      { ...base, email: { address: "a@example.com" } },
+      { ...base, email: "not-a-real-email" },
+      { ...base, email: "a@example.com", companyName: "X".repeat(200) },
+      { ...base, email: "a@example.com", password: "P".repeat(200) + "!a1" },
+    ]) {
+      expect((await callHandler(bad)).statusCode).toBe(400);
+    }
+    expect((await callHandler(null)).statusCode).toBe(400);
+    expect((await callHandler({ ...base, email: "a@example.com", padding: "z".repeat(17000) })).statusCode).toBe(413);
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 

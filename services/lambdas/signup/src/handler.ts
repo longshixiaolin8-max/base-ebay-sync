@@ -75,6 +75,22 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const PUBLIC_PRICING_CACHE_MS = 5 * 60 * 1000;
+const MAX_SIGNUP_BODY_BYTES = 16 * 1024;
+
+// These are API boundaries, not UI-only restrictions. JSON bodies are untrusted
+// at runtime even though they are cast as SignupRequestBody in TypeScript.
+function validEmail(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 254) return false;
+  const parts = value.split("@");
+  return parts.length === 2 && parts[0]!.length >= 1 && parts[0]!.length <= 64 &&
+    /^[^\s@<>]+$/.test(parts[0]!) &&
+    /^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(parts[1]!) &&
+    parts[1]!.includes(".") && !parts[1]!.includes("..");
+}
+
+function validText(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length >= 1 && value.trim().length <= max;
+}
 
 let pricingCache:
   | {
@@ -102,9 +118,11 @@ function assertLiveBillingInProd(creds: StripeAppCredentials): JsonResult | null
   return null;
 }
 
-function validSignupPassword(password: string): boolean {
+function validSignupPassword(password: unknown): password is string {
   return (
+    typeof password === "string" &&
     password.length >= 12 &&
+    password.length <= 128 &&
     /[a-z]/.test(password) &&
     /[A-Z]/.test(password) &&
     /[0-9]/.test(password) &&
@@ -183,9 +201,14 @@ async function issueVerificationCode(email: string): Promise<JsonResult> {
 }
 
 async function startSignup(body: SignupRequestBody): Promise<JsonResult> {
-  const companyName = body.companyName?.trim();
-  const email = body.email ? normalizeEmail(body.email) : "";
-  const password = body.password ?? "";
+  if (!validText(body.companyName, 120) || !validEmail(body.email) ||
+      (body.name !== undefined && !validText(body.name, 120)) ||
+      !validSignupPassword(body.password) || body.acceptedTerms !== true) {
+    return json(400, { error: "missing_fields_or_terms" });
+  }
+  const companyName = body.companyName.trim();
+  const email = normalizeEmail(body.email);
+  const password = body.password;
 
   if (!companyName || !email || !validSignupPassword(password) || body.acceptedTerms !== true) {
     return json(400, { error: "missing_fields_or_terms" });
@@ -198,8 +221,14 @@ async function startSignup(body: SignupRequestBody): Promise<JsonResult> {
 }
 
 async function resendConfirmation(body: SignupRequestBody): Promise<JsonResult> {
-  const email = body.email ? normalizeEmail(body.email) : "";
-  if (!email) return json(400, { error: "email_required" });
+  if (!validEmail(body.email)) return json(400, { error: "email_required" });
+  const email = normalizeEmail(body.email);
+  // Otherwise the "resend" action becomes a second publicly accessible
+  // arbitrary-recipient SES sender that skips the start-form validation.
+  const existing = await getSignupVerification(getDb(), email);
+  if (!existing || existing.expiresAt.getTime() <= Date.now()) {
+    return json(400, { error: "verification_not_started" });
+  }
   const response = await issueVerificationCode(email);
   if (response.statusCode === 200) {
     return json(200, { resent: true, email });
@@ -208,11 +237,20 @@ async function resendConfirmation(body: SignupRequestBody): Promise<JsonResult> 
 }
 
 async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
-  const companyName = body.companyName?.trim();
+  if (!validText(body.companyName, 120) ||
+      (body.name !== undefined && !validText(body.name, 120)) ||
+      !validEmail(body.email) ||
+      !validSignupPassword(body.password) ||
+      typeof body.confirmationCode !== "string" ||
+      !/^\d{6}$/.test(body.confirmationCode.trim()) ||
+      body.acceptedTerms !== true) {
+    return json(400, { error: "confirmation_required" });
+  }
+  const companyName = body.companyName.trim();
   const name = body.name?.trim();
-  const email = body.email ? normalizeEmail(body.email) : "";
-  const password = body.password ?? "";
-  const code = body.confirmationCode?.trim() ?? "";
+  const email = normalizeEmail(body.email);
+  const password = body.password;
+  const code = body.confirmationCode.trim();
   const plan = body.plan ?? "standard";
 
   if (
@@ -402,9 +440,24 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     }
   }
 
+  // API Gateway's general body maximum is much larger than an OTP request
+  // needs. Reject oversized and non-object payloads before any SES/DB work.
+  if (event.body && Buffer.byteLength(event.body, "utf8") > MAX_SIGNUP_BODY_BYTES * 2) {
+    return json(413, { error: "request_too_large" });
+  }
   let body: SignupRequestBody;
   try {
-    body = JSON.parse(event.body ?? "{}") as SignupRequestBody;
+    const raw = event.isBase64Encoded && event.body
+      ? Buffer.from(event.body, "base64").toString("utf8")
+      : event.body ?? "{}";
+    if (Buffer.byteLength(raw, "utf8") > MAX_SIGNUP_BODY_BYTES) {
+      return json(413, { error: "request_too_large" });
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return json(400, { error: "invalid_json" });
+    }
+    body = parsed as SignupRequestBody;
   } catch {
     return json(400, { error: "invalid_json" });
   }

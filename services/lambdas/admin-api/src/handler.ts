@@ -1,6 +1,7 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
+import { boundedDashboardLimit } from "./query-limits.js";
 import {
   applyStandardAspectFallbacks,
   ChannelType,
@@ -3503,7 +3504,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // breakdown, orders, sns_content) run in parallel across products -- a modest default
       // keeps this endpoint's total concurrent RDS Data API calls bounded; pass ?limit= for
       // a larger catalog at the caller's own risk.
-      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : 30;
+      const limit = boundedDashboardLimit(event.queryStringParameters?.limit, 30, 100);
+      if (limit === null) return json(400, { error: "invalid_limit" });
       const products = await db
         .select()
         .from(productMaster)
@@ -3593,9 +3595,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // A dashboard-wide inventory rollup costs one breakdown call per product (same N+1
       // pattern /admin/commerce-dashboard already accepts) -- bounded the same way, via an
       // overridable default, rather than left unbounded for a large catalog.
-      const productLimit = event.queryStringParameters?.productLimit
-        ? Number(event.queryStringParameters.productLimit)
-        : 100;
+      const productLimit = boundedDashboardLimit(event.queryStringParameters?.productLimit, 100, 100);
+      if (productLimit === null) return json(400, { error: "invalid_product_limit" });
 
       const now = new Date();
       const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
