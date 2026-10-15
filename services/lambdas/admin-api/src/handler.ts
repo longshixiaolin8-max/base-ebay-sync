@@ -969,7 +969,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ condition: parsed.data }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ condition: parsed.data }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1006,7 +1006,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
       const merged = { ...draft.itemSpecifics, ...body.itemSpecifics };
-      await db.update(aiListingDraft).set({ itemSpecifics: merged }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ itemSpecifics: merged }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1139,7 +1139,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ suggestedPriceUsd: priceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: priceUsdCents }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1178,7 +1178,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ seoKeywords }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ seoKeywords }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1213,7 +1213,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
       const internalNotes = body.internalNotes?.trim() || null;
-      await db.update(aiListingDraft).set({ internalNotes }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ internalNotes }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       return json(200, { productId: id, internalNotes });
     }
@@ -1271,7 +1271,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         { type: job.type, tenantId, productId: job.productId, ...job.payload },
         `${tenantId}:retry:${id}:${Date.now()}`,
       );
-      await db.update(syncErrors).set({ resolved: true }).where(eq(syncErrors.id, id));
+      await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.id, id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1908,7 +1908,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
       const suggestedPriceUsdCents = Math.round(price.recommendedPriceUsd * 100);
 
-      await db.update(aiListingDraft).set({ suggestedPriceUsd: suggestedPriceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: suggestedPriceUsdCents }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       const queues = getQueueUrls();
       await enqueue(
@@ -3291,7 +3291,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!job) return json(404, { error: "not_found" });
       if (job.status !== "failed") return json(400, { error: "job_not_failed" });
 
-      await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, id));
+      await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, id)));
       await recordAuditLog(db, {
         tenantId,
         actor: actorFromEvent(event),
@@ -3313,7 +3313,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(syncJobs.tenantId, tenantId), inArray(syncJobs.id, ids), eq(syncJobs.status, "failed")));
 
       for (const row of failedJobs) {
-        await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, row.id));
+        await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, row.id)));
         await recordAuditLog(db, {
           tenantId,
           actor: actorFromEvent(event),
@@ -3449,7 +3449,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         { type: job.type, tenantId: opsTenantId, productId: job.productId, ...job.payload },
         `${opsTenantId}:ops-retry:${id}:${Date.now()}`,
       );
-      await db.update(syncErrors).set({ resolved: true }).where(eq(syncErrors.id, id!));
+      await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.id, id!)));
 
       await recordAuditLog(db, {
         tenantId: opsTenantId!,
