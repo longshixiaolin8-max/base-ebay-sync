@@ -104,23 +104,15 @@ export class LambdaStack extends cdk.Stack {
         : {}),
     };
 
-    const oauthTokenSecretsPolicy = new iam.PolicyStatement({
-      // DeleteSecret is needed by tenant-offboarding's own OAuth-revoke step (see
-      // deleteOAuthConnectionsForTenant) and by ebay-webhook's Marketplace Account
-      // Deletion handler (deleteOAuthConnectionsByExternalAccount) -- both call
-      // DeleteSecretCommand against a token secret under this same prefix. Granted on the
-      // same shared, already-broad (every makeFn'd lambda gets read+write on every tenant's
-      // OAuth token secret) statement rather than a narrower per-lambda one, matching this
-      // policy's existing precedent rather than introducing a new grant shape for it.
-      actions: [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:PutSecretValue",
-        "secretsmanager:CreateSecret",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:DeleteSecret",
-      ],
+    // Token access is divided by capability to limit blast radius.
+    // A stolen worker identity must not delete merchant OAuth credentials.
+    const tokenPolicy = (...actions: string[]) => new iam.PolicyStatement({
+      actions,
       resources: [props.oauthTokenSecretArnPattern],
     });
+    const tokenCreate = tokenPolicy("secretsmanager:PutSecretValue", "secretsmanager:CreateSecret");
+    const tokenRefresh = tokenPolicy("secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret");
+    const tokenDelete = tokenPolicy("secretsmanager:DeleteSecret");
 
     const makeFn = (
       id: string,
@@ -516,10 +508,12 @@ export class LambdaStack extends cdk.Stack {
     // marketplace tenant secret by unrelated public or AI Lambdas. In particular
     // SignupHandler, StripeWebhook, AiGenerateWorker and DlqRedrive must not
     // inherit the shared marketplace OAuth token permissions.
+    // OAuth callbacks can create and rotate their own connections, not read or delete.
+    for (const fn of [this.oauthBaseCallbackFn, this.oauthEbayCallbackFn]) {
+      fn.addToRolePolicy(tokenCreate);
+    }
+    // These handlers must fetch and refresh OAuth access tokens while syncing.
     for (const fn of [
-      this.oauthBaseCallbackFn,
-      this.oauthEbayCallbackFn,
-      this.ebayWebhookFn,
       this.ebayPlatformNotificationDispatcherFn,
       this.productFetchFn,
       this.ebaySyncWorkerFn,
@@ -529,7 +523,11 @@ export class LambdaStack extends cdk.Stack {
       this.tenantOffboardingFn,
       this.adminApiFn,
     ]) {
-      fn.addToRolePolicy(oauthTokenSecretsPolicy);
+      fn.addToRolePolicy(tokenRefresh);
+    }
+    // Deletion is strictly limited to approved disconnect/offboarding handlers.
+    for (const fn of [this.ebayWebhookFn, this.tenantOffboardingFn, this.adminApiFn]) {
+      fn.addToRolePolicy(tokenDelete);
     }
 
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
