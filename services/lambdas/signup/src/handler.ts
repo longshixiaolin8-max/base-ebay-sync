@@ -80,8 +80,10 @@ const MAX_SIGNUP_BODY_BYTES = 16 * 1024;
 // These are API boundaries, not UI-only restrictions. JSON bodies are untrusted
 // at runtime even though they are cast as SignupRequestBody in TypeScript.
 function validEmail(value: unknown): value is string {
-  if (typeof value !== "string" || value.length > 254) return false;
-  const parts = value.split("@");
+  if (typeof value !== "string") return false;
+  const email = value.trim();
+  if (email.length > 254) return false;
+  const parts = email.split("@");
   return parts.length === 2 && parts[0]!.length >= 1 && parts[0]!.length <= 64 &&
     /^[^\s@<>]+$/.test(parts[0]!) &&
     /^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(parts[1]!) &&
