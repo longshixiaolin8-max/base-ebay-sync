@@ -9,6 +9,7 @@ import {
   listOrders,
   listOrdersForProduct,
   listReservedOrdersForProduct,
+  OrderStatusConflictError,
   transitionOrderStatus,
   upsertOrderReceived,
   type OrderRow,
@@ -154,6 +155,48 @@ describe("transitionOrderStatus", () => {
 
     expect(updated.status).toBe("SHIPPED");
     expect(getSet()?.status).toBe("SHIPPED");
+  });
+
+  it("throws OrderStatusConflictError instead of overwriting when the order moved off fromStatus concurrently", async () => {
+    // Simulates another request having already won the race: the UPDATE's WHERE (which
+    // includes status = fromStatus) matches zero rows, so .returning() comes back empty.
+    const current = baseOrder({ status: "PAID" });
+    const db = {
+      select: () => ({ from: () => ({ where: () => ({ limit: async () => [current] }) }) }),
+      update: () => ({ set: () => ({ where: () => ({ returning: async () => [] }) }) }),
+    } as unknown as Database;
+
+    await expect(transitionOrderStatus(db, "tenant-a", "order-1", "ALLOCATED")).rejects.toThrow(OrderStatusConflictError);
+  });
+
+  it("invalidates an already-finalized profit snapshot when a profit-affecting extra field is written", async () => {
+    const current = baseOrder({
+      status: "RETURN_REQUESTED",
+      profitFinalizedAt: new Date("2026-01-05T00:00:00Z"),
+      finalizedNetProfitUsdCents: 1234,
+    });
+    const { db, getSet } = fakeOrderDb(current);
+
+    await transitionOrderStatus(db, "tenant-a", "order-1", "RETURNED", { extra: { returnAmountUsdCents: 2000 } });
+
+    // Otherwise every dashboard/analytics reader that trusts profitFinalizedAt as ground truth
+    // would keep serving the pre-return profit number forever, since nothing else re-finalizes.
+    expect(getSet()?.profitFinalizedAt).toBeNull();
+    expect(getSet()?.finalizedNetProfitUsdCents).toBeNull();
+  });
+
+  it("leaves an already-finalized profit snapshot alone when the transition carries no profit-affecting field", async () => {
+    const current = baseOrder({
+      status: "DELIVERED",
+      profitFinalizedAt: new Date("2026-01-05T00:00:00Z"),
+      finalizedNetProfitUsdCents: 1234,
+    });
+    const { db, getSet } = fakeOrderDb(current);
+
+    await transitionOrderStatus(db, "tenant-a", "order-1", "RETURN_REQUESTED");
+
+    expect(getSet()?.profitFinalizedAt).toBeUndefined();
+    expect(getSet()?.finalizedNetProfitUsdCents).toBeUndefined();
   });
 
   describe("DDP compliance gate on SHIPPED", () => {

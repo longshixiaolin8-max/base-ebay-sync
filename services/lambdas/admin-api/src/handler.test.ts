@@ -77,6 +77,7 @@ class DdpConfirmationRequiredErrorFake extends Error {
     super("DDP compliance confirmation is required before marking this order SHIPPED");
   }
 }
+class OrderStatusConflictErrorFake extends Error {}
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -103,6 +104,15 @@ vi.mock("@ai-ec/db", () => ({
   getSnsContent: (...args: unknown[]) => getSnsContentMock(...args),
   InvalidOrderTransitionError: InvalidOrderTransitionErrorFake,
   DdpConfirmationRequiredError: DdpConfirmationRequiredErrorFake,
+  OrderStatusConflictError: OrderStatusConflictErrorFake,
+  PROFIT_AFFECTING_EXTRA_KEYS: [
+    "returnAmountUsdCents",
+    "ebayFeeUsdCents",
+    "paymentFeeUsdCents",
+    "shippingCostJpy",
+    "adSpendUsdCents",
+    "fxCostUsdCents",
+  ],
   listOrdersForProduct: (...args: unknown[]) => listOrdersForProductMock(...args),
   markSnsStatus: (...args: unknown[]) => markSnsStatusMock(...args),
   transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
@@ -1957,6 +1967,13 @@ describe("admin-api handler", () => {
       transitionOrderStatusMock.mockRejectedValueOnce(new InvalidOrderTransitionErrorFake("bad transition"));
       const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
       expect(res.statusCode).toBe(409);
+    });
+
+    it("POST /admin/orders/{id}/status returns 409 when the order's status changed concurrently", async () => {
+      transitionOrderStatusMock.mockRejectedValueOnce(new OrderStatusConflictErrorFake("order o1 was no longer in status PAID"));
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "status_conflict" });
     });
 
     it("POST /admin/orders/{id}/status returns 400 when transitionOrderStatus requires DDP confirmation", async () => {

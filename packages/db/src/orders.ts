@@ -30,6 +30,31 @@ export class DdpConfirmationRequiredError extends Error {
   }
 }
 
+/** Thrown by transitionOrderStatus when the order's status changed between this call's read
+ *  and its write (e.g. two admins acting on the same order at once) -- the update's WHERE
+ *  clause only matches the row still sitting at the status this call validated against, so a
+ *  concurrent transition makes it match zero rows instead of silently clobbering whatever the
+ *  other call just wrote. The admin-api route maps this to a 409 so the caller can refetch and
+ *  retry, rather than the second write winning by coincidence of commit order. */
+export class OrderStatusConflictError extends Error {
+  constructor(orderId: string, expectedStatus: OrderStatus) {
+    super(`Order ${orderId} was no longer in status ${expectedStatus} -- it changed concurrently`);
+    this.name = "OrderStatusConflictError";
+  }
+}
+
+/** The subset of TransitionOrderStatusOptions.extra that feeds computeOrderProfit -- shared so
+ *  admin-api's request-body whitelist and this module's own finalized-profit invalidation (see
+ *  transitionOrderStatus) can never drift apart into two different ideas of "profit-affecting". */
+export const PROFIT_AFFECTING_EXTRA_KEYS = [
+  "returnAmountUsdCents",
+  "ebayFeeUsdCents",
+  "paymentFeeUsdCents",
+  "shippingCostJpy",
+  "adSpendUsdCents",
+  "fxCostUsdCents",
+] as const;
+
 export interface UpsertOrderReceivedInput {
   tenantId: string;
   productId: string;
@@ -189,6 +214,18 @@ export async function transitionOrderStatus(
     }
   }
 
+  // A financial field changing on an order whose profit snapshot was already finalized (e.g. a
+  // return amount arriving at RETURNED, or an admin correcting a fee after the fact) makes that
+  // snapshot wrong the instant this writes -- every reader that trusts profitFinalizedAt as
+  // ground truth (dashboard/analytics/ops KPIs) would otherwise keep serving the pre-return
+  // number forever, since nothing else ever re-finalizes on its own. Clearing it here falls
+  // back those readers to the live (correct) computation until a human re-finalizes, which
+  // matches finalizeOrderProfit's own doc comment ("an admin corrects a fee ... then
+  // re-finalizes") -- this is the invalidation that comment assumed already existed.
+  const extraTouchesProfitFields =
+    !!options.extra && PROFIT_AFFECTING_EXTRA_KEYS.some((key) => key in (options.extra as Record<string, unknown>));
+  const invalidatesFinalizedProfit = Boolean(current.profitFinalizedAt) && extraTouchesProfitFields;
+
   const now = new Date();
   const [updated] = await db
     .update(orders)
@@ -202,11 +239,16 @@ export async function transitionOrderStatus(
       // resurrect or corrupt an order's status.
       status: toStatus,
       ...(justConfirmedDdp ? { ddpConfirmedAt: now } : {}),
+      ...(invalidatesFinalizedProfit ? { profitFinalizedAt: null, finalizedNetProfitUsdCents: null } : {}),
       updatedAt: now,
     })
-    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
+    // Guarding on the status this call validated against (not just tenantId/id) is this
+    // function's optimistic-concurrency check: if another call already moved the order off
+    // fromStatus between our read above and this write, this matches zero rows instead of
+    // blindly overwriting whatever that other call just committed.
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId), eq(orders.status, fromStatus)))
     .returning();
-  if (!updated) throw new Error(`failed to update orders row ${orderId}`);
+  if (!updated) throw new OrderStatusConflictError(orderId, fromStatus);
   return updated;
 }
 

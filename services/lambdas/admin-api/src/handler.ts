@@ -55,8 +55,10 @@ import {
   markSnsStatus,
   oauthConnections,
   orders,
+  OrderStatusConflictError,
   predictStockoutRisk,
   productMaster,
+  PROFIT_AFFECTING_EXTRA_KEYS,
   reconstructInventory,
   releaseMonthlyAiGenerationReservation,
   resolveNotificationPreferences,
@@ -2739,16 +2741,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // TransitionOrderStatusOptions.extra -- picked explicitly here (rather than spread)
       // so a client can never smuggle an unrelated column (e.g. "status") into the DB update
       // through this loosely-typed JSON field and bypass the validated state machine below.
-      const ALLOWED_EXTRA_KEYS = [
-        "returnAmountUsdCents",
-        "ebayFeeUsdCents",
-        "paymentFeeUsdCents",
-        "shippingCostJpy",
-        "adSpendUsdCents",
-        "fxCostUsdCents",
-      ] as const;
+      // PROFIT_AFFECTING_EXTRA_KEYS is shared with transitionOrderStatus's own finalized-profit
+      // invalidation check, so this whitelist and "what counts as profit-affecting" can't drift.
       const extraNumeric: Record<string, number> = {};
-      for (const key of ALLOWED_EXTRA_KEYS) {
+      for (const key of PROFIT_AFFECTING_EXTRA_KEYS) {
         const value = body.extra?.[key];
         if (typeof value === "number") extraNumeric[key] = value;
       }
@@ -2857,6 +2853,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         }
         if (err instanceof DdpConfirmationRequiredError) {
           return json(400, { error: "ddp_confirmation_required", message: err.reasonJa });
+        }
+        if (err instanceof OrderStatusConflictError) {
+          return json(409, { error: "status_conflict", message: err.message });
         }
         throw err;
       }
