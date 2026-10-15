@@ -22,10 +22,13 @@ describe("AWS security boundaries", () => {
     const stack = new GithubOidcStack(app, "TestOidc", { githubRepo: "owner/repo" },
       { env: { account: "111111111111", region: "us-east-2" } });
     const roles = Template.fromStack(stack).findResources("AWS::IAM::Role");
-    const role = Object.values(roles)[0] as {
+    const role = Object.values(roles).find((resource) =>
+      (resource as { Properties?: { RoleName?: string } }).Properties?.RoleName === "ai-ec-platform-github-deploy",
+    ) as {
       Properties: { AssumeRolePolicyDocument: { Statement: Array<{ Condition?: { StringLike?: Record<string, string[]> } }> } };
-    };
-    const subjects = role.Properties.AssumeRolePolicyDocument.Statement.flatMap(
+    } | undefined;
+    expect(role).toBeDefined();
+    const subjects = role!.Properties.AssumeRolePolicyDocument.Statement.flatMap(
       s => s.Condition?.StringLike?.["token.actions.githubusercontent.com:sub"] ?? [],
     );
     expect(subjects).toHaveLength(4);
