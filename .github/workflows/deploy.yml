@@ -49,6 +49,9 @@ permissions:
 
 jobs:
   deploy:
+    # Never deploy prod from an unreviewed feature branch; the prod GitHub
+    # Environment must additionally require a human approval.
+    if: ${{ inputs.environment != 'prod' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:
       API_ENTRYPOINT: ${{ vars.API_ENTRYPOINT }}

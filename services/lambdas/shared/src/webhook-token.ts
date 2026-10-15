@@ -25,8 +25,11 @@ export function signWebhookDestinationToken(secret: string, tenantId: string): s
 
 /** Returns the tenantId a token was minted for, once its signature checks out. */
 export function verifyWebhookDestinationToken(secret: string, token: string): string {
+  if (token.length > 1024 || token.split(".").length !== 2) throw new Error("Malformed webhook destination token");
   const [payloadB64, signature] = token.split(".");
-  if (!payloadB64 || !signature) throw new Error("Malformed webhook destination token");
+  if (!payloadB64 || !signature || !/^[A-Za-z0-9_-]+$/.test(payloadB64) || !/^[A-Za-z0-9_-]{43}$/.test(signature)) {
+    throw new Error("Malformed webhook destination token");
+  }
 
   const expected = createHmac("sha256", secret).update(payloadB64).digest("base64url");
   const a = Buffer.from(signature);
@@ -36,7 +39,7 @@ export function verifyWebhookDestinationToken(secret: string, token: string): st
   }
 
   const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8")) as TokenPayload;
-  if (!payload.tenantId) {
+  if (typeof payload?.tenantId !== "string" || payload.tenantId.length === 0 || payload.tenantId.length > 128) {
     throw new Error("Webhook destination token missing tenantId");
   }
   return payload.tenantId;

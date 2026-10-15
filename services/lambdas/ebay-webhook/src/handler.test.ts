@@ -118,6 +118,16 @@ describe("ebay-webhook handler", () => {
     );
   });
 
+  it("GET rejects forged destination token before responding to the challenge", async () => {
+    verifyWebhookDestinationTokenMock.mockImplementation(() => { throw new Error("forged"); });
+    const res = (await handler(makeEvent({
+      pathParameters: { token: "forged" },
+      queryStringParameters: { challenge_code: "abc" },
+    }))) as { statusCode: number };
+    expect(res.statusCode).toBe(403);
+    expect(computeChallengeResponseMock).not.toHaveBeenCalled();
+  });
+
   it("POST with a valid signature and no {token} segment debounces/dispatches a coalesced poll for the bootstrap tenant (via SQS, not a direct call) and returns 204", async () => {
     parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
     getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
@@ -160,7 +170,7 @@ describe("ebay-webhook handler", () => {
     expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: "real-tenant-42", channel: "ebay" });
   });
 
-  it("POST with a valid signature but an invalid/forged {token} segment falls back to the bootstrap tenant rather than failing the whole delivery", async () => {
+  it("POST with a valid signature but a forged tenant token fails closed", async () => {
     parseSignatureHeaderMock.mockReturnValue({ kid: "key-1" });
     getNotificationPublicKeyMock.mockResolvedValue({ algorithm: "ECDSA", digest: "SHA1", key: "pk" });
     verifyNotificationSignatureMock.mockReturnValue(true);
@@ -177,11 +187,8 @@ describe("ebay-webhook handler", () => {
       } as never),
     )) as { statusCode: number };
 
-    // Still acknowledged (204) -- the X-EBAY-SIGNATURE check already proved this delivery is
-    // genuinely from eBay, so an unresolvable tenant hint degrades to "poll the bootstrap
-    // tenant" rather than rejecting an otherwise-legitimate eBay delivery.
-    expect(res.statusCode).toBe(204);
-    expect(enqueueMock).toHaveBeenCalledWith("poll-queue-url", { tenantId: BOOTSTRAP_TENANT_ID, channel: "ebay" });
+    expect(res.statusCode).toBe(403);
+    expect(enqueueMock).not.toHaveBeenCalled();
   });
 
   it("POST with an invalid signature is rejected and does not trigger a poll", async () => {

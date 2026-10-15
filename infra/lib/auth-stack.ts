@@ -40,6 +40,13 @@ export class AuthStack extends cdk.Stack {
 
     this.userPoolClient = this.userPool.addClient("AdminUserPoolClient", {
       authFlows: { userSrp: true },
+      // Critical tenant boundary: default client permissions allow users to
+      // modify custom:tenant_id, later reflected in their signed ID token.
+      // Preserve the existing pool schema; restrict every app client's writes.
+      readAttributes: new cognito.ClientAttributes()
+        .withStandardAttributes({ email: true, emailVerified: true, fullname: true })
+        .withCustomAttributes("tenant_id"),
+      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ fullname: true }),
       generateSecret: false,
       accessTokenValidity: cdk.Duration.hours(1),
       idTokenValidity: cdk.Duration.hours(1),

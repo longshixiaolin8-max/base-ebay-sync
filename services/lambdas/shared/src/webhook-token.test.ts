@@ -35,6 +35,16 @@ describe("signWebhookDestinationToken / verifyWebhookDestinationToken", () => {
     expect(() => verifyWebhookDestinationToken(SECRET, "not-a-real-token")).toThrow(/malformed/i);
   });
 
+  it("rejects oversized or multi-segment destination tokens", () => {
+    const valid = signWebhookDestinationToken(SECRET, TENANT_ID);
+    expect(() => verifyWebhookDestinationToken(SECRET, valid + ".extra")).toThrow(/malformed/i);
+    expect(() => verifyWebhookDestinationToken(SECRET, "A".repeat(2000) + ".x")).toThrow(/malformed/i);
+  });
+
+  it("rejects signed non-string tenant IDs", () => {
+    expect(() => verifyWebhookDestinationToken(SECRET, signPayload(SECRET, { tenantId: { id: "other" } }))).toThrow(/tenantId/i);
+  });
+
   it("never expires -- unlike oauth-state's signState/verifyState, there is no round trip to bound the age of", () => {
     // No maxAgeMs parameter exists on verifyWebhookDestinationToken at all; a token minted
     // long ago must keep verifying for the life of the eBay subscription it was registered

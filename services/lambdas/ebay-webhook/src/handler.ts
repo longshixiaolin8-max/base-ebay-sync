@@ -151,6 +151,14 @@ async function handleChallenge(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const baseEndpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
   if (!baseEndpoint) return { statusCode: 500, body: "EBAY_WEBHOOK_ENDPOINT_URL is not configured" };
   const token = event.pathParameters?.token;
+  if (token) {
+    try {
+      verifyWebhookDestinationToken(creds.clientSecret, token);
+    } catch {
+      console.warn("ebay-webhook: forged destination in ownership challenge");
+      return { statusCode: 403 };
+    }
+  }
   const endpoint = token ? `${baseEndpoint}/${token}` : baseEndpoint;
 
   const challengeResponse = computeChallengeResponse(challengeCode, creds.webhookVerificationToken, endpoint);
@@ -223,7 +231,8 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
     try {
       tenantId = verifyWebhookDestinationToken(creds.clientSecret, token);
     } catch (err) {
-      console.warn("ebay-webhook: notification's destination token failed verification, falling back to the bootstrap tenant", (err as Error).message);
+      console.warn("ebay-webhook: invalid destination tenant token; rejecting notification");
+      return { statusCode: 403 };
     }
   }
   await triggerCoalescedPoll(tenantId, "ebay");

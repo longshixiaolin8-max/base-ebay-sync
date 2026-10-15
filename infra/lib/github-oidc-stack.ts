@@ -40,8 +40,10 @@ export class GithubOidcStack extends cdk.Stack {
         // "Not authorized to perform sts:AssumeRoleWithWebIdentity").
         StringLike: {
           "token.actions.githubusercontent.com:sub": [
-            `repo:${props.githubRepo}:*`,
-            `repo:${githubOwner}@*/${githubRepoName}@*:*`,
+            `repo:${props.githubRepo}:environment:dev`,
+            `repo:${props.githubRepo}:environment:prod`,
+            `repo:${githubOwner}@*/${githubRepoName}@*:environment:dev`,
+            `repo:${githubOwner}@*/${githubRepoName}@*:environment:prod`,
           ],
         },
       }),
