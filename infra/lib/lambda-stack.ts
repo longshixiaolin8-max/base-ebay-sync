@@ -160,7 +160,7 @@ export class LambdaStack extends cdk.Stack {
       });
 
       props.cluster.grantDataApiAccess(fn);
-      fn.addToRolePolicy(oauthTokenSecretsPolicy);
+      // OAuth token access is granted only to explicitly approved handlers below.
       return fn;
     };
 
@@ -512,6 +512,26 @@ export class LambdaStack extends cdk.Stack {
       // more than the old 15s, and this comfortably covers either.
       cdk.Duration.seconds(60),
     );
+    // Critical least-privilege boundary: no blanket read/write/delete of every
+    // marketplace tenant secret by unrelated public or AI Lambdas. In particular
+    // SignupHandler, StripeWebhook, AiGenerateWorker and DlqRedrive must not
+    // inherit the shared marketplace OAuth token permissions.
+    for (const fn of [
+      this.oauthBaseCallbackFn,
+      this.oauthEbayCallbackFn,
+      this.ebayWebhookFn,
+      this.ebayPlatformNotificationDispatcherFn,
+      this.productFetchFn,
+      this.ebaySyncWorkerFn,
+      this.salesPollerFn,
+      this.inventorySyncWorkerFn,
+      this.inventoryDiffCheckFn,
+      this.tenantOffboardingFn,
+      this.adminApiFn,
+    ]) {
+      fn.addToRolePolicy(oauthTokenSecretsPolicy);
+    }
+
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
