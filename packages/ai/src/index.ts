@@ -6,3 +6,4 @@ export * from "./generate-inquiry-reply.js";
 export * from "./generate-sns-script.js";
 export * from "./generate-stale-suggestion.js";
 export * from "./security-triage.js";
+export * from "./cloudwatch-security.js";
