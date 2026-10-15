@@ -42,11 +42,18 @@ export class AuthStack extends cdk.Stack {
       authFlows: { userSrp: true },
       // Critical tenant boundary: default client permissions allow users to
       // modify custom:tenant_id, later reflected in their signed ID token.
-      // Preserve the existing pool schema; restrict every app client's writes.
+      // Restrict reads to the attributes this app client actually uses (see
+      // apps/admin's fetchUserAttributes() callers and the ID-token tenant_id
+      // read), and grant no self-service writes at all -- nothing in the
+      // frontend calls updateUserAttributes, and "name"/"fullname" was never
+      // declared in this pool's own schema (standardAttributes above only
+      // declares "email"), so including it as a write attribute is rejected
+      // by Cognito outright ("Invalid write attributes specified"), not just
+      // denied at runtime.
       readAttributes: new cognito.ClientAttributes()
-        .withStandardAttributes({ email: true, emailVerified: true, fullname: true })
+        .withStandardAttributes({ email: true, emailVerified: true })
         .withCustomAttributes("tenant_id"),
-      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({ fullname: true }),
+      writeAttributes: new cognito.ClientAttributes(),
       generateSecret: false,
       accessTokenValidity: cdk.Duration.hours(1),
       idTokenValidity: cdk.Duration.hours(1),

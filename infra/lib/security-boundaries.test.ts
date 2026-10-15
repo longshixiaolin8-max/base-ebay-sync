@@ -14,7 +14,11 @@ describe("AWS security boundaries", () => {
       Properties: { ReadAttributes: string[]; WriteAttributes: string[] };
     };
     expect(client.Properties.ReadAttributes).toContain("custom:tenant_id");
-    expect(client.Properties.WriteAttributes).toEqual(["name"]);
+    // No self-service attribute writes at all: nothing in the frontend calls
+    // updateUserAttributes, and "name" was never part of this pool's own schema
+    // (only "email" is declared in AuthStack's standardAttributes), so granting
+    // write access to it isn't just unnecessary -- Cognito rejects it outright.
+    expect(client.Properties.WriteAttributes).toEqual([]);
   });
 
   it("rejects OIDC subjects outside reviewed dev/prod environments", () => {
