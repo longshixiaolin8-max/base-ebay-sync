@@ -52,6 +52,29 @@ interface EbaySyncMessage {
   productId: string;
 }
 
+/**
+ * The worker's own replay guard for an ebay_update job must change whenever
+ * inventory_master's CAS `version` does, not just when contentHash does. contentHash never
+ * changes for a stock-only event (a restock, or a sellout BASE never reports as an "order" --
+ * see product-fetch's propagateStockOnlyChangeToEbay, the only source of an ebay_update job
+ * whose contentHash is identical to one already synced), so keying purely on contentHash
+ * would make the *second* such stock-only event for the same product silently replay the
+ * first one's cached "completed" result via withIdempotency instead of actually re-syncing
+ * the new quantity to eBay. This isn't a TTL/retry concern either: createDbIdempotencyStore's
+ * own store never reclaims a "completed" row just because its TTL elapsed ("expiry only ever
+ * frees a stuck claim, never a finished one") -- so without folding in `version`, the very
+ * first stock-only update to ever run for a given content state would permanently block
+ * every later one for that same content, for as long as that content stays unchanged.
+ */
+export function buildEbayUpdateIdempotencyKey(
+  tenantId: string,
+  productId: string,
+  contentHash: string,
+  inventoryVersion: number,
+): string {
+  return buildIdempotencyKey(tenantId, ["ebay_update", productId, contentHash, inventoryVersion]);
+}
+
 const USD_PER_JPY_FALLBACK = 0.0067; // last-resort rate if the real FX API call itself fails
 
 /**
@@ -278,7 +301,8 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         const key = buildIdempotencyKey(message.tenantId, ["ebay_publish", product.id, product.contentHash]);
         await withIdempotency(idempotencyStore, key, () => publish(db, message.tenantId, adapter, accessToken, product.id));
       } else {
-        const key = buildIdempotencyKey(message.tenantId, ["ebay_update", product.id, product.contentHash]);
+        const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, product.id)).limit(1);
+        const key = buildEbayUpdateIdempotencyKey(message.tenantId, product.id, product.contentHash, inventory?.version ?? 0);
         await withIdempotency(idempotencyStore, key, () =>
           update(db, message.tenantId, adapter, accessToken, product.id, listing.externalId!),
         );

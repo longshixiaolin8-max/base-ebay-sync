@@ -76,7 +76,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
 }));
 
-const { publish, update } = await import("./handler.js");
+const { publish, update, buildEbayUpdateIdempotencyKey } = await import("./handler.js");
 
 const TENANT_ID = "tenant-a";
 
@@ -125,6 +125,32 @@ const draft = {
 // The channel_listings row read for the anomaly-detection price baseline. null
 // lastSyncedPriceJpy (never synced before) is always non-anomalous.
 const listing = { lastSyncedPriceJpy: null };
+
+describe("buildEbayUpdateIdempotencyKey", () => {
+  it("produces a different key for a stock-only change (same contentHash, new inventory version)", () => {
+    const first = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-1", 1);
+    const second = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-1", 2);
+
+    // If these collided, withIdempotency would replay the first update's cached "completed"
+    // result for the second restock instead of actually re-syncing the new quantity to eBay
+    // -- and never retry, since a completed idempotency record is never reclaimed by TTL.
+    expect(first).not.toBe(second);
+  });
+
+  it("produces the same key for a genuinely identical redelivery (same contentHash, same version)", () => {
+    const first = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-1", 1);
+    const second = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-1", 1);
+
+    expect(first).toBe(second);
+  });
+
+  it("still varies by contentHash, independent of inventory version", () => {
+    const first = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-1", 1);
+    const second = buildEbayUpdateIdempotencyKey(TENANT_ID, "p1", "hash-2", 1);
+
+    expect(first).not.toBe(second);
+  });
+});
 
 describe("publish", () => {
   beforeEach(() => {

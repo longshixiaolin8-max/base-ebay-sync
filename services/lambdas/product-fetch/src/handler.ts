@@ -1,6 +1,7 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import { contentHash, type ExternalProduct, getPlanLimits } from "@ai-ec/core";
 import {
+  type ApplyBaseStockReportResult,
   applyBaseStockReport,
   channelListings,
   countProducts,
@@ -76,6 +77,56 @@ async function insertOutboxJob(
   // Can only be missing if we lost a race with a concurrent DELETE of the row we just
   // conflicted with -- this table is never deleted from, so this is unreachable in practice.
   return existing as SyncJobRow;
+}
+
+/** Shared by both upsertProduct branches that may need to enqueue an ebay_update job: only
+ *  push to a listing a human has already approved & published -- a still-pending draft is
+ *  left alone, matching the pending-approval flow's own ownership of that listing. */
+async function isEbayListingPublished(tx: OutboxTxDb, productId: string): Promise<boolean> {
+  const [ebayListing] = await tx
+    .select()
+    .from(channelListings)
+    .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
+    .limit(1);
+  return ebayListing?.status === "published";
+}
+
+/**
+ * A BASE stock-only change (restock, manual adjustment, or a sellout BASE never reports as
+ * an "order") never touches contentHash, so upsertProduct's normal content-update path --
+ * the one place that would otherwise enqueue an ebay_update job -- never runs for it. Left
+ * unfixed, an already-published eBay listing keeps advertising stale (possibly oversold)
+ * quantity indefinitely, until some unrelated field happens to change too. This is the
+ * stock-only counterpart to that path: no product_master row changed, so there's nothing to
+ * keep atomic with the outbox insert (a plain single-statement insert is already atomic on
+ * its own), and the idempotency key is keyed on BASE's own sequenceAt rather than
+ * contentHash -- contentHash is identical across every stock-only change by definition, so
+ * reusing the content-update path's key shape here would make every change after the first
+ * silently collide with (and never re-fire past) that first job.
+ *
+ * Known residual gap: this runs as a separate call right after applyBaseStockReport's own
+ * commit, not inside the same transaction (applyBaseStockReport's CAS retry loop isn't
+ * transaction-aware). A crash/timeout landing exactly between the two would leave the new
+ * quantity reconciled in inventory_master but never propagated to eBay, and -- unlike the
+ * out-of-order detection this same sequenceAt also drives -- there's no automatic retry for
+ * it: the next poll of an unchanged BASE state reports the same sequenceAt and is correctly
+ * treated as a no-op, not a reason to re-attempt this. Narrower than the bug this function
+ * fixes (requires a crash in a specific few-millisecond window, not "any two stock changes
+ * with no content edit between them"), and self-heals the moment any other field changes.
+ */
+async function propagateStockOnlyChangeToEbay(
+  db: Database,
+  tenantId: string,
+  productId: string,
+  sequenceAt: Date,
+): Promise<void> {
+  if (!(await isEbayListingPublished(db, productId))) return;
+
+  await insertOutboxJob(db, tenantId, "ebay_update", `${tenantId}:ebay-update:${productId}:stock:${sequenceAt.getTime()}`, productId, {
+    type: "ebay_update",
+    tenantId,
+    productId,
+  });
 }
 
 function queueUrlForJobType(queues: ReturnType<typeof getQueueUrls>, type: string): string | null {
@@ -235,16 +286,26 @@ export async function upsertProduct(
     .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.sku, sku)))
     .limit(1);
 
+  let stockReport: ApplyBaseStockReportResult | undefined;
   if (existing) {
     // contentHash covers title/description/price/images only, not stock -- a poll where
     // *only* BASE's stock number changed (a restock, or a manual adjustment BASE never
     // reports as an "order") would otherwise never reach inventory_master at all. Always
     // reconcile the reported stock; applyBaseStockReport itself is the no-op guard when
     // nothing has actually changed on BASE (its out-of-order check on item.updatedAt).
-    await applyBaseStockReport(db, tenantId, existing.id, item.quantity, item.updatedAt);
+    stockReport = await applyBaseStockReport(db, tenantId, existing.id, item.quantity, item.updatedAt);
   }
 
   if (existing && existing.contentHash === hash) {
+    // A stock-only change (contentHash doesn't cover quantity) just got written to
+    // inventory_master above, but nothing below this point would otherwise ever enqueue an
+    // ebay_update job for it -- an already-published eBay listing would then keep
+    // advertising stale (possibly oversold) quantity until some unrelated field happened to
+    // change too. Only do this when the report was actually applied (a real, new BASE
+    // state), never for an out-of-order/unchanged report that didn't move the needle.
+    if (stockReport?.applied) {
+      await propagateStockOnlyChangeToEbay(db, tenantId, existing.id, item.updatedAt);
+    }
     return; // no other field changed since last import
   }
 
@@ -266,15 +327,7 @@ export async function upsertProduct(
         })
         .where(eq(productMaster.id, existing.id));
 
-      const [ebayListing] = await tx
-        .select()
-        .from(channelListings)
-        .where(and(eq(channelListings.productId, existing.id), eq(channelListings.channel, "ebay")))
-        .limit(1);
-
-      // Only push edits automatically for a listing a human already approved & published.
-      // A listing still pending approval is left alone — the pending draft/approval flow owns it.
-      if (ebayListing?.status === "published") {
+      if (await isEbayListingPublished(tx, existing.id)) {
         await insertOutboxJob(tx, tenantId, "ebay_update", `${tenantId}:ebay-update:${existing.id}:${hash}`, existing.id, {
           type: "ebay_update",
           tenantId,
