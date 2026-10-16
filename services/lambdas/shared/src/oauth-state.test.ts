@@ -36,8 +36,12 @@ describe("signState / verifyState", () => {
 
   it("rejects a state with a tampered signature", () => {
     const state = signState(SECRET, TENANT_ID);
-    const [payloadB64] = state.split(".");
-    const tamperedState = `${payloadB64}.not-the-real-signature-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+    const [payloadB64, signature] = state.split(".");
+    // Preserve the HMAC's valid 43-character shape, so this tests the
+    // signature verification itself rather than the new format guard.
+    const last = signature!.at(-1)!;
+    const tamperedSignature = signature!.slice(0, -1) + (last === "A" ? "B" : "A");
+    const tamperedState = `${payloadB64}.${tamperedSignature}`;
 
     expect(() => verifyState(SECRET, tamperedState)).toThrow(/signature mismatch/i);
   });
