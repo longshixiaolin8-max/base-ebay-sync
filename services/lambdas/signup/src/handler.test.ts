@@ -308,7 +308,7 @@ describe("public signup", () => {
     expect(createPendingTenantMock).toHaveBeenCalledWith(
       expect.anything(),
       "Acme",
-      { id: tenantId, contactEmail: "a@example.com" },
+      { id: tenantId, contactEmail: "a@example.com", plan: "standard" },
     );
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -371,6 +371,36 @@ describe("public signup", () => {
 
     expect(res.statusCode).toBe(200);
     expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+    // The originally selected tier is persisted onto the pending tenant row itself, not just
+    // used transiently for this Checkout Session -- otherwise, if Stripe checkout creation
+    // failed right after this (a real, handled failure mode -- see the next test), there
+    // would be no record anywhere of which plan this signer actually chose, and resuming
+    // payment later would silently fall back to Standard.
+    expect(createPendingTenantMock).toHaveBeenCalledWith(expect.anything(), "Acme", expect.objectContaining({ plan: "pro" }));
+  });
+
+  it("persists the selected plan on the pending tenant even when Stripe checkout creation fails right after account creation", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1", pro: "price_pro" });
+    checkoutSessionsCreateMock.mockRejectedValueOnce(new Error("Stripe outage"));
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body!)).toEqual({ error: "checkout_unavailable", accountCreated: true });
+    // The account (and its originally selected plan) is already durably recorded before the
+    // Stripe call that just failed -- this is exactly the gap POST /admin/billing/checkout-
+    // session's own plan fallback (admin-api's handler.ts) depends on to resume payment for
+    // the right tier later, instead of defaulting to Standard.
+    expect(createPendingTenantMock).toHaveBeenCalledWith(expect.anything(), "Acme", expect.objectContaining({ plan: "pro" }));
   });
 
   it("rejects an unknown plan name before creating any Cognito user or tenant row", async () => {

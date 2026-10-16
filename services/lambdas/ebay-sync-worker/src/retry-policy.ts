@@ -1,4 +1,5 @@
 import { EbayApiError, EbayPartialUpdateRolledBackError } from "@ai-ec/adapter-ebay";
+import { isSellerSetupRequiredMessage } from "@ai-ec/core";
 
 /**
  * A blocked seller account requires a human change in eBay Seller Hub.
@@ -8,7 +9,5 @@ import { EbayApiError, EbayPartialUpdateRolledBackError } from "@ai-ec/adapter-e
 export function isNonRetryableEbaySellerSetupError(error: unknown): boolean {
   const cause = error instanceof EbayPartialUpdateRolledBackError ? error.cause : error;
   if (!(cause instanceof EbayApiError)) return false;
-  return /SELLING_PRIVILEGE_REQUIRED|(?:required|necessary) selling privileges|(?:do(?:es)? not have|without) (?:the )?(?:required )?selling privileges|(?:create|register) (?:a )?seller['’]?s account/i.test(
-    cause.body,
-  );
+  return isSellerSetupRequiredMessage(cause.body);
 }

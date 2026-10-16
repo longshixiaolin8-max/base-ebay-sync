@@ -19,9 +19,14 @@ import {
   computeSyncConfidence,
   detectInventoryAnomaly,
   detectPriceAnomaly,
+  getOrderById,
+  getSyncJobByIdempotencyKey,
   getTenantBillingStatus,
   inventoryMaster,
   isChannelIsolated,
+  markEbayTrackingSynced,
+  markSyncJobCompleted,
+  markSyncJobFailed,
   predictStockoutRisk,
   PREEMPTIVE_STOCKOUT_BUFFER,
   productMaster,
@@ -47,9 +52,12 @@ import { desc, eq, and } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
 
 interface EbaySyncMessage {
-  type: "ebay_publish" | "ebay_update";
+  type: "ebay_publish" | "ebay_update" | "ebay_tracking_upload";
   tenantId: string;
   productId: string;
+  /** Set only for ebay_tracking_upload -- see admin-api's SHIPPED-transition route, the only
+   *  place that ever creates this job type. */
+  orderId?: string;
 }
 
 /**
@@ -267,6 +275,77 @@ async function enforceAnomalyFree(
   );
 }
 
+/**
+ * Processes a retried ebay_tracking_upload job -- reached only once admin-api's own
+ * synchronous first attempt (in its SHIPPED-transition route) has already failed and the
+ * resulting sync_errors row was requeued here through the same retry path every other eBay
+ * job type uses (POST /admin/sync-errors/{id}/retry, or this queue's own DLQ redrive). Never
+ * re-registers a shipment eBay already has a fulfillment record for: SQS's at-least-once
+ * delivery means this exact message can arrive more than once even for a single logical
+ * retry, and orders.ebayTrackingSyncedAt is the one durable signal of "already succeeded."
+ *
+ * The job id itself never travels in the message body (only tenantId/orderId do) -- this
+ * reconstructs the same deterministic idempotencyKey admin-api used to create the job and
+ * looks it up by that, rather than needing every retry payload to carry it.
+ */
+export async function processTrackingUploadRetry(
+  db: ReturnType<typeof getDb>,
+  adapter: EbayAdapter,
+  message: EbaySyncMessage,
+  messageId: string,
+): Promise<{ retryable: boolean }> {
+  const orderId = message.orderId;
+  if (!orderId) {
+    console.error(`ebay-sync-worker: ebay_tracking_upload message ${messageId} is missing orderId`);
+    return { retryable: false };
+  }
+
+  const idempotencyKey = `${message.tenantId}:ebay-tracking-upload:${orderId}`;
+  const job = await getSyncJobByIdempotencyKey(db, message.tenantId, idempotencyKey);
+
+  try {
+    const order = await getOrderById(db, message.tenantId, orderId);
+    if (!order) throw new Error(`orders row not found for id ${orderId}`);
+
+    if (order.ebayTrackingSyncedAt) {
+      if (job) await markSyncJobCompleted(db, job.id);
+      return { retryable: false };
+    }
+    if (!order.ebayLineItemId || !order.trackingNumber || !order.shippingCarrierCode) {
+      throw new Error(`order ${orderId} is missing its eBay line item id, tracking number, or carrier code`);
+    }
+
+    const [accountId] = await listConnectedAccountIds(db, message.tenantId, "ebay");
+    if (!accountId) throw new Error("No eBay account connected — complete eBay OAuth first");
+    const accessToken = await getValidAccessToken(db, message.tenantId, adapter, accountId);
+
+    await adapter.createShippingFulfillment(
+      accessToken,
+      order.externalOrderId,
+      order.ebayLineItemId,
+      order.quantity,
+      order.trackingNumber,
+      order.shippingCarrierCode,
+    );
+    await markEbayTrackingSynced(db, message.tenantId, orderId);
+    if (job) await markSyncJobCompleted(db, job.id);
+    return { retryable: false };
+  } catch (err) {
+    const error = err as Error;
+    if (job) await markSyncJobFailed(db, job.id, job.attempts);
+    await recordSyncError(db, {
+      tenantId: message.tenantId,
+      jobId: job?.id ?? null,
+      channel: "ebay",
+      productId: message.productId ?? null,
+      errorCode: "ebay_tracking_sync_failed",
+      errorMessage: error.message,
+      payload: { messageId },
+    });
+    return { retryable: true };
+  }
+}
+
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
@@ -276,6 +355,13 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as EbaySyncMessage;
+
+    if (message.type === "ebay_tracking_upload") {
+      const { retryable } = await processTrackingUploadRetry(db, adapter, message, record.messageId);
+      if (retryable) failures.push({ itemIdentifier: record.messageId });
+      continue;
+    }
+
     const idempotencyStore = getIdempotencyStore(message.tenantId);
 
     try {

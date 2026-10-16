@@ -263,6 +263,19 @@ export async function markEbayTrackingSynced(db: Database, tenantId: string, ord
     .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)));
 }
 
+/** Used by ebay-sync-worker's ebay_tracking_upload retry path to re-check
+ *  ebayTrackingSyncedAt before calling eBay's Fulfillment API again -- a retried job must
+ *  never re-register the same shipment just because SQS redelivered or an operator re-clicked
+ *  retry after the previous attempt actually already succeeded. */
+export async function getOrderById(db: Database, tenantId: string, orderId: string): Promise<OrderRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(orders)
+    .where(and(eq(orders.tenantId, tenantId), eq(orders.id, orderId)))
+    .limit(1);
+  return row;
+}
+
 function buildProfitInputs(order: OrderRow, usdPerJpy: number): OrderProfitInputs {
   return {
     costJpy: order.costJpy,

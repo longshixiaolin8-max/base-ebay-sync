@@ -45,6 +45,48 @@ describe("createPendingTenant", () => {
     expect(result).toEqual({ id: "new-tenant-id" });
     expect(inserted).toEqual({ name: "Acme Inc", status: "pending_payment" });
   });
+
+  it("persists the originally selected plan when one is given", async () => {
+    let inserted: Record<string, unknown> | undefined;
+    const db = {
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted = v;
+          return { returning: async () => [{ id: "new-tenant-id" }] };
+        },
+      }),
+    } as unknown as Database;
+
+    await createPendingTenant(db, "Acme Inc", { id: "tenant-1", contactEmail: "a@example.com", plan: "pro" });
+
+    // Without this, a tenant whose initial Stripe Checkout Session creation fails right after
+    // signup has no record anywhere of which tier they picked (see createPendingTenant's own
+    // doc comment) -- resuming payment through POST /admin/billing/checkout-session would
+    // otherwise have no better fallback than hardcoding "standard".
+    expect(inserted).toEqual({
+      id: "tenant-1",
+      name: "Acme Inc",
+      status: "pending_payment",
+      contactEmail: "a@example.com",
+      plan: "pro",
+    });
+  });
+
+  it("omits the plan field entirely when none is given, leaving the schema's own default", async () => {
+    let inserted: Record<string, unknown> | undefined;
+    const db = {
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted = v;
+          return { returning: async () => [{ id: "new-tenant-id" }] };
+        },
+      }),
+    } as unknown as Database;
+
+    await createPendingTenant(db, "Acme Inc", { id: "tenant-1" });
+
+    expect(inserted).not.toHaveProperty("plan");
+  });
 });
 
 describe("getTenantBillingStatus", () => {

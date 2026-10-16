@@ -27,7 +27,7 @@ interface BillingStatusRow {
 export async function createPendingTenant(
   db: Database,
   name: string,
-  options?: { id?: string; contactEmail?: string },
+  options?: { id?: string; contactEmail?: string; plan?: string },
 ): Promise<{ id: string }> {
   const [row] = await db
     .insert(tenants)
@@ -36,6 +36,14 @@ export async function createPendingTenant(
       name,
       status: "pending_payment",
       ...(options?.contactEmail ? { contactEmail: options.contactEmail } : {}),
+      // Multi-tier commercial launch: persists the plan the signer actually chose (Starter/
+      // Pro/etc, validated by the caller before this runs), not just whatever price the
+      // first Stripe Checkout Session happened to use. Without this, a tenant whose initial
+      // checkout-session creation fails after account creation (see signup's confirmSignup)
+      // has nothing recorded anywhere about which tier they picked -- resuming payment later
+      // through POST /admin/billing/checkout-session would otherwise have no better fallback
+      // than hardcoding "standard", silently downgrading what they actually selected.
+      ...(options?.plan ? { plan: options.plan } : {}),
     })
     .returning({ id: tenants.id });
   return row!;

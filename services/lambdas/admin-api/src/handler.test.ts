@@ -68,6 +68,9 @@ const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
 const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
 const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
 const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
+const insertSyncJobMock = vi.fn().mockResolvedValue({ id: "job-1", attempts: 0 });
+const markSyncJobCompletedMock = vi.fn().mockResolvedValue(undefined);
+const markSyncJobFailedMock = vi.fn().mockResolvedValue(undefined);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
@@ -127,6 +130,9 @@ vi.mock("@ai-ec/db", () => ({
   listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
   getTenantMarginHistory: (...args: unknown[]) => getTenantMarginHistoryMock(...args),
   markEbayTrackingSynced: (...args: unknown[]) => markEbayTrackingSyncedMock(...args),
+  insertSyncJob: (...args: unknown[]) => insertSyncJobMock(...args),
+  markSyncJobCompleted: (...args: unknown[]) => markSyncJobCompletedMock(...args),
+  markSyncJobFailed: (...args: unknown[]) => markSyncJobFailedMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
   DEFAULT_NOTIFICATION_PREFERENCES: {
@@ -352,6 +358,9 @@ describe("admin-api handler", () => {
     listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
     getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
     markEbayTrackingSyncedMock.mockClear();
+    insertSyncJobMock.mockClear().mockResolvedValue({ id: "job-1", attempts: 0 });
+    markSyncJobCompletedMock.mockClear();
+    markSyncJobFailedMock.mockClear();
     recordSyncErrorMock.mockClear();
     createShippingFulfillmentMock.mockClear().mockResolvedValue(undefined);
     sendEmailMock.mockClear().mockResolvedValue(undefined);
@@ -2027,10 +2036,23 @@ describe("admin-api handler", () => {
       );
       expect(createShippingFulfillmentMock).toHaveBeenCalledWith("token", "ext-order-1", "li-1", 2, "1234567890", "Japan Post");
       expect(markEbayTrackingSyncedMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "o1");
+      // Created up front, before the eBay call, so a failure always has a job to record its
+      // sync_errors row against (see the next test) -- and marked completed immediately once
+      // this first, synchronous attempt itself succeeds, so it never shows as a stray
+      // "pending" outbox job for an order that's already fully synced.
+      expect(insertSyncJobMock).toHaveBeenCalledWith(fakeDb, {
+        tenantId: TENANT_A,
+        type: "ebay_tracking_upload",
+        idempotencyKey: `${TENANT_A}:ebay-tracking-upload:o1`,
+        productId: "product-1",
+        payload: { type: "ebay_tracking_upload", tenantId: TENANT_A, orderId: "o1" },
+      });
+      expect(markSyncJobCompletedMock).toHaveBeenCalledWith(fakeDb, "job-1");
+      expect(markSyncJobFailedMock).not.toHaveBeenCalled();
       expect(recordSyncErrorMock).not.toHaveBeenCalled();
     });
 
-    it("POST /admin/orders/{id}/status records a sync_error (but still succeeds) when the eBay push itself fails", async () => {
+    it("POST /admin/orders/{id}/status records a sync_error with a retryable jobId (but still succeeds) when the eBay push itself fails", async () => {
       transitionOrderStatusMock.mockResolvedValueOnce({
         id: "o1",
         status: "SHIPPED",
@@ -2050,11 +2072,43 @@ describe("admin-api handler", () => {
 
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("failed");
+      // jobId is the whole point of this fix: without it, POST /admin/sync-errors/{id}/retry
+      // (which requires one) could never pick a failed tracking upload back up at all.
       expect(recordSyncErrorMock).toHaveBeenCalledWith(
         fakeDb,
-        expect.objectContaining({ tenantId: TENANT_A, channel: "ebay", errorCode: "ebay_tracking_sync_failed" }),
+        expect.objectContaining({ tenantId: TENANT_A, jobId: "job-1", channel: "ebay", errorCode: "ebay_tracking_sync_failed" }),
       );
+      expect(markSyncJobFailedMock).toHaveBeenCalledWith(fakeDb, "job-1", 0);
+      expect(markSyncJobCompletedMock).not.toHaveBeenCalled();
       expect(markEbayTrackingSyncedMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status never re-registers a shipment with eBay a second time once it's already synced", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 1,
+        productId: "product-1",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
+        // Set by an earlier attempt -- e.g. a prior SHIPPED transition request that actually
+        // succeeded against eBay. A second request reaching this same code path (a retried
+        // client call, a duplicate submit) must never call createShippingFulfillment again,
+        // which would register a brand new fulfillment record rather than updating one.
+        ebayTrackingSyncedAt: new Date(),
+      });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("synced");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+      expect(insertSyncJobMock).not.toHaveBeenCalled();
     });
 
     it("POST /admin/orders/{id}/status skips the eBay push for a BASE order, even when marked SHIPPED", async () => {
@@ -2983,6 +3037,21 @@ describe("admin-api handler", () => {
         expect.objectContaining({ line_items: [{ price: "price_standard", quantity: 1 }] }),
       );
       expect(JSON.parse(res.body!)).toEqual({ url: "https://checkout.stripe.example/session" });
+    });
+
+    it("POST /admin/billing/checkout-session falls back to the tenant's own stored plan, not hardcoded standard, when none is specified", async () => {
+      // Simulates a tenant resuming payment after their original signup-time Stripe Checkout
+      // Session creation failed (see signup's confirmSignup) -- the frontend's resume action
+      // sends no plan body at all, so this must recover the originally selected "pro" tier
+      // from tenants.plan (persisted at signup) rather than silently defaulting to standard.
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "pro", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session"));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
     });
 
     it("POST /admin/billing/checkout-session uses the requested plan's own price when one is specified", async () => {

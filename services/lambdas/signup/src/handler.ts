@@ -349,7 +349,7 @@ async function confirmSignup(body: SignupRequestBody): Promise<JsonResult> {
   }
 
   try {
-    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email });
+    await createPendingTenant(db, companyName, { id: tenantId, contactEmail: email, plan });
     await recordAuditLog(db, {
       tenantId,
       actor: `signup:${email}`,

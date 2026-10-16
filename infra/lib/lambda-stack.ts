@@ -352,8 +352,16 @@ export class LambdaStack extends cdk.Stack {
         AI_GENERATE_DLQ_ARN: props.dlqs.aiGenerate.queueArn,
         EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
         EBAY_SYNC_DLQ_ARN: props.dlqs.ebaySync.queueArn,
-        // Explicitly disabled: seller-account setup failures must not recycle
-        // through SQS indefinitely. Manual redrive is available after repair.
+        EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
+        // Still disabled by default -- flipping this is an operator decision this stack
+        // deliberately leaves alone, not something this commit changes. What *does* change
+        // here: the eBay DLQ is no longer redriven wholesale (StartMessageMoveTask moves
+        // every message back unconditionally). It now goes through a selective, per-message
+        // redrive (see dlq-redrive's own redriveEbaySyncDlq) that re-checks each message's
+        // sync_errors history and skips anything still classified as a seller-privilege
+        // block -- safe to enable once an operator wants eBay's queue to recover from a
+        // transient outage the same way AI/inventory already do, without resurrecting
+        // messages that can never succeed.
         EBAY_SYNC_AUTO_REDRIVE_ENABLED: "false",
         INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
         INVENTORY_SYNC_DLQ_ARN: props.dlqs.inventorySync.queueArn,

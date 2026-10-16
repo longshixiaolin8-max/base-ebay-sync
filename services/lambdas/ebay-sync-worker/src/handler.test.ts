@@ -47,6 +47,12 @@ const getTenantBillingStatusMock = vi.fn().mockResolvedValue({ plan: "standard" 
 const tryReserveMonthlyEbaySyncMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyEbaySyncReservationMock = vi.fn().mockResolvedValue(undefined);
 
+const getOrderByIdMock = vi.fn();
+const getSyncJobByIdempotencyKeyMock = vi.fn().mockResolvedValue(undefined);
+const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
+const markSyncJobCompletedMock = vi.fn().mockResolvedValue(undefined);
+const markSyncJobFailedMock = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   aiListingDraft: {},
@@ -64,19 +70,30 @@ vi.mock("@ai-ec/db", () => ({
   getTenantBillingStatus: (...args: unknown[]) => getTenantBillingStatusMock(...args),
   tryReserveMonthlyEbaySync: (...args: unknown[]) => tryReserveMonthlyEbaySyncMock(...args),
   releaseMonthlyEbaySyncReservation: (...args: unknown[]) => releaseMonthlyEbaySyncReservationMock(...args),
+  getOrderById: (...args: unknown[]) => getOrderByIdMock(...args),
+  getSyncJobByIdempotencyKey: (...args: unknown[]) => getSyncJobByIdempotencyKeyMock(...args),
+  markEbayTrackingSynced: (...args: unknown[]) => markEbayTrackingSyncedMock(...args),
+  markSyncJobCompleted: (...args: unknown[]) => markSyncJobCompletedMock(...args),
+  markSyncJobFailed: (...args: unknown[]) => markSyncJobFailedMock(...args),
 }));
 
 const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const enqueueMock = vi.fn().mockResolvedValue(undefined);
 const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
+const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
+const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   getQueueUrls: () => ({ aiGenerate: "ai-generate-url", ebaySync: "ebay-sync-url", inventorySync: "inv-url" }),
   fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
+  listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
+  getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
 }));
 
-const { publish, update, buildEbayUpdateIdempotencyKey } = await import("./handler.js");
+const { publish, update, buildEbayUpdateIdempotencyKey, processTrackingUploadRetry } = await import("./handler.js");
 
 const TENANT_ID = "tenant-a";
 
@@ -902,5 +919,105 @@ describe("update", () => {
     ).rejects.toThrow(/Refusing to update product p1 on eBay: condition is empty/);
 
     expect(updateListing).not.toHaveBeenCalled();
+  });
+});
+
+describe("processTrackingUploadRetry", () => {
+  const order = {
+    id: "o1",
+    externalOrderId: "ext-order-1",
+    ebayLineItemId: "li-1",
+    quantity: 2,
+    trackingNumber: "1234567890",
+    shippingCarrierCode: "Japan Post",
+    ebayTrackingSyncedAt: null,
+  };
+  const message = { type: "ebay_tracking_upload" as const, tenantId: TENANT_ID, productId: "p1", orderId: "o1" };
+  const idempotencyKey = `${TENANT_ID}:ebay-tracking-upload:o1`;
+
+  function fakeAdapter(overrides: Partial<Record<string, unknown>> = {}) {
+    return { createShippingFulfillment: vi.fn().mockResolvedValue(undefined), ...overrides } as unknown as EbayAdapter;
+  }
+
+  beforeEach(() => {
+    getOrderByIdMock.mockReset();
+    getSyncJobByIdempotencyKeyMock.mockReset().mockResolvedValue(undefined);
+    markEbayTrackingSyncedMock.mockClear();
+    markSyncJobCompletedMock.mockClear();
+    markSyncJobFailedMock.mockClear();
+    listConnectedAccountIdsMock.mockClear().mockResolvedValue(["acct-1"]);
+    getValidAccessTokenMock.mockClear().mockResolvedValue("token");
+    recordSyncErrorMock.mockClear();
+  });
+
+  it("succeeds and marks both the order and its outbox job as synced", async () => {
+    getOrderByIdMock.mockResolvedValue(order);
+    getSyncJobByIdempotencyKeyMock.mockResolvedValue({ id: "job-1", attempts: 0 });
+    const createShippingFulfillment = vi.fn().mockResolvedValue(undefined);
+    const adapter = fakeAdapter({ createShippingFulfillment });
+
+    const result = await processTrackingUploadRetry({} as never, adapter, message, "msg-1");
+
+    expect(result).toEqual({ retryable: false });
+    expect(createShippingFulfillment).toHaveBeenCalledWith("token", "ext-order-1", "li-1", 2, "1234567890", "Japan Post");
+    expect(markEbayTrackingSyncedMock).toHaveBeenCalledWith({}, TENANT_ID, "o1");
+    expect(markSyncJobCompletedMock).toHaveBeenCalledWith({}, "job-1");
+    expect(getSyncJobByIdempotencyKeyMock).toHaveBeenCalledWith({}, TENANT_ID, idempotencyKey);
+  });
+
+  it("never re-registers a shipment that's already synced -- not even a second eBay call", async () => {
+    getOrderByIdMock.mockResolvedValue({ ...order, ebayTrackingSyncedAt: new Date() });
+    getSyncJobByIdempotencyKeyMock.mockResolvedValue({ id: "job-1", attempts: 0 });
+    const createShippingFulfillment = vi.fn();
+    const adapter = fakeAdapter({ createShippingFulfillment });
+
+    const result = await processTrackingUploadRetry({} as never, adapter, message, "msg-1");
+
+    expect(result).toEqual({ retryable: false });
+    expect(createShippingFulfillment).not.toHaveBeenCalled();
+    expect(markSyncJobCompletedMock).toHaveBeenCalledWith({}, "job-1");
+  });
+
+  it("records a retryable failure with the job's id when the eBay call itself fails", async () => {
+    getOrderByIdMock.mockResolvedValue(order);
+    getSyncJobByIdempotencyKeyMock.mockResolvedValue({ id: "job-1", attempts: 1 });
+    const adapter = fakeAdapter({ createShippingFulfillment: vi.fn().mockRejectedValue(new Error("eBay rejected the request")) });
+
+    const result = await processTrackingUploadRetry({} as never, adapter, message, "msg-1");
+
+    expect(result).toEqual({ retryable: true });
+    expect(markSyncJobFailedMock).toHaveBeenCalledWith({}, "job-1", 1);
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ tenantId: TENANT_ID, jobId: "job-1", channel: "ebay", errorCode: "ebay_tracking_sync_failed" }),
+    );
+    expect(markSyncJobCompletedMock).not.toHaveBeenCalled();
+  });
+
+  it("is non-retryable (and records no jobId) when there's no matching sync_jobs row to update", async () => {
+    getOrderByIdMock.mockResolvedValue(order);
+    getSyncJobByIdempotencyKeyMock.mockResolvedValue(undefined);
+    const adapter = fakeAdapter({ createShippingFulfillment: vi.fn().mockRejectedValue(new Error("boom")) });
+
+    await processTrackingUploadRetry({} as never, adapter, message, "msg-1");
+
+    expect(markSyncJobFailedMock).not.toHaveBeenCalled();
+    expect(recordSyncErrorMock).toHaveBeenCalledWith({}, expect.objectContaining({ jobId: null }));
+  });
+
+  it("is non-retryable when the order itself no longer exists", async () => {
+    getOrderByIdMock.mockResolvedValue(undefined);
+    const adapter = fakeAdapter();
+
+    const result = await processTrackingUploadRetry({} as never, adapter, message, "msg-1");
+
+    expect(result).toEqual({ retryable: true });
+    expect(adapter.createShippingFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("is non-retryable when the message carries no orderId at all", async () => {
+    const result = await processTrackingUploadRetry({} as never, fakeAdapter(), { ...message, orderId: undefined }, "msg-1");
+    expect(result).toEqual({ retryable: false });
+    expect(getOrderByIdMock).not.toHaveBeenCalled();
   });
 });

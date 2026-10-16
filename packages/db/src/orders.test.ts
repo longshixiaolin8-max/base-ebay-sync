@@ -4,6 +4,7 @@ import {
   DdpConfirmationRequiredError,
   finalizeOrderProfit,
   getLiveOrderProfit,
+  getOrderById,
   getTenantMarginHistory,
   InvalidOrderTransitionError,
   listOrders,
@@ -378,5 +379,18 @@ describe("getTenantMarginHistory", () => {
     );
     expect(result.sampleSize).toBe(1);
     expect(result.avgMarkupRatio).toBeCloseTo(0.25, 5);
+  });
+});
+
+describe("getOrderById", () => {
+  it("returns the tenant-scoped order row", async () => {
+    const row = baseOrder({ id: "order-1", tenantId: "tenant-a" });
+    const db = { select: () => ({ from: () => ({ where: () => ({ limit: async () => [row] }) }) }) } as unknown as Database;
+    await expect(getOrderById(db, "tenant-a", "order-1")).resolves.toEqual(row);
+  });
+
+  it("returns undefined when no order matches", async () => {
+    const db = { select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) } as unknown as Database;
+    await expect(getOrderById(db, "tenant-a", "missing")).resolves.toBeUndefined();
   });
 });

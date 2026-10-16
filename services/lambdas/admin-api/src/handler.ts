@@ -49,11 +49,14 @@ import {
   getTenantBillingStatus,
   getTenantMarginHistory,
   InvalidOrderTransitionError,
+  insertSyncJob,
   inventoryMaster,
   listOrdersForProduct,
   listTenantsOpsSummary,
   markEbayTrackingSynced,
   markSnsStatus,
+  markSyncJobCompleted,
+  markSyncJobFailed,
   oauthConnections,
   orders,
   OrderStatusConflictError,
@@ -310,13 +313,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       const stripe = createStripeClient(creds);
 
-      // Multi-tier commercial launch: an optional plan choice, defaulting to "standard" so
-      // this stays backward-compatible with a frontend that doesn't pass one yet. Only a
-      // real PLAN_LIMITS entry is accepted -- an unrecognized name would otherwise resolve
-      // (via resolvePlanPriceIds's own fallback) to "standard"'s price while the tenant
-      // believes they're buying something else, a real-money mismatch worth rejecting
-      // outright rather than silently defaulting.
-      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan ?? "standard";
+      // Multi-tier commercial launch: an optional plan choice. Falls back to this tenant's
+      // own stored plan (tenants.plan -- set at signup time from the originally selected
+      // tier, see signup's confirmSignup/createPendingTenant) rather than hardcoding
+      // "standard", so a tenant resuming payment here after their initial Stripe Checkout
+      // Session creation failed (and whose frontend call sends no plan body at all) gets
+      // checked out for the tier they actually picked, not silently downgraded to Standard.
+      // Only a real PLAN_LIMITS entry is ever accepted -- an unrecognized name would
+      // otherwise resolve (via resolvePlanPriceIds's own fallback) to "standard"'s price
+      // while the tenant believes they're buying something else, a real-money mismatch
+      // worth rejecting outright rather than silently defaulting.
+      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan ?? billing.plan;
       if (!(requestedPlan in PLAN_LIMITS)) return json(400, { error: "unknown_plan", plan: requestedPlan });
       const priceId = resolvePlanPriceIds(creds)[requestedPlan];
       if (!priceId) return json(409, { error: "plan_not_available", plan: requestedPlan });
@@ -2784,7 +2791,14 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         // eBay's own Fulfillment API push: best-effort, never blocks the status transition
         // itself (the merchant's own record of "this shipped" is the important fact; the
         // eBay sync is a secondary, retryable concern surfaced via sync_errors on failure,
-        // same pattern as every other outbound eBay call in this codebase).
+        // same pattern as every other outbound eBay call in this codebase). Unlike the other
+        // outbound eBay calls though, a failure here used to have no jobId to attach to its
+        // sync_errors row, which meant POST /admin/sync-errors/{id}/retry (it requires one)
+        // could never pick it back up -- a tracking number that failed to upload once could
+        // never be retried through the app at all. Creating the outbox job up front (see
+        // insertSyncJob) fixes that: a failure below always has a job to record against, and
+        // ebay-sync-worker's own ebay_tracking_upload branch is what the existing retry route
+        // re-enqueues it to.
         let ebayTrackingSyncStatus: "synced" | "skipped" | "failed" = "skipped";
         if (
           parsedStatus.data === "SHIPPED" &&
@@ -2793,31 +2807,48 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           updated.trackingNumber &&
           updated.shippingCarrierCode
         ) {
-          try {
-            const creds = await getAppCredentials<EbayAppCredentials>("ebay");
-            const adapter = createEbayAdapter(creds);
-            const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
-            if (!accountId) throw new Error("no eBay account connected");
-            const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
-            await adapter.createShippingFulfillment(
-              accessToken,
-              updated.externalOrderId,
-              updated.ebayLineItemId,
-              updated.quantity,
-              updated.trackingNumber,
-              updated.shippingCarrierCode,
-            );
-            await markEbayTrackingSynced(db, tenantId, id);
+          if (updated.ebayTrackingSyncedAt) {
+            // Already pushed by an earlier attempt on this same order -- never call eBay's
+            // Fulfillment API a second time for one shipment, which registers a new
+            // fulfillment record rather than updating the existing one.
             ebayTrackingSyncStatus = "synced";
-          } catch (err) {
-            ebayTrackingSyncStatus = "failed";
-            await recordSyncError(db, {
+          } else {
+            const job = await insertSyncJob(db, {
               tenantId,
-              channel: "ebay",
+              type: "ebay_tracking_upload",
+              idempotencyKey: `${tenantId}:ebay-tracking-upload:${id}`,
               productId: updated.productId,
-              errorCode: "ebay_tracking_sync_failed",
-              errorMessage: (err as Error).message,
+              payload: { type: "ebay_tracking_upload", tenantId, orderId: id },
             });
+            try {
+              const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+              const adapter = createEbayAdapter(creds);
+              const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+              if (!accountId) throw new Error("no eBay account connected");
+              const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+              await adapter.createShippingFulfillment(
+                accessToken,
+                updated.externalOrderId,
+                updated.ebayLineItemId,
+                updated.quantity,
+                updated.trackingNumber,
+                updated.shippingCarrierCode,
+              );
+              await markEbayTrackingSynced(db, tenantId, id);
+              await markSyncJobCompleted(db, job.id);
+              ebayTrackingSyncStatus = "synced";
+            } catch (err) {
+              ebayTrackingSyncStatus = "failed";
+              await markSyncJobFailed(db, job.id, job.attempts);
+              await recordSyncError(db, {
+                tenantId,
+                jobId: job.id,
+                channel: "ebay",
+                productId: updated.productId,
+                errorCode: "ebay_tracking_sync_failed",
+                errorMessage: (err as Error).message,
+              });
+            }
           }
         }
 
