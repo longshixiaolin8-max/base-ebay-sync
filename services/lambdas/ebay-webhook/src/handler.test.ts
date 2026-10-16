@@ -242,9 +242,27 @@ describe("ebay-webhook handler", () => {
       expect.objectContaining({
         tenantId: "tenant-a",
         action: "ebay_account_deletion_purge",
-        entityId: "u-1",
+        entityId: "ebay_account_deletion",
       }),
     );
+  });
+
+  it("does not retain deleted account identifiers or secret ARNs in durable audit entries", async () => {
+    const sensitiveId = "ebay-private-user-identifier";
+    const sensitiveArn = "arn:aws:secretsmanager:private-credential";
+    deleteOAuthConnectionsByExternalAccountMock.mockResolvedValue([{ tenantId: "tenant-a", secretArn: sensitiveArn }]);
+    const res = await handler(makeEvent({
+      requestContext: { http: { method: "POST" } } as never,
+      headers: { "x-ebay-signature": "sig-header" },
+      body: JSON.stringify({
+        metadata: { topic: "MARKETPLACE_ACCOUNT_DELETION" },
+        notification: { data: { userId: sensitiveId } },
+      }),
+    }));
+    expect((res as { statusCode: number }).statusCode).toBe(204);
+    const durable = JSON.stringify(recordAuditLogMock.mock.calls);
+    expect(durable).not.toContain(sensitiveId);
+    expect(durable).not.toContain(sensitiveArn);
   });
 
   it("purges by userId even when eBay omits username entirely (eBay's own Sept-2025 change for some regions)", async () => {
@@ -415,8 +433,8 @@ describe("ebay-webhook handler", () => {
     // (channel, externalAccountId) -- this only asserts the handler faithfully logs exactly
     // what it reports, once per affected tenant, never inventing or merging entries.
     expect(recordAuditLogMock).toHaveBeenCalledTimes(2);
-    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-a", entityId: "u-3" }));
-    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-b", entityId: "u-3" }));
+    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-a", entityId: "ebay_account_deletion" }));
+    expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ tenantId: "tenant-b", entityId: "ebay_account_deletion" }));
   });
 
   it("重複notification idempotent: redelivering the same MARKETPLACE_ACCOUNT_DELETION notification is a safe no-op once nothing is left to purge", async () => {
@@ -460,8 +478,8 @@ describe("ebay-webhook handler", () => {
       expect.objectContaining({
         channel: "ebay",
         errorCode: "ebay_account_deletion_failed",
-        errorMessage: "Secrets Manager: AccessDeniedException",
-        payload: { userId: "u-5" },
+        errorMessage: "eBay account credential purge failed; retry delivery",
+        payload: {},
       }),
     );
   });

@@ -108,8 +108,11 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
         actor: "system:ebay-webhook",
         action: "ebay_account_deletion_purge",
         entityType: "ebay_account",
-        entityId: userId,
-        after: { secretArn: row.secretArn },
+        // Account deletion must not be undermined by retaining the eBay
+        // user's personal identifier or a sensitive credential ARN in
+        // our own long-lived audit records.
+        entityId: "ebay_account_deletion",
+        after: { credentialDeleted: true },
       });
     }
   } catch (err) {
@@ -122,8 +125,11 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
       channel: "ebay",
       productId: null,
       errorCode: "ebay_account_deletion_failed",
-      errorMessage: (err as Error).message,
-      payload: { userId },
+      // A retried eBay notification supplies userId again. Avoid storing
+      // identity and provider exception details in the durable sync-error
+      // record, where they could remain after a later successful purge.
+      errorMessage: "eBay account credential purge failed; retry delivery",
+      payload: {},
     });
     return { statusCode: 500 };
   }
