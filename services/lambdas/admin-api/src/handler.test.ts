@@ -1453,7 +1453,7 @@ describe("admin-api handler", () => {
     expect(body.marginBaselineSource).toBe("tenant_history");
     // baseline 0.2 - 0.03 (stale_30 discount) = 0.17, always below the platform default (0.3)
     // the un-personalized fallback would have used.
-    expect(getTenantMarginHistoryMock).toHaveBeenCalledWith(fakeDb, TENANT_A);
+    expect(getTenantMarginHistoryMock).toHaveBeenCalledWith(fakeDb, TENANT_A, 0.0067);
   });
 
   it("GET /admin/products/{id}/dynamic-price respects a tenant's own explicitly configured default margin over the learned one", async () => {

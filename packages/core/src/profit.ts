@@ -43,7 +43,11 @@ export interface OrderProfitResult {
   profitMarginBasisPoints: number | null;
 }
 
-function jpyToUsdCents(jpy: number, usdPerJpy: number): number {
+/** Shared by computeOrderProfit and any other caller that needs the same JPY->USD-cents
+ *  conversion this module's own cost accounting uses (see getTenantMarginHistory in
+ *  packages/db/src/orders.ts, which must reconstruct an order's historical acquisition-cost-
+ *  in-USD the same way this function derives it, not approximate it differently). */
+export function jpyToUsdCents(jpy: number, usdPerJpy: number): number {
   return Math.round(jpy * usdPerJpy * 100);
 }
 

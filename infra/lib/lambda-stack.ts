@@ -497,6 +497,12 @@ export class LambdaStack extends cdk.Stack {
         // see PlatformConfig.operatorEmail's own doc comment. Omitted entirely (rather than
         // set to "") when unconfigured, so requireOperator's undefined-check fails closed.
         ...(props.config.operatorEmail ? { OPERATOR_EMAIL: props.config.operatorEmail } : {}),
+        // POST /admin/orders/{id}/status's shipping-notice email to a BASE buyer (see
+        // sendEmail() in services/lambdas/shared/src/email.ts) needs this the same way
+        // SignupHandler/StripeWebhook already do -- previously missing here entirely, so
+        // every such send threw (caught, logged as a sync_error) instead of actually
+        // reaching the buyer, even on a fully SES-configured deployment.
+        ...(props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {}),
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
@@ -545,6 +551,15 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.base.grantRead(this.adminApiFn);
     // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
     props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
+    // Needed for the BASE shipping-notice email sent from POST /admin/orders/{id}/status --
+    // same identity-scoped grant as SignupHandler/StripeWebhook above (SES v2 has no
+    // per-secret-style resource to scope down to further).
+    this.adminApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+      }),
+    );
     // Needed for the commercial-features round's AI endpoints (SNS script generation,
     // stale-product suggestions), which call Bedrock directly the same way
     // ai-generate-worker does.

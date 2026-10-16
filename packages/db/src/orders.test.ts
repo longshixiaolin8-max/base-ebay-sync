@@ -307,7 +307,11 @@ describe("list helpers", () => {
 });
 
 describe("getTenantMarginHistory", () => {
-  function dbWithRows(rows: Array<{ netProfit: number | null; revenue: number | null }>) {
+  // jpyToUsdCents(jpy, usdPerJpy) = round(jpy * usdPerJpy * 100); at 0.01 that's just jpy
+  // itself, so these fixtures' costJpy values double directly as the expected costUsdCents.
+  const USD_PER_JPY = 0.01;
+
+  function dbWithRows(rows: Array<{ netProfit: number | null; costJpy: number | null; quantity: number }>) {
     return {
       select: () => ({
         from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => rows }) }) }),
@@ -316,35 +320,61 @@ describe("getTenantMarginHistory", () => {
   }
 
   it("returns null/0 when there's no finalized eBay order history yet", async () => {
-    const result = await getTenantMarginHistory(dbWithRows([]), "tenant-a");
+    const result = await getTenantMarginHistory(dbWithRows([]), "tenant-a", USD_PER_JPY);
     expect(result).toEqual({ avgMarkupRatio: null, sampleSize: 0 });
   });
 
-  it("reconstructs each order's cost as revenue - netProfit and averages netProfit/cost (a markup ratio, not netProfit/revenue)", async () => {
-    // Row 1: cost = 10000-2000 = 8000, markup = 2000/8000 = 0.25
-    // Row 2: cost = 9000-3000 = 6000, markup = 3000/6000 = 0.5
-    // Average markup = 0.375 -- notably NOT 0.277..., which is what netProfit/revenue would
-    // have given (the exact unit mismatch this function used to have).
+  it("computes markup from the order's own acquisition cost (costJpy * quantity), not revenue - netProfit", async () => {
+    // Row 1: cost = 8000 (costJpy=8000, qty=1), markup = 2000/8000 = 0.25
+    // Row 2: cost = 6000 (costJpy=6000, qty=1), markup = 3000/6000 = 0.5
+    // Average markup = 0.375.
     const result = await getTenantMarginHistory(
       dbWithRows([
-        { netProfit: 2000, revenue: 10000 },
-        { netProfit: 3000, revenue: 9000 },
+        { netProfit: 2000, costJpy: 8000, quantity: 1 },
+        { netProfit: 3000, costJpy: 6000, quantity: 1 },
       ]),
       "tenant-a",
+      USD_PER_JPY,
     );
     expect(result.sampleSize).toBe(2);
     expect(result.avgMarkupRatio).toBeCloseTo(0.375, 5);
   });
 
-  it("skips rows with no usable revenue/profit data, or whose reconstructed cost is zero or negative", async () => {
+  it("scales acquisition cost by quantity (a line-item sale of several units shares one per-unit costJpy)", async () => {
+    // costJpy=4000 per unit * quantity=2 = 8000 total cost; markup = 2000/8000 = 0.25 --
+    // same ratio as a single $8000-cost unit, not corrupted by the per-unit vs. total mismatch
+    // computeOrderProfit itself guards against (see profit.ts's own costJpy*quantity scaling).
+    const result = await getTenantMarginHistory(
+      dbWithRows([{ netProfit: 2000, costJpy: 4000, quantity: 2 }]),
+      "tenant-a",
+      USD_PER_JPY,
+    );
+    expect(result.avgMarkupRatio).toBeCloseTo(0.25, 5);
+  });
+
+  it("ignores shipping/fees/ad-spend/returns entirely -- markup is never diluted by total expenses", async () => {
+    // A high-netProfit, low-acquisition-cost order (as if $8000 of the order's total expenses
+    // were shipping/fees/ads/returns, not acquisition cost) must still report markup against
+    // just the $2000 acquisition cost -- 2000/2000 = 1.0, not artificially lowered by folding
+    // those other expenses into the denominator the way `revenue - netProfit` used to.
+    const result = await getTenantMarginHistory(
+      dbWithRows([{ netProfit: 2000, costJpy: 2000, quantity: 1 }]),
+      "tenant-a",
+      USD_PER_JPY,
+    );
+    expect(result.avgMarkupRatio).toBeCloseTo(1.0, 5);
+  });
+
+  it("skips rows with no usable cost/profit data, or whose cost is zero or negative", async () => {
     const result = await getTenantMarginHistory(
       dbWithRows([
-        { netProfit: 2000, revenue: 10000 }, // cost 8000, markup 0.25 -- the only valid row
-        { netProfit: null, revenue: 10000 },
-        { netProfit: 500, revenue: null },
-        { netProfit: 500, revenue: 400 }, // cost = 400-500 = -100, an impossible/corrupt row
+        { netProfit: 2000, costJpy: 8000, quantity: 1 }, // markup 0.25 -- the only valid row
+        { netProfit: null, costJpy: 10000, quantity: 1 },
+        { netProfit: 500, costJpy: null, quantity: 1 },
+        { netProfit: 500, costJpy: 0, quantity: 1 }, // cost 0 -- an impossible/corrupt row
       ]),
       "tenant-a",
+      USD_PER_JPY,
     );
     expect(result.sampleSize).toBe(1);
     expect(result.avgMarkupRatio).toBeCloseTo(0.25, 5);

@@ -149,9 +149,10 @@ async function resolveLearnedMarginRatio(
   db: Database,
   tenantId: string,
   product: { id: string; createdAt: Date },
+  usdPerJpy: number,
 ): Promise<{ targetMarginRatio: number; baselineSource: string; adjustmentReason: string }> {
   const [marginHistory, stockoutRisk] = await Promise.all([
-    getTenantMarginHistory(db, tenantId),
+    getTenantMarginHistory(db, tenantId, usdPerJpy),
     predictStockoutRisk(db, tenantId, product.id),
   ]);
   const daysListed = daysBetween(product.createdAt, new Date());
@@ -1847,7 +1848,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       } else if (tenantDefaults.hasExplicitTenantDefault) {
         targetMarginRatio = tenantDefaults.targetMarginRatio;
       } else {
-        const learned = await resolveLearnedMarginRatio(db, tenantId, product);
+        const learned = await resolveLearnedMarginRatio(db, tenantId, product, fx.fxRateUsdPerJpy);
         targetMarginRatio = learned.targetMarginRatio;
         marginBaselineSource = learned.baselineSource;
         marginAdjustmentReason = learned.adjustmentReason;
@@ -1905,7 +1906,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           ? product.targetMarginBasisPoints / 10000
           : tenantDefaults.hasExplicitTenantDefault
             ? tenantDefaults.targetMarginRatio
-            : (await resolveLearnedMarginRatio(db, tenantId, product)).targetMarginRatio;
+            : (await resolveLearnedMarginRatio(db, tenantId, product, fx.fxRateUsdPerJpy)).targetMarginRatio;
       const price = computeDynamicPrice({
         costJpy: product.costJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
@@ -2101,6 +2102,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
             channel: r.order.channel,
             shipToCountryCode: r.order.shipToCountryCode,
             salePriceUsdCents: r.order.salePriceUsdCents,
+            quantity: r.order.quantity,
             placedAt: r.order.placedAt,
           }),
           profit: {

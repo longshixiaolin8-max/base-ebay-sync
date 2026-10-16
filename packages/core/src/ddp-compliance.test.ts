@@ -10,6 +10,7 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: "US",
       salePriceUsdCents: 15_000,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("required");
@@ -20,6 +21,7 @@ describe("assessDdpRequirement", () => {
       channel: "base",
       shipToCountryCode: "US",
       salePriceUsdCents: 15_000,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("not_required");
@@ -30,6 +32,7 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: "US",
       salePriceUsdCents: 15_000,
+      quantity: 1,
       placedAt: BEFORE_EFFECTIVE,
     });
     expect(result.status).toBe("not_required");
@@ -40,6 +43,7 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: "GB",
       salePriceUsdCents: 15_000,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("not_required");
@@ -50,6 +54,7 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: "US",
       salePriceUsdCents: 250_000,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("not_required");
@@ -60,6 +65,7 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: null,
       salePriceUsdCents: 15_000,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("unknown");
@@ -70,8 +76,35 @@ describe("assessDdpRequirement", () => {
       channel: "ebay",
       shipToCountryCode: "US",
       salePriceUsdCents: null,
+      quantity: 1,
       placedAt: AFTER_EFFECTIVE,
     });
     expect(result.status).toBe("unknown");
+  });
+
+  it("flags a multi-unit line item by its per-unit price, not its line total", () => {
+    // Two $1,500 units: each unit is under the $2,500 threshold and must be flagged, even
+    // though the $3,000 line total alone would clear it.
+    const result = assessDdpRequirement({
+      channel: "ebay",
+      shipToCountryCode: "US",
+      salePriceUsdCents: 300_000,
+      quantity: 2,
+      placedAt: AFTER_EFFECTIVE,
+    });
+    expect(result.status).toBe("required");
+  });
+
+  it("does not flag a multi-unit line item whose per-unit price clears the threshold", () => {
+    // Two $2,600 units: $5,200 total, correctly not required since each unit individually
+    // clears the $2,500 threshold.
+    const result = assessDdpRequirement({
+      channel: "ebay",
+      shipToCountryCode: "US",
+      salePriceUsdCents: 520_000,
+      quantity: 2,
+      placedAt: AFTER_EFFECTIVE,
+    });
+    expect(result.status).toBe("not_required");
   });
 });

@@ -323,7 +323,14 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         await db
           .update(channelListings)
           .set({
-            status: "error",
+            // A listing already live on eBay must stay "published" even while this
+            // month's quota blocks it -- product-fetch's propagation gate and
+            // inventory-sync-worker only ever push stock/content to a "published"
+            // listing, and nothing else ever flips status back once quota resets next
+            // month, so marking it "error" here would permanently exclude it from
+            // resyncing (an eBay-side oversell risk). Only an ebay_publish hitting
+            // quota is accurately "error" -- nothing is live on eBay for it yet.
+            ...(message.type === "ebay_publish" ? { status: "error" } : {}),
             lastError: `今月のeBay同期回数の上限(${error.limit}件)に達しました。来月になると自動的にリセットされます。`,
             updatedAt: new Date(),
           })

@@ -25,8 +25,12 @@ export interface DdpAssessmentInput {
    *  "unknown", never as "not required", so a real DDP-required order never silently loses
    *  its warning because of an upstream data gap. */
   shipToCountryCode?: string | null;
-  /** This line item's sale price in USD cents, when the channel's orders API provided one. */
+  /** This line item's sale price in USD cents, when the channel's orders API provided one --
+   *  already scaled by quantity (eBay's own lineItem.total), NOT a per-unit price. */
   salePriceUsdCents?: number | null;
+  /** Units on this line item. The $2,500 threshold applies per unit, not to the line's total
+   *  -- two $1,500 units must still be flagged even though their $3,000 total clears it. */
+  quantity: number;
   /** When the order was placed -- orders placed before the policy's effective date are not
    *  subject to it. */
   placedAt: Date;
@@ -64,7 +68,9 @@ export function assessDdpRequirement(input: DdpAssessmentInput): DdpAssessmentRe
       reasonJa: "販売価格の情報が取得できていないため、DDP対象かどうか判定できません。",
     };
   }
-  if (input.salePriceUsdCents >= DDP_THRESHOLD_USD_CENTS) {
+  // salePriceUsdCents is the line item's total; the $2,500 threshold is a per-unit price.
+  const unitPriceUsdCents = input.salePriceUsdCents / input.quantity;
+  if (unitPriceUsdCents >= DDP_THRESHOLD_USD_CENTS) {
     return { status: "not_required", reasonJa: "単価が$2,500以上のため、このDDP義務化の対象外です(別途の正式通関が必要です)。" };
   }
   return {

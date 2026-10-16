@@ -2,6 +2,7 @@ import {
   assessDdpRequirement,
   computeOrderProfit,
   isValidOrderTransition,
+  jpyToUsdCents,
   type OrderProfitInputs,
   type OrderProfitResult,
   type OrderStatus,
@@ -206,6 +207,7 @@ export async function transitionOrderStatus(
       channel: current.channel,
       shipToCountryCode: current.shipToCountryCode,
       salePriceUsdCents: current.salePriceUsdCents,
+      quantity: current.quantity,
       placedAt: current.placedAt,
     });
     if (ddp.status === "required") {
@@ -307,13 +309,11 @@ export async function finalizeOrderProfit(db: Database, tenantId: string, orderI
 }
 
 export interface TenantMarginHistory {
-  /** This tenant's own average realized cost-markup ratio (net profit / cost, same units as
-   *  computeDynamicPrice's targetMarginRatio/costMarkupRatio -- NOT net profit / revenue,
-   *  which is a different ratio computeDynamicPrice would silently underprice against if fed
-   *  in here instead) across its most recent finalized eBay orders. Cost is reconstructed as
-   *  revenue - netProfit (computeOrderProfit's own definition of netProfit), so this needs no
-   *  separate cost column and stays correct however each order was actually priced. Null when
-   *  there isn't a single usable order yet. */
+  /** This tenant's own average realized cost-markup ratio (net profit / acquisition cost,
+   *  same units as computeDynamicPrice's targetMarginRatio/costMarkupRatio -- NOT net profit
+   *  / revenue, nor net profit / total expenses, either of which computeDynamicPrice would
+   *  silently underprice against if fed in here instead) across its most recent finalized
+   *  eBay orders. Null when there isn't a single usable order yet. */
   avgMarkupRatio: number | null;
   sampleSize: number;
 }
@@ -325,27 +325,44 @@ export interface TenantMarginHistory {
  * USD-denominated there, so no FX rate needs to stand in for whatever rate actually applied
  * back when each order was placed (a BASE/JPY order's margin would need that approximation,
  * which is fine for a live price *preview* but not for a figure this treats as ground truth).
+ *
+ * Cost here means acquisition cost ONLY (order.costJpy * order.quantity, converted to USD),
+ * matching computeDynamicPrice's own costUsd -- NOT `revenue - netProfit`, which nets out
+ * shipping, eBay/payment fees, ad spend, FX cost and returns too (see computeOrderProfit's
+ * own costUsdCents, which folds all of those in). An earlier version of this function used
+ * that reconstruction as a shortcut to avoid a second column read; it was wrong precisely
+ * because it silently conflated "acquisition cost" with "total expenses," feeding
+ * computeLearnedTargetMargin a systematically smaller ratio than targetMarginRatio actually
+ * means, and so letting the repricer undercut this tenant's real realized markup. `usdPerJpy`
+ * is necessarily today's rate, not whatever applied when each historical order was actually
+ * priced -- an approximation accepted here the same way resolveLearnedMarginRatio's caller
+ * already accepts it for a live price preview, not treated as exact to the order.
  */
-export async function getTenantMarginHistory(db: Database, tenantId: string, limit = 50): Promise<TenantMarginHistory> {
+export async function getTenantMarginHistory(
+  db: Database,
+  tenantId: string,
+  usdPerJpy: number,
+  limit = 50,
+): Promise<TenantMarginHistory> {
   const rows = await db
-    .select({ netProfit: orders.finalizedNetProfitUsdCents, revenue: orders.salePriceUsdCents })
+    .select({ netProfit: orders.finalizedNetProfitUsdCents, costJpy: orders.costJpy, quantity: orders.quantity })
     .from(orders)
     .where(
       and(
         eq(orders.tenantId, tenantId),
         eq(orders.channel, "ebay"),
         isNotNull(orders.profitFinalizedAt),
-        isNotNull(orders.salePriceUsdCents),
+        isNotNull(orders.costJpy),
       ),
     )
     .orderBy(desc(orders.profitFinalizedAt))
     .limit(limit);
 
   const ratios = rows
-    .filter((r): r is { netProfit: number; revenue: number } => r.netProfit != null && r.revenue != null)
-    .map((r) => ({ cost: r.revenue - r.netProfit, netProfit: r.netProfit }))
-    .filter((r) => r.cost > 0)
-    .map((r) => r.netProfit / r.cost);
+    .filter((r): r is { netProfit: number; costJpy: number; quantity: number } => r.netProfit != null && r.costJpy != null)
+    .map((r) => ({ costUsdCents: jpyToUsdCents(r.costJpy * r.quantity, usdPerJpy), netProfit: r.netProfit }))
+    .filter((r) => r.costUsdCents > 0)
+    .map((r) => r.netProfit / r.costUsdCents);
 
   if (ratios.length === 0) return { avgMarkupRatio: null, sampleSize: 0 };
   const avgMarkupRatio = ratios.reduce((sum, r) => sum + r, 0) / ratios.length;
