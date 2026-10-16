@@ -6,8 +6,11 @@ export interface AIModelClient {
 }
 
 class ModelResponseParseError extends Error {
-  constructor(raw: string, cause: unknown) {
-    super(`Model response was not valid JSON: ${String(cause)}. Raw: ${raw.slice(0, 500)}`);
+  constructor() {
+    // A model response can contain seller addresses, order/customer PII,
+    // API tokens or attacker-controlled instructions. Error strings are
+    // routinely persisted into sync_errors and CloudWatch: never echo it.
+    super("Model response was not valid JSON");
     this.name = "ModelResponseParseError";
   }
 }
@@ -16,8 +19,8 @@ export function parseModelJson(raw: string): unknown {
   const trimmed = raw.trim().replace(/^```(json)?/i, "").replace(/```$/, "");
   try {
     return JSON.parse(trimmed);
-  } catch (err) {
-    throw new ModelResponseParseError(trimmed, err);
+  } catch {
+    throw new ModelResponseParseError();
   }
 }
 
@@ -49,7 +52,9 @@ export class OpenAIModelClient implements AIModelClient {
       }),
     });
     if (!res.ok) {
-      throw new Error(`OpenAI API error ${res.status}: ${await res.text()}`);
+      // Provider error bodies can include prompts/customer content or secrets.
+      // Preserve only the HTTP status needed for controlled retry policy.
+      throw new Error(`OpenAI API error ${res.status}`);
     }
     const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
     const content = json.choices[0]?.message.content;
