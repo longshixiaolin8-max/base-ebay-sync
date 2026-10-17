@@ -11,7 +11,6 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as rds from "aws-cdk-lib/aws-rds";
 import type * as s3 from "aws-cdk-lib/aws-s3";
 import type * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
-import * as ses from "aws-cdk-lib/aws-ses";
 import type * as sqs from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import type { PlatformConfig } from "./config.js";
@@ -390,17 +389,14 @@ export class LambdaStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
 
-    // Registers SES_FROM_EMAIL (see PlatformConfig.sesFromEmail's own doc comment) as a
-    // verified SES sending identity. For an *email-address* identity (as opposed to a
-    // domain), this is also what actually triggers AWS to send that address its one-time
-    // verification link -- nothing sends from this address until a human clicks it, which
-    // this deploy can't do on anyone's behalf. Only created when sesFromEmail is actually
-    // configured, matching every other conditional use of it in this file.
-    if (props.config.sesFromEmail) {
-      new ses.EmailIdentity(this, "NotificationsEmailIdentity", {
-        identity: ses.Identity.email(props.config.sesFromEmail),
-      });
-    }
+    // SES_FROM_EMAIL's sending identity (see PlatformConfig.sesFromEmail's own doc comment)
+    // is deliberately NOT managed as a CDK resource here: CloudFormation refused to adopt
+    // one for this exact address ("already exists") on this stack's very first deploy with
+    // sesFromEmail set, meaning it was already registered in SES outside this stack (console,
+    // or an earlier out-of-band verify-email-identity call) before this config value was ever
+    // wired up. Creating one here would either conflict again or require an explicit `cdk
+    // import`; since the identity already exists, nothing new needs creating -- only
+    // SES_FROM_EMAIL itself (below) needs to actually point at it.
 
     // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
     // email ownership first, then and only then do we create the Cognito identity + tenant.
