@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
+import { billingErrorMessage } from "@/lib/billing-error-copy";
 import { formatStripeAmount, planLabel } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { Card } from "@/components/ui/Card";
@@ -97,7 +98,7 @@ export default function PlanTab() {
       const { url } = await apiPost<{ url: string }>("/admin/billing/portal-session");
       window.location.href = url;
     } catch (err) {
-      notify(`Stripeポータルを開けませんでした: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "Stripeポータルを開けませんでした。しばらくしてからもう一度お試しください。"));
       setOpeningPortal(false);
     }
   }
@@ -113,7 +114,7 @@ export default function PlanTab() {
       // effect yet.
       notify("プラン変更をリクエストしました。反映まで少し時間がかかる場合があります。", "success");
     } catch (err) {
-      notify(`プラン変更に失敗しました: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "プラン変更に失敗しました。しばらくしてからもう一度お試しください。"));
     } finally {
       setChangingPlan(null);
     }
@@ -125,7 +126,7 @@ export default function PlanTab() {
       const { url } = await apiPost<{ url: string }>("/admin/billing/checkout-session");
       window.location.href = url;
     } catch (err) {
-      notify(`お支払い設定を再開できませんでした: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "お支払い設定を再開できませんでした。しばらくしてからもう一度お試しください。"));
       setOpeningCheckout(false);
     }
   }
@@ -143,7 +144,7 @@ export default function PlanTab() {
       setDetails((prev) => (prev?.subscription ? { ...prev, subscription: { ...prev.subscription, cancelAtPeriodEnd: true } } : prev));
       setConfirmingCancel(false);
     } catch (err) {
-      notify(`解約の予約に失敗しました: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "解約の予約に失敗しました。しばらくしてからもう一度お試しください。"));
     } finally {
       setCanceling(false);
     }
