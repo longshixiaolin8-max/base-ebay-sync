@@ -2329,10 +2329,24 @@ describe("admin-api handler", () => {
     });
 
     it("POST /admin/products/{id}/sns/status marks posting flags", async () => {
+      fakeDb = createFakeDb([[{ id: "p1" }]]);
       markSnsStatusMock.mockResolvedValueOnce({ productId: "p1", videoCreated: true });
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/status", {}, { videoCreated: true }));
       expect(res.statusCode).toBe(200);
       expect(markSnsStatusMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, "p1", { videoCreated: true });
+    });
+
+    it("POST /admin/products/{id}/sns/status returns 404 and never touches sns_content for a product belonging to another tenant", async () => {
+      // IDOR regression: sns_content.productId is its own primary key, not a
+      // (tenantId, productId) composite, and markSnsStatus's upsert never checks or sets
+      // tenantId on conflict -- without the ownership check this route now does first, a
+      // caller could flip another tenant's SNS flags (or silently create a misattributed
+      // row) purely by guessing a productId it doesn't own.
+      fakeDb = createFakeDb([[]]); // no product_master row for this tenant+id
+      const res = await callHandler(makeEvent("POST", "/admin/products/other-tenants-product/sns/status", {}, { videoCreated: true }));
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body!)).toEqual({ error: "product_not_found" });
+      expect(markSnsStatusMock).not.toHaveBeenCalled();
     });
 
     it("GET /admin/sync/state requires a channel", async () => {

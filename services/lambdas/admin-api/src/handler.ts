@@ -3067,6 +3067,19 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/sns\/status$/.test(path)) {
       const id = path.split("/")[3]!;
+      // sns_content.productId is this table's own primary key (not a (tenantId, productId)
+      // composite), and markSnsStatus's upsert never checks or sets tenantId on conflict --
+      // without this ownership check first, a tenant could flip another tenant's SNS status
+      // flags (or, if no row exists yet for that product, silently create one misattributed
+      // to itself) purely by guessing/learning another tenant's productId. Mirrors the same
+      // check POST /admin/products/{id}/sns/script already does above.
+      const [snsProduct] = await db
+        .select({ id: productMaster.id })
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
+      if (!snsProduct) return json(404, { error: "product_not_found" });
+
       const body = JSON.parse(event.body ?? "{}") as {
         videoCreated?: boolean;
         instagramPosted?: boolean;
