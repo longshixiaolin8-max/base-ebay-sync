@@ -104,23 +104,15 @@ export class LambdaStack extends cdk.Stack {
         : {}),
     };
 
-    const oauthTokenSecretsPolicy = new iam.PolicyStatement({
-      // DeleteSecret is needed by tenant-offboarding's own OAuth-revoke step (see
-      // deleteOAuthConnectionsForTenant) and by ebay-webhook's Marketplace Account
-      // Deletion handler (deleteOAuthConnectionsByExternalAccount) -- both call
-      // DeleteSecretCommand against a token secret under this same prefix. Granted on the
-      // same shared, already-broad (every makeFn'd lambda gets read+write on every tenant's
-      // OAuth token secret) statement rather than a narrower per-lambda one, matching this
-      // policy's existing precedent rather than introducing a new grant shape for it.
-      actions: [
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:PutSecretValue",
-        "secretsmanager:CreateSecret",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:DeleteSecret",
-      ],
+    // Token access is divided by capability to limit blast radius.
+    // A stolen worker identity must not delete merchant OAuth credentials.
+    const tokenPolicy = (...actions: string[]) => new iam.PolicyStatement({
+      actions,
       resources: [props.oauthTokenSecretArnPattern],
     });
+    const tokenCreate = tokenPolicy("secretsmanager:PutSecretValue", "secretsmanager:CreateSecret");
+    const tokenRefresh = tokenPolicy("secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret");
+    const tokenDelete = tokenPolicy("secretsmanager:DeleteSecret");
 
     const makeFn = (
       id: string,
@@ -160,7 +152,7 @@ export class LambdaStack extends cdk.Stack {
       });
 
       props.cluster.grantDataApiAccess(fn);
-      fn.addToRolePolicy(oauthTokenSecretsPolicy);
+      // OAuth token access is granted only to explicitly approved handlers below.
       return fn;
     };
 
@@ -282,7 +274,14 @@ export class LambdaStack extends cdk.Stack {
       "services/lambdas/sales-poller/src/handler.ts",
       "handler",
       {},
-      cdk.Duration.minutes(2),
+      // Confirmed live: this used to loop internally for ~45-50s per invocation (see the
+      // handler's own doc comment) to approximate a sub-minute effective poll interval --
+      // billed the whole time, which alone burned 97% of the AWS Lambda free tier's
+      // 400,000 GB-second/month allowance in the first week of October. Now a single pass
+      // per invocation; 30s is generous headroom over the real work (a couple of HTTP
+      // calls per tenant/channel) while still failing fast if something hangs, rather than
+      // silently billing for a full 2 minutes on every stuck invocation.
+      cdk.Duration.seconds(30),
     );
     props.appCredentialSecrets.base.grantRead(this.salesPollerFn);
     props.appCredentialSecrets.ebay.grantRead(this.salesPollerFn);
@@ -353,6 +352,17 @@ export class LambdaStack extends cdk.Stack {
         AI_GENERATE_DLQ_ARN: props.dlqs.aiGenerate.queueArn,
         EBAY_SYNC_DLQ_URL: props.dlqs.ebaySync.queueUrl,
         EBAY_SYNC_DLQ_ARN: props.dlqs.ebaySync.queueArn,
+        EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
+        // Still disabled by default -- flipping this is an operator decision this stack
+        // deliberately leaves alone, not something this commit changes. What *does* change
+        // here: the eBay DLQ is no longer redriven wholesale (StartMessageMoveTask moves
+        // every message back unconditionally). It now goes through a selective, per-message
+        // redrive (see dlq-redrive's own redriveEbaySyncDlq) that re-checks each message's
+        // sync_errors history and skips anything still classified as a seller-privilege
+        // block -- safe to enable once an operator wants eBay's queue to recover from a
+        // transient outage the same way AI/inventory already do, without resurrecting
+        // messages that can never succeed.
+        EBAY_SYNC_AUTO_REDRIVE_ENABLED: "false",
         INVENTORY_SYNC_DLQ_URL: props.dlqs.inventorySync.queueUrl,
         INVENTORY_SYNC_DLQ_ARN: props.dlqs.inventorySync.queueArn,
       },
@@ -378,6 +388,15 @@ export class LambdaStack extends cdk.Stack {
       schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
+
+    // SES_FROM_EMAIL's sending identity (see PlatformConfig.sesFromEmail's own doc comment)
+    // is deliberately NOT managed as a CDK resource here: CloudFormation refused to adopt
+    // one for this exact address ("already exists") on this stack's very first deploy with
+    // sesFromEmail set, meaning it was already registered in SES outside this stack (console,
+    // or an earlier out-of-band verify-email-identity call) before this config value was ever
+    // wired up. Creating one here would either conflict again or require an explicit `cdk
+    // import`; since the identity already exists, nothing new needs creating -- only
+    // SES_FROM_EMAIL itself (below) needs to actually point at it.
 
     // Public SaaS acquisition is brokered entirely through this Lambda: SES proves
     // email ownership first, then and only then do we create the Cognito identity + tenant.
@@ -491,6 +510,16 @@ export class LambdaStack extends cdk.Stack {
         // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
         // billing portal session it creates.
         ADMIN_APP_URL: props.adminAppUrl,
+        // Gates the cross-tenant /admin/ops/* routes (requireOperator() in handler.ts) --
+        // see PlatformConfig.operatorEmail's own doc comment. Omitted entirely (rather than
+        // set to "") when unconfigured, so requireOperator's undefined-check fails closed.
+        ...(props.config.operatorEmail ? { OPERATOR_EMAIL: props.config.operatorEmail } : {}),
+        // POST /admin/orders/{id}/status's shipping-notice email to a BASE buyer (see
+        // sendEmail() in services/lambdas/shared/src/email.ts) needs this the same way
+        // SignupHandler/StripeWebhook already do -- previously missing here entirely, so
+        // every such send threw (caught, logged as a sync_error) instead of actually
+        // reaching the buyer, even on a fully SES-configured deployment.
+        ...(props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {}),
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
@@ -498,6 +527,32 @@ export class LambdaStack extends cdk.Stack {
       // more than the old 15s, and this comfortably covers either.
       cdk.Duration.seconds(60),
     );
+    // Critical least-privilege boundary: no blanket read/write/delete of every
+    // marketplace tenant secret by unrelated public or AI Lambdas. In particular
+    // SignupHandler, StripeWebhook, AiGenerateWorker and DlqRedrive must not
+    // inherit the shared marketplace OAuth token permissions.
+    // OAuth callbacks can create and rotate their own connections, not read or delete.
+    for (const fn of [this.oauthBaseCallbackFn, this.oauthEbayCallbackFn]) {
+      fn.addToRolePolicy(tokenCreate);
+    }
+    // These handlers must fetch and refresh OAuth access tokens while syncing.
+    for (const fn of [
+      this.ebayPlatformNotificationDispatcherFn,
+      this.productFetchFn,
+      this.ebaySyncWorkerFn,
+      this.salesPollerFn,
+      this.inventorySyncWorkerFn,
+      this.inventoryDiffCheckFn,
+      this.tenantOffboardingFn,
+      this.adminApiFn,
+    ]) {
+      fn.addToRolePolicy(tokenRefresh);
+    }
+    // Deletion is strictly limited to approved disconnect/offboarding handlers.
+    for (const fn of [this.ebayWebhookFn, this.tenantOffboardingFn, this.adminApiFn]) {
+      fn.addToRolePolicy(tokenDelete);
+    }
+
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
@@ -513,6 +568,15 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.base.grantRead(this.adminApiFn);
     // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
     props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
+    // Needed for the BASE shipping-notice email sent from POST /admin/orders/{id}/status --
+    // same identity-scoped grant as SignupHandler/StripeWebhook above (SES v2 has no
+    // per-secret-style resource to scope down to further).
+    this.adminApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+      }),
+    );
     // Needed for the commercial-features round's AI endpoints (SNS script generation,
     // stale-product suggestions), which call Bedrock directly the same way
     // ai-generate-worker does.

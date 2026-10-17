@@ -39,10 +39,23 @@ function fakeDb() {
 }
 
 function fakeDeleteDb(returningRows: Array<{ tenantId: string; secretArn: string }>) {
+  // Mutable test backing store. A failed Secret Manager call must leave the
+  // corresponding DB row intact so a later notification can retry deletion.
+  const activeRows = returningRows.map((row, index) => ({
+    ...row,
+    channel: "ebay",
+    externalAccountId: `external-${index}`,
+  }));
   return {
+    select: () => ({
+      from: () => ({ where: async () => [...activeRows] }),
+    }),
     delete: () => ({
       where: () => ({
-        returning: async () => returningRows,
+        returning: async () => {
+          const row = activeRows.shift();
+          return row ? [{ tenantId: row.tenantId, secretArn: row.secretArn }] : [];
+        },
       }),
     }),
   } as never;
@@ -165,6 +178,26 @@ describe("deleteOAuthConnectionsByExternalAccount (regression: shared secret-del
   beforeEach(() => {
     sendMock.mockReset();
     sendMock.mockResolvedValue({});
+  });
+
+  it("preserves a failed deletion's DB reference so a later delivery can retry", async () => {
+    const rows = [
+      { tenantId: "tenant-a", secretArn: "arn:...:a" },
+      { tenantId: "tenant-b", secretArn: "arn:...:b" },
+    ];
+    const db = fakeDeleteDb(rows);
+    sendMock.mockReset().mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("AWS transient 503"));
+
+    await expect(deleteOAuthConnectionsByExternalAccount(db, "ebay", "user")).rejects.toThrow("AWS transient 503");
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    const ids = sendMock.mock.calls.map(call => (call[0] as FakeCommand).input.SecretId);
+    expect(ids).toEqual([rows[0]!.secretArn, rows[1]!.secretArn]);
+
+    sendMock.mockReset().mockResolvedValue({});
+    const retried = await deleteOAuthConnectionsByExternalAccount(db, "ebay", "user");
+    expect(retried).toEqual([rows[1]]);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect((sendMock.mock.calls[0]![0] as FakeCommand).input.SecretId).toBe(rows[1]!.secretArn);
   });
 
   it("deletes every connected tenant's secret for the given external account", async () => {

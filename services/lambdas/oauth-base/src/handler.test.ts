@@ -54,6 +54,26 @@ describe("oauth-base callback", () => {
     verifyStateMock.mockReset().mockReturnValue("tenant-a");
   });
 
+  it("never echoes state errors, tokens or external API error messages", async () => {
+    const marker = "SENSITIVE_CANARY_MUST_NOT_BE_LOGGED";
+    verifyStateMock.mockImplementationOnce(() => { throw new Error(marker); });
+    const stateResponse = (await callback(makeEvent({ code: "abc", state: "bad" }))) as { statusCode: number; body?: string };
+    expect(stateResponse.statusCode).toBe(400);
+    expect(stateResponse.body).not.toContain(marker);
+    expect(exchangeCodeForTokenMock).not.toHaveBeenCalled();
+
+    exchangeCodeForTokenMock.mockRejectedValueOnce(new Error(marker));
+    const providerResponse = (await callback(makeEvent({ code: "abc", state: "signed-state" }))) as { statusCode: number; body?: string };
+    expect(providerResponse.statusCode).toBe(502);
+    expect(providerResponse.body).not.toContain(marker);
+  });
+
+  it("rejects oversized query parameters before contacting third parties", async () => {
+    const response = (await callback(makeEvent({ code: "x".repeat(2049), state: "a" }))) as { statusCode: number };
+    expect(response.statusCode).toBe(400);
+    expect(getAppCredentialsMock).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when code or state is missing", async () => {
     const res = (await callback(makeEvent({}))) as { statusCode: number };
     expect(res).toEqual({ statusCode: 400, body: "Missing code or state" });

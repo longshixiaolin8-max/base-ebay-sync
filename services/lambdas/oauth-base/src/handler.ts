@@ -25,17 +25,27 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   if (!code || !state) {
     return { statusCode: 400, body: "Missing code or state" };
   }
+  if (code.length > 2048 || state.length > 1024) {
+    return { statusCode: 400, body: "Invalid OAuth callback parameters" };
+  }
 
   const creds = await getAppCredentials<BaseAppCredentials>("base");
   let tenantId: string;
   try {
     tenantId = verifyState(creds.clientSecret, state);
-  } catch (err) {
-    return { statusCode: 400, body: `Invalid OAuth state: ${(err as Error).message}` };
+  } catch {
+    // Never echo errors containing signed state, authorization codes or
+    // remote-provider payloads into public responses.
+    return { statusCode: 400, body: "Invalid OAuth state" };
   }
 
   const adapter = new BaseAdapter({ clientId: creds.clientId, clientSecret: creds.clientSecret });
-  const tokens = await adapter.exchangeCodeForToken(code, redirectUri());
+  let tokens: Awaited<ReturnType<BaseAdapter["exchangeCodeForToken"]>>;
+  try {
+    tokens = await adapter.exchangeCodeForToken(code, redirectUri());
+  } catch {
+    return { statusCode: 502, body: "BASE authorization failed" };
+  }
 
   // Tenant-isolation fix: this used to fall back to the literal string "default" for every
   // connection (BASE_SHOP_ID was never actually set per-tenant), meaning every tenant's BASE
@@ -46,8 +56,8 @@ export async function callback(event: APIGatewayProxyEventV2): Promise<APIGatewa
   let externalAccountId: string;
   try {
     externalAccountId = await adapter.getAuthenticatedShopId(tokens.accessToken);
-  } catch (err) {
-    return { statusCode: 502, body: `Could not identify the connected BASE shop: ${(err as Error).message}` };
+  } catch {
+    return { statusCode: 502, body: "Could not identify the connected BASE shop" };
   }
 
   const db = getDb();

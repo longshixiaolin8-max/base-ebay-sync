@@ -193,6 +193,50 @@ describe("BaseAdapter", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(2, "https://api.example-base.test/1/orders/detail/order-1", expect.anything());
   });
 
+  it("listRecentSales captures the buyer's own email/name from the order detail response, not order_receiver", async () => {
+    const since = new Date("2026-08-01T00:00:00Z");
+    const fetchMock = mockFetchSequence([
+      { orders: [{ unique_key: "order-1", ordered: Math.floor(since.getTime() / 1000) + 3600 }] },
+      {
+        order: {
+          unique_key: "order-1",
+          ordered: Math.floor(since.getTime() / 1000) + 3600,
+          order_items: [{ item_id: 1000, amount: 1, total: 4000 }],
+          mail_address: "buyer@example.com",
+          last_name: "山田",
+          first_name: "太郎",
+        },
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const sales = await adapter.listRecentSales("token", since);
+
+    expect(sales[0]).toMatchObject({ buyerEmail: "buyer@example.com", buyerName: "山田 太郎" });
+  });
+
+  it("listRecentSales leaves buyerEmail/buyerName undefined when the order detail response omits them", async () => {
+    const since = new Date("2026-08-01T00:00:00Z");
+    const fetchMock = mockFetchSequence([
+      { orders: [{ unique_key: "order-1", ordered: Math.floor(since.getTime() / 1000) + 3600 }] },
+      {
+        order: {
+          unique_key: "order-1",
+          ordered: Math.floor(since.getTime() / 1000) + 3600,
+          order_items: [{ item_id: 1000, amount: 1, total: 4000 }],
+        },
+      },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new BaseAdapter(config);
+    const sales = await adapter.listRecentSales("token", since);
+
+    expect(sales[0]!.buyerEmail).toBeUndefined();
+    expect(sales[0]!.buyerName).toBeUndefined();
+  });
+
   it("listRecentSales filters out orders older than `since` client-side, regardless of the server-side prefilter", async () => {
     const since = new Date("2026-08-01T00:00:00Z");
     const tooOld = Math.floor(since.getTime() / 1000) - 3600;

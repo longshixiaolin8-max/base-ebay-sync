@@ -8,10 +8,11 @@ import { useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet } from "@/lib/api-client";
 import { planLabel } from "@/lib/format";
+import { isOperatorEmail } from "@/lib/operator";
 import { useSignOut } from "@/lib/use-sign-out";
 import { useMobileNav } from "@/components/MobileNav";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, ChartIcon, CoinIcon, DashboardIcon, FileIcon, PlugIcon, ShieldIcon, SparkleIcon, SyncIcon } from "@/components/icons";
+import { ActivityIcon, AlertIcon, BoxIcon, CartIcon, ChartIcon, CoinIcon, DashboardIcon, DatabaseIcon, FileIcon, PlugIcon, ShieldIcon, SparkleIcon, SyncIcon } from "@/components/icons";
 import { PlanUsageWidget } from "@/components/dashboard/PlanUsageWidget";
 
 const LINKS = [
@@ -29,6 +30,8 @@ const LINKS = [
   { href: "/audit-log", label: "監査ログ", icon: FileIcon },
   { href: "/billing", label: "請求・設定", icon: CoinIcon },
 ];
+
+const OPERATOR_LINK = { href: "/ops", label: "運営ダッシュボード", icon: DatabaseIcon };
 
 interface ChannelState {
   state: "HEALTHY" | "DEGRADED" | "ISOLATED" | "RECOVERING" | "RECONCILING";
@@ -126,7 +129,7 @@ export function Sidebar() {
         BASE <span className="app-brand-ebay">eBay</span> Sync
       </Link>
       <nav className="sidebar-nav">
-        {LINKS.map((link) => {
+        {(isOperatorEmail(email) ? [...LINKS, OPERATOR_LINK] : LINKS).map((link) => {
           const Icon = link.icon;
           const active = pathname?.startsWith(link.href) || undefined;
           const badge =

@@ -36,8 +36,12 @@ describe("signState / verifyState", () => {
 
   it("rejects a state with a tampered signature", () => {
     const state = signState(SECRET, TENANT_ID);
-    const [payloadB64] = state.split(".");
-    const tamperedState = `${payloadB64}.not-the-real-signature-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+    const [payloadB64, signature] = state.split(".");
+    // Preserve the HMAC's valid 43-character shape, so this tests the
+    // signature verification itself rather than the new format guard.
+    const last = signature!.at(-1)!;
+    const tamperedSignature = signature!.slice(0, -1) + (last === "A" ? "B" : "A");
+    const tamperedState = `${payloadB64}.${tamperedSignature}`;
 
     expect(() => verifyState(SECRET, tamperedState)).toThrow(/signature mismatch/i);
   });
@@ -57,6 +61,28 @@ describe("signState / verifyState", () => {
   it("accepts a state right up to its TTL boundary and rejects it just past it", () => {
     const state = signState(SECRET, TENANT_ID);
     expect(() => verifyState(SECRET, state, 5_000)).not.toThrow(); // comfortably within a generous TTL
+  });
+
+  it("rejects oversized states and extra signature segments", () => {
+    const valid = signState(SECRET, TENANT_ID);
+    expect(() => verifyState(SECRET, valid + ".extra")).toThrow(/malformed/i);
+    expect(() => verifyState(SECRET, "A".repeat(2000) + ".invalid")).toThrow(/malformed/i);
+  });
+
+  it("rejects validly signed but implausible timestamps, malformed nonces and tenant types", () => {
+    const validNonce = "5f0dbf57-e9b8-4ae7-91d9-659ed68e217d";
+    expect(() => verifyState(SECRET, signPayload(SECRET, {
+      nonce: validNonce, issuedAt: Date.now() + 90_000, tenantId: TENANT_ID,
+    }))).toThrow(/expired/i);
+    expect(() => verifyState(SECRET, signPayload(SECRET, {
+      nonce: "not-a-uuid", issuedAt: Date.now(), tenantId: TENANT_ID,
+    }))).toThrow(/nonce/i);
+    expect(() => verifyState(SECRET, signPayload(SECRET, {
+      nonce: validNonce, issuedAt: "yesterday", tenantId: TENANT_ID,
+    }))).toThrow(/timestamp/i);
+    expect(() => verifyState(SECRET, signPayload(SECRET, {
+      nonce: validNonce, issuedAt: Date.now(), tenantId: { id: "victim" },
+    }))).toThrow(/tenantId/i);
   });
 
   it("rejects a validly-signed payload with no tenantId at all", () => {

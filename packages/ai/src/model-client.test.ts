@@ -10,6 +10,16 @@ describe("parseModelJson", () => {
     expect(parseModelJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
   });
 
+  it("does not persist sensitive model output inside parse errors", () => {
+    const canary = "TOP_SECRET_ACCESS_TOKEN_DO_NOT_LOG";
+    expect(() => parseModelJson(canary)).toThrow(/not valid JSON/);
+    try {
+      parseModelJson(canary);
+    } catch (error) {
+      expect(String(error)).not.toContain(canary);
+    }
+  });
+
   it("throws a descriptive error for non-JSON output", () => {
     expect(() => parseModelJson("not json at all")).toThrow(/not valid JSON/);
   });

@@ -44,3 +44,18 @@ export function emitSyncErrorMetric(channel: string | null | undefined, errorCod
 export function emitChannelIsolatedMetric(channel: string): void {
   emitEmfMetric("ChannelIsolated", { Channel: channel }, [["Channel"]]);
 }
+
+/** Fixed-size, low-cardinality event taxonomy for security anomaly monitoring.
+ * Never place IPs, emails, JWTs, request data or tokens in metric dimensions.
+ * Deterministic detectors remain authoritative: AI can only summarize alerts. */
+export type SecurityDenialType =
+  | "ebay_signature_invalid"
+  | "ebay_destination_invalid"
+  | "stripe_signature_invalid"
+  | "operator_access_denied"
+  | "tenant_claim_missing"
+  | "cloudfront_origin_denied";
+
+export function emitSecurityDenialMetric(kind: SecurityDenialType): void {
+  emitEmfMetric("SecurityDenials", { EventType: kind }, [["EventType"]]);
+}

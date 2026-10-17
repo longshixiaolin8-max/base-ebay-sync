@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Keep only the newest validation run for a PR. Especially important for the
+# account's limited included GitHub Actions minutes during iterative reviews.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-test:
     runs-on: ubuntu-latest

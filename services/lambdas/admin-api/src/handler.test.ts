@@ -64,10 +64,23 @@ const countProductsMock = vi.fn().mockResolvedValue(0);
 const countProductsByStatusMock = vi.fn().mockResolvedValue(0);
 const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
+const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
+const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
+const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
+const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
+const insertSyncJobMock = vi.fn().mockResolvedValue({ id: "job-1", attempts: 0 });
+const markSyncJobCompletedMock = vi.fn().mockResolvedValue(undefined);
+const markSyncJobFailedMock = vi.fn().mockResolvedValue(undefined);
 const tryReserveMonthlyAiGenerationMock = vi.fn().mockResolvedValue(true);
 const releaseMonthlyAiGenerationReservationMock = vi.fn().mockResolvedValue(undefined);
 
 class InvalidOrderTransitionErrorFake extends Error {}
+class DdpConfirmationRequiredErrorFake extends Error {
+  constructor(readonly reasonJa: string) {
+    super("DDP compliance confirmation is required before marking this order SHIPPED");
+  }
+}
+class OrderStatusConflictErrorFake extends Error {}
 
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
@@ -93,6 +106,16 @@ vi.mock("@ai-ec/db", () => ({
   getLiveOrderProfit: (...args: unknown[]) => getLiveOrderProfitMock(...args),
   getSnsContent: (...args: unknown[]) => getSnsContentMock(...args),
   InvalidOrderTransitionError: InvalidOrderTransitionErrorFake,
+  DdpConfirmationRequiredError: DdpConfirmationRequiredErrorFake,
+  OrderStatusConflictError: OrderStatusConflictErrorFake,
+  PROFIT_AFFECTING_EXTRA_KEYS: [
+    "returnAmountUsdCents",
+    "ebayFeeUsdCents",
+    "paymentFeeUsdCents",
+    "shippingCostJpy",
+    "adSpendUsdCents",
+    "fxCostUsdCents",
+  ],
   listOrdersForProduct: (...args: unknown[]) => listOrdersForProductMock(...args),
   markSnsStatus: (...args: unknown[]) => markSnsStatusMock(...args),
   transitionOrderStatus: (...args: unknown[]) => transitionOrderStatusMock(...args),
@@ -103,6 +126,13 @@ vi.mock("@ai-ec/db", () => ({
   countProductsByStatus: (...args: unknown[]) => countProductsByStatusMock(...args),
   countChannelListingsByStatus: (...args: unknown[]) => countChannelListingsByStatusMock(...args),
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
+  getMonthlyEbaySyncCount: (...args: unknown[]) => getMonthlyEbaySyncCountMock(...args),
+  listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
+  getTenantMarginHistory: (...args: unknown[]) => getTenantMarginHistoryMock(...args),
+  markEbayTrackingSynced: (...args: unknown[]) => markEbayTrackingSyncedMock(...args),
+  insertSyncJob: (...args: unknown[]) => insertSyncJobMock(...args),
+  markSyncJobCompleted: (...args: unknown[]) => markSyncJobCompletedMock(...args),
+  markSyncJobFailed: (...args: unknown[]) => markSyncJobFailedMock(...args),
   tryReserveMonthlyAiGeneration: (...args: unknown[]) => tryReserveMonthlyAiGenerationMock(...args),
   releaseMonthlyAiGenerationReservation: (...args: unknown[]) => releaseMonthlyAiGenerationReservationMock(...args),
   DEFAULT_NOTIFICATION_PREFERENCES: {
@@ -153,12 +183,16 @@ const subscriptionsUpdateMock = vi.fn().mockResolvedValue({
   cancel_at_period_end: true,
   items: { data: [{ current_period_end: 1735689600 }] },
 });
+const checkoutSessionsCreateMock = vi.fn().mockResolvedValue({ url: "https://checkout.stripe.example/session" });
+const customersCreateMock = vi.fn().mockResolvedValue({ id: "cus_new" });
 const createStripeClientMock = vi.fn(() => ({
   billingPortal: { sessions: { create: billingPortalSessionsCreateMock } },
-  customers: { retrieve: customersRetrieveMock },
+  customers: { retrieve: customersRetrieveMock, create: customersCreateMock },
   invoices: { list: invoicesListMock },
   subscriptions: { retrieve: subscriptionsRetrieveMock, update: subscriptionsUpdateMock },
+  checkout: { sessions: { create: checkoutSessionsCreateMock } },
 }));
+const resolvePlanPriceIdsMock = vi.fn().mockReturnValue({ standard: "price_standard" });
 const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["acct-1"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const createInventoryLocationMock = vi.fn().mockResolvedValue(undefined);
@@ -176,6 +210,7 @@ const subscribeToFixedPriceTransactionNotificationsMock = vi.fn().mockResolvedVa
 const listProductsMock = vi.fn().mockResolvedValue({ items: [], nextCursor: undefined });
 const getRequiredItemAspectsMock = vi.fn().mockResolvedValue([]);
 const getAuthorizationUrlMock = vi.fn().mockReturnValue("https://ebay.example/oauth?state=signed-state");
+const createShippingFulfillmentMock = vi.fn().mockResolvedValue(undefined);
 const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createInventoryLocation: createInventoryLocationMock,
   listInventoryLocations: listInventoryLocationsMock,
@@ -192,6 +227,7 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   subscribeToFixedPriceTransactionNotifications: subscribeToFixedPriceTransactionNotificationsMock,
   listProducts: listProductsMock,
   getRequiredItemAspects: getRequiredItemAspectsMock,
+  createShippingFulfillment: createShippingFulfillmentMock,
 }));
 
 const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
@@ -203,11 +239,15 @@ const signStateMock = vi.fn().mockReturnValue("signed-state");
 const signWebhookDestinationTokenMock = vi.fn().mockReturnValue("webhook-token");
 const requireEnvMock = vi.fn().mockReturnValue("https://api.example/oauth/base/callback");
 const deleteOAuthConnectionsForTenantMock = vi.fn().mockResolvedValue([]);
+const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
+const sendEmailMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@ai-ec/lambda-shared", () => ({
   getDb: () => getDbMock(),
   getQueueUrls: () => getQueueUrlsMock(),
   enqueue: (...args: unknown[]) => enqueueMock(...args),
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
+  recordSyncError: (...args: unknown[]) => recordSyncErrorMock(...args),
+  sendEmail: (...args: unknown[]) => sendEmailMock(...args),
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
@@ -218,9 +258,11 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   signState: (...args: unknown[]) => signStateMock(...args),
   signWebhookDestinationToken: (...args: unknown[]) => signWebhookDestinationTokenMock(...args),
   requireCloudFrontOrigin: (event: unknown) => requireCloudFrontOriginMock(event),
+  emitSecurityDenialMetric: vi.fn(),
   requireEnv: (...args: unknown[]) => requireEnvMock(...args),
   createStripeClient: () => createStripeClientMock(),
   deleteOAuthConnectionsForTenant: (...args: unknown[]) => deleteOAuthConnectionsForTenantMock(...args),
+  resolvePlanPriceIds: (...args: unknown[]) => resolvePlanPriceIdsMock(...args),
 }));
 
 const { handler } = await import("./handler.js");
@@ -312,6 +354,17 @@ describe("admin-api handler", () => {
     countProductsByStatusMock.mockClear().mockResolvedValue(0);
     countChannelListingsByStatusMock.mockClear().mockResolvedValue(0);
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
+    getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
+    listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
+    getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
+    markEbayTrackingSyncedMock.mockClear();
+    insertSyncJobMock.mockClear().mockResolvedValue({ id: "job-1", attempts: 0 });
+    markSyncJobCompletedMock.mockClear();
+    markSyncJobFailedMock.mockClear();
+    recordSyncErrorMock.mockClear();
+    createShippingFulfillmentMock.mockClear().mockResolvedValue(undefined);
+    sendEmailMock.mockClear().mockResolvedValue(undefined);
+    delete process.env.OPERATOR_EMAIL;
     tryReserveMonthlyAiGenerationMock.mockClear().mockResolvedValue(true);
     releaseMonthlyAiGenerationReservationMock.mockClear();
     requireCloudFrontOriginMock.mockReturnValue(null);
@@ -796,7 +849,7 @@ describe("admin-api handler", () => {
   it("sync-errors retry re-enqueues the original job and marks the error resolved", async () => {
     fakeDb = createFakeDb([
       [{ id: "e1", jobId: "job-1" }],
-      [{ id: "job-1", type: "ai_generate", productId: "p1", payload: {} }],
+      [{ id: "job-1", type: "ai_generate", productId: "p1", payload: { tenantId: "victim-tenant", productId: "victim-product", type: "ebay_update" } }],
     ]);
     const res = await callHandler(makeEvent("POST", "/admin/sync-errors/e1/retry"));
     expect(res.statusCode).toBe(202);
@@ -1295,9 +1348,50 @@ describe("admin-api handler", () => {
     expect(predictStockoutRiskMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "product-1");
   });
 
+  it("GET /admin/products/{id}/customs-risk flags a lithium-battery keyword found in the product's own title", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "product-1", title: "モバイルバッテリー 10000mAh", descriptionJa: "", material: null }],
+      [], // no AI draft yet
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.hasRisk).toBe(true);
+    expect(body.flags).toEqual([expect.objectContaining({ category: "lithium_battery" })]);
+  });
+
+  it("GET /admin/products/{id}/customs-risk also scans the AI-generated English draft, not just the Japanese source", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "product-1", title: "充電器セット", descriptionJa: "普通の充電器です。", material: null }],
+      [{ titleEn: "Charger Set", descriptionHtmlEn: "Includes a rechargeable lithium battery pack." }],
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!).hasRisk).toBe(true);
+  });
+
+  it("GET /admin/products/{id}/customs-risk reports no risk for an ordinary product", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", title: "陶器の花瓶", descriptionJa: "手作りです。", material: "陶器" }], []]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/customs-risk"));
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body!)).toEqual({ flags: [], hasRisk: false });
+  });
+
+  it("GET /admin/products/{id}/customs-risk returns 404 for a product that doesn't exist", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("GET", "/admin/products/missing/customs-risk"));
+    expect(res.statusCode).toBe(404);
+  });
+
   it("GET /admin/products/{id}/dynamic-price computes a recommended price using a real FX rate and the platform defaults", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+      [{ id: "product-1", priceJpy: 99999, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set
     ]);
 
@@ -1305,13 +1399,15 @@ describe("admin-api handler", () => {
 
     expect(res.statusCode).toBe(200);
     expect(fetchFxRateMock).toHaveBeenCalledTimes(1);
-    // costUsd = 67; P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
-    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 102.94, fxSource: "test" });
+    // No tenant-set default and no order history -> falls back to the platform default (0.3),
+    // and this fresh, non-high-demand product gets no learned-margin adjustment.
+    // costUsd = 67 (from costJpy=10000, NOT priceJpy=99999); P = (67*1.3 + 0 + 0.40) / 0.85 ≈ 102.94
+    expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 102.94, fxSource: "test", marginBaselineSource: "fallback_default" });
   });
 
   it("GET /admin/products/{id}/dynamic-price uses this product's saved shipping/margin overrides", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: 1500, targetMarginBasisPoints: 5000 }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
     ]);
 
@@ -1323,7 +1419,7 @@ describe("admin-api handler", () => {
 
   it("GET /admin/products/{id}/dynamic-price lets query params override the saved config for a hypothetical preview", async () => {
     fakeDb = createFakeDb([
-      [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
       [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
     ]);
 
@@ -1332,6 +1428,54 @@ describe("admin-api handler", () => {
     );
 
     expect(JSON.parse(res.body!)).toMatchObject({ recommendedPriceUsd: 136.35 });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price returns 409 when the product has no acquisition cost entered yet", async () => {
+    fakeDb = createFakeDb([[{ id: "product-1", priceJpy: 10000, costJpy: null, shippingCostUsdCents: null, targetMarginBasisPoints: null }]]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body!)).toEqual({ error: "cost_not_set" });
+  });
+
+  it("GET /admin/products/{id}/dynamic-price learns from the tenant's own order history once there's enough of it, discounted for a stale listing", async () => {
+    getTenantMarginHistoryMock.mockResolvedValueOnce({ avgMarkupRatio: 0.2, sampleSize: 10 });
+    predictStockoutRiskMock.mockResolvedValueOnce({
+      productId: "product-1",
+      daysUntilStockout: null,
+      highRisk: false,
+      salesPerDay: 0,
+      currentQuantity: 5,
+      windowDays: 7,
+    });
+    const createdAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000); // 40 days ago -> stale_30
+    fakeDb = createFakeDb([
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt }],
+      [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }],
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.marginBaselineSource).toBe("tenant_history");
+    // baseline 0.2 - 0.03 (stale_30 discount) = 0.17, always below the platform default (0.3)
+    // the un-personalized fallback would have used.
+    expect(getTenantMarginHistoryMock).toHaveBeenCalledWith(fakeDb, TENANT_A, 0.0067);
+  });
+
+  it("GET /admin/products/{id}/dynamic-price respects a tenant's own explicitly configured default margin over the learned one", async () => {
+    fakeDb = createFakeDb([
+      [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
+      [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: 4000 }], // tenant explicitly set 40%
+    ]);
+
+    const res = await callHandler(makeEvent("GET", "/admin/products/product-1/dynamic-price"));
+
+    expect(res.statusCode).toBe(200);
+    expect(getTenantMarginHistoryMock).not.toHaveBeenCalled();
+    expect(JSON.parse(res.body!).marginBaselineSource).toBeNull();
   });
 
   it("GET /admin/products/{id}/dynamic-price returns 404 for a product that doesn't exist", async () => {
@@ -1366,7 +1510,7 @@ describe("admin-api handler", () => {
 
     it("writes the recommended price onto the draft, enqueues ebay_update, and records an audit log entry", async () => {
       fakeDb = createFakeDb([
-        [{ id: "product-1", priceJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null }],
+        [{ id: "product-1", priceJpy: 10000, costJpy: 10000, shippingCostUsdCents: null, targetMarginBasisPoints: null, createdAt: new Date() }],
         [{ status: "published", externalId: "ext-1" }],
         [{ id: "draft-1", suggestedPriceUsd: null }],
         [{ defaultShippingCostJpyIntl: null, defaultTargetMarginBasisPoints: null }], // tenant pricing defaults -- none set
@@ -1609,6 +1753,33 @@ describe("admin-api handler", () => {
       expect(parsed.avgProfitMarginBasisPoints).toBeNull();
     });
 
+    it("GET /admin/orders flags a DDP-required row via assessDdpRequirement", async () => {
+      const order = {
+        id: "o1",
+        productId: "p1",
+        channel: "ebay",
+        status: "SHIPPED",
+        shipToCountryCode: "US",
+        salePriceUsdCents: 15_000,
+        placedAt: new Date("2026-01-01T00:00:00.000Z"),
+        profitFinalizedAt: null,
+        finalizedNetProfitUsdCents: null,
+        returnRequestedAt: null,
+        ddpConfirmedAt: null,
+      };
+      fakeDb = createFakeDb([
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }],
+        [{ count: 1 }],
+        [],
+        [],
+      ]);
+      getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 150, costUsdCents: 100, netProfitUsdCents: 50, profitMarginBasisPoints: 3333 });
+
+      const res = await callHandler(makeEvent("GET", "/admin/orders"));
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders[0].ddp).toMatchObject({ status: "required" });
+    });
+
     it("GET /admin/orders flags a row whose product has an unresolved possible_double_sale error", async () => {
       const order = {
         id: "o1",
@@ -1808,6 +1979,227 @@ describe("admin-api handler", () => {
       expect(res.statusCode).toBe(409);
     });
 
+    it("POST /admin/orders/{id}/status returns 409 when the order's status changed concurrently", async () => {
+      transitionOrderStatusMock.mockRejectedValueOnce(new OrderStatusConflictErrorFake("order o1 was no longer in status PAID"));
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "status_conflict" });
+    });
+
+    it("POST /admin/orders/{id}/status returns 400 when transitionOrderStatus requires DDP confirmation", async () => {
+      transitionOrderStatusMock.mockRejectedValueOnce(
+        new DdpConfirmationRequiredErrorFake("米国向け・単価$2,500未満のため、eBayのDDP義務化の対象です。"),
+      );
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toMatchObject({ error: "ddp_confirmation_required" });
+    });
+
+    it("POST /admin/orders/{id}/status passes ddpConfirmed through to transitionOrderStatus", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "ebay", ddpConfirmedAt: new Date() });
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", ddpConfirmed: true }));
+      expect(res.statusCode).toBe(200);
+      expect(transitionOrderStatusMock).toHaveBeenCalledWith(
+        fakeDb,
+        TENANT_A,
+        "o1",
+        "SHIPPED",
+        expect.objectContaining({ ddpConfirmed: true }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status pushes tracking info to eBay when marking an eBay order SHIPPED with tracking details", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 2,
+        productId: "product-1",
+        trackingNumber: "1234567890",
+        shippingCarrierCode: "Japan Post",
+      });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "1234567890", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("synced");
+      expect(transitionOrderStatusMock).toHaveBeenCalledWith(
+        fakeDb,
+        TENANT_A,
+        "o1",
+        "SHIPPED",
+        expect.objectContaining({ extra: expect.objectContaining({ trackingNumber: "1234567890", shippingCarrierCode: "Japan Post" }) }),
+      );
+      expect(createShippingFulfillmentMock).toHaveBeenCalledWith("token", "ext-order-1", "li-1", 2, "1234567890", "Japan Post");
+      expect(markEbayTrackingSyncedMock).toHaveBeenCalledWith(fakeDb, TENANT_A, "o1");
+      // Created up front, before the eBay call, so a failure always has a job to record its
+      // sync_errors row against (see the next test) -- and marked completed immediately once
+      // this first, synchronous attempt itself succeeds, so it never shows as a stray
+      // "pending" outbox job for an order that's already fully synced.
+      expect(insertSyncJobMock).toHaveBeenCalledWith(fakeDb, {
+        tenantId: TENANT_A,
+        type: "ebay_tracking_upload",
+        idempotencyKey: `${TENANT_A}:ebay-tracking-upload:o1`,
+        productId: "product-1",
+        payload: { type: "ebay_tracking_upload", tenantId: TENANT_A, orderId: "o1" },
+      });
+      expect(markSyncJobCompletedMock).toHaveBeenCalledWith(fakeDb, "job-1");
+      expect(markSyncJobFailedMock).not.toHaveBeenCalled();
+      expect(recordSyncErrorMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status records a sync_error with a retryable jobId (but still succeeds) when the eBay push itself fails", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 1,
+        productId: "product-1",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
+      });
+      createShippingFulfillmentMock.mockRejectedValueOnce(new Error("eBay rejected the request"));
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("failed");
+      // jobId is the whole point of this fix: without it, POST /admin/sync-errors/{id}/retry
+      // (which requires one) could never pick a failed tracking upload back up at all.
+      expect(recordSyncErrorMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: TENANT_A, jobId: "job-1", channel: "ebay", errorCode: "ebay_tracking_sync_failed" }),
+      );
+      expect(markSyncJobFailedMock).toHaveBeenCalledWith(fakeDb, "job-1", 0);
+      expect(markSyncJobCompletedMock).not.toHaveBeenCalled();
+      expect(markEbayTrackingSyncedMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status never re-registers a shipment with eBay a second time once it's already synced", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+        quantity: 1,
+        productId: "product-1",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
+        // Set by an earlier attempt -- e.g. a prior SHIPPED transition request that actually
+        // succeeded against eBay. A second request reaching this same code path (a retried
+        // client call, a duplicate submit) must never call createShippingFulfillment again,
+        // which would register a brand new fulfillment record rather than updating one.
+        ebayTrackingSyncedAt: new Date(),
+      });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("synced");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+      expect(insertSyncJobMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status skips the eBay push for a BASE order, even when marked SHIPPED", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "base", externalOrderId: "base-order-1" });
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Yamato" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("skipped");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status sends a shipping-notice email to the buyer when a BASE order with a known buyer email ships", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "base",
+        externalOrderId: "base-order-1",
+        productId: "product-1",
+        buyerEmail: "buyer@example.com",
+        buyerName: "山田 太郎",
+        trackingNumber: "123",
+        shippingCarrierCode: "Japan Post",
+      });
+      fakeDb = createFakeDb([[{ name: "My Shop" }]]);
+
+      const res = await callHandler(
+        makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED", trackingNumber: "123", shippingCarrierCode: "Japan Post" }),
+      );
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("sent");
+      expect(sendEmailMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "buyer@example.com",
+          subject: expect.stringContaining("My Shop"),
+          bodyText: expect.stringContaining("base-order-1"),
+        }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status records a sync_error (but still succeeds) when the shipping-notice email itself fails to send", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "base",
+        externalOrderId: "base-order-1",
+        productId: "product-1",
+        buyerEmail: "buyer@example.com",
+      });
+      fakeDb = createFakeDb([[{ name: "My Shop" }]]);
+      sendEmailMock.mockRejectedValueOnce(new Error("SES_FROM_EMAIL is not configured"));
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("failed");
+      expect(recordSyncErrorMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: TENANT_A, channel: "base", errorCode: "shipping_notice_email_failed" }),
+      );
+    });
+
+    it("POST /admin/orders/{id}/status skips the shipping-notice email when the BASE order has no known buyer email", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({ id: "o1", status: "SHIPPED", channel: "base", externalOrderId: "base-order-1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).shippingNoticeEmailStatus).toBe("skipped");
+      expect(sendEmailMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/orders/{id}/status skips the eBay push when no tracking number was provided", async () => {
+      transitionOrderStatusMock.mockResolvedValueOnce({
+        id: "o1",
+        status: "SHIPPED",
+        channel: "ebay",
+        externalOrderId: "ext-order-1",
+        ebayLineItemId: "li-1",
+      });
+
+      const res = await callHandler(makeEvent("POST", "/admin/orders/o1/status", {}, { status: "SHIPPED" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).ebayTrackingSyncStatus).toBe("skipped");
+      expect(createShippingFulfillmentMock).not.toHaveBeenCalled();
+    });
+
     it("POST /admin/orders/{id}/finalize-profit snapshots the profit", async () => {
       finalizeOrderProfitMock.mockResolvedValueOnce({ id: "o1", finalizedNetProfitUsdCents: 1000 });
       const res = await callHandler(makeEvent("POST", "/admin/orders/o1/finalize-profit"));
@@ -1937,10 +2329,24 @@ describe("admin-api handler", () => {
     });
 
     it("POST /admin/products/{id}/sns/status marks posting flags", async () => {
+      fakeDb = createFakeDb([[{ id: "p1" }]]);
       markSnsStatusMock.mockResolvedValueOnce({ productId: "p1", videoCreated: true });
       const res = await callHandler(makeEvent("POST", "/admin/products/p1/sns/status", {}, { videoCreated: true }));
       expect(res.statusCode).toBe(200);
       expect(markSnsStatusMock).toHaveBeenCalledWith(expect.anything(), TENANT_A, "p1", { videoCreated: true });
+    });
+
+    it("POST /admin/products/{id}/sns/status returns 404 and never touches sns_content for a product belonging to another tenant", async () => {
+      // IDOR regression: sns_content.productId is its own primary key, not a
+      // (tenantId, productId) composite, and markSnsStatus's upsert never checks or sets
+      // tenantId on conflict -- without the ownership check this route now does first, a
+      // caller could flip another tenant's SNS flags (or silently create a misattributed
+      // row) purely by guessing a productId it doesn't own.
+      fakeDb = createFakeDb([[]]); // no product_master row for this tenant+id
+      const res = await callHandler(makeEvent("POST", "/admin/products/other-tenants-product/sns/status", {}, { videoCreated: true }));
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body!)).toEqual({ error: "product_not_found" });
+      expect(markSnsStatusMock).not.toHaveBeenCalled();
     });
 
     it("GET /admin/sync/state requires a channel", async () => {
@@ -2267,6 +2673,12 @@ describe("admin-api handler", () => {
       getTenantBillingStatusMock.mockClear();
       getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeCustomerId: null });
       billingPortalSessionsCreateMock.mockClear();
+      checkoutSessionsCreateMock.mockClear();
+      subscriptionsUpdateMock.mockClear();
+      subscriptionsRetrieveMock.mockClear();
+      resolvePlanPriceIdsMock.mockClear();
+      resolvePlanPriceIdsMock.mockReturnValue({ standard: "price_standard" });
+      recordAuditLogMock.mockClear();
     });
 
     it("blocks every other route with 402 when the tenant isn't active", async () => {
@@ -2628,6 +3040,111 @@ describe("admin-api handler", () => {
       expect(billingPortalSessionsCreateMock).not.toHaveBeenCalled();
     });
 
+    it("POST /admin/billing/checkout-session defaults to the standard plan's price when no plan is specified", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session"));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(
+        expect.objectContaining({ line_items: [{ price: "price_standard", quantity: 1 }] }),
+      );
+      expect(JSON.parse(res.body!)).toEqual({ url: "https://checkout.stripe.example/session" });
+    });
+
+    it("POST /admin/billing/checkout-session falls back to the tenant's own stored plan, not hardcoded standard, when none is specified", async () => {
+      // Simulates a tenant resuming payment after their original signup-time Stripe Checkout
+      // Session creation failed (see signup's confirmSignup) -- the frontend's resume action
+      // sends no plan body at all, so this must recover the originally selected "pro" tier
+      // from tenants.plan (persisted at signup) rather than silently defaulting to standard.
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "pro", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session"));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+    });
+
+    it("POST /admin/billing/checkout-session uses the requested plan's own price when one is specified", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+    });
+
+    it("POST /admin/billing/checkout-session rejects a plan name that isn't a real plan", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "enterprise-deluxe" }));
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "unknown_plan", plan: "enterprise-deluxe" });
+      expect(checkoutSessionsCreateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/checkout-session returns 409 when the requested plan has no configured Stripe price yet", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "pending_payment", stripeCustomerId: "cus_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard" }); // no "pro" entry
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/checkout-session", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toEqual({ error: "plan_not_available", plan: "pro" });
+      expect(checkoutSessionsCreateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/change-plan updates the live subscription's price and audit-logs the request", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "active", stripeSubscriptionId: "sub_1" });
+      getAppCredentialsMock.mockResolvedValueOnce({ secretKey: "sk_test_abc123", priceId: "price_standard" });
+      resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_standard", pro: "price_pro" });
+      subscriptionsRetrieveMock.mockResolvedValueOnce({ items: { data: [{ id: "si_1" }] } });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(202);
+      expect(subscriptionsUpdateMock).toHaveBeenCalledWith("sub_1", {
+        items: [{ id: "si_1", price: "price_pro" }],
+        proration_behavior: "create_prorations",
+      });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ action: "plan_change_requested", before: { plan: "standard" }, after: { plan: "pro" } }),
+      );
+    });
+
+    it("POST /admin/billing/change-plan returns 409 when already on the requested plan", async () => {
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "pro", status: "active", stripeSubscriptionId: "sub_1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(409);
+      expect(JSON.parse(res.body!)).toEqual({ error: "already_on_plan", plan: "pro" });
+      expect(subscriptionsUpdateMock).not.toHaveBeenCalled();
+    });
+
+    it("POST /admin/billing/change-plan is blocked by the global billing gate (402) when the tenant isn't active", async () => {
+      // /admin/billing/change-plan is deliberately not in billingExemptRoutes -- the global
+      // gate at the top of the handler already 402s any non-active tenant before this
+      // route's own code ever runs, for any write method (not just GET's grace-period
+      // carve-out), so there's no separate "not active" check to test inside the route.
+      getTenantBillingStatusMock.mockResolvedValue({ plan: "standard", status: "past_due", stripeSubscriptionId: "sub_1" });
+
+      const res = await callHandler(makeEvent("POST", "/admin/billing/change-plan", {}, { plan: "pro" }));
+
+      expect(res.statusCode).toBe(402);
+      expect(JSON.parse(res.body!)).toEqual({ error: "billing_inactive", status: "past_due", gracePeriodEndsAt: null });
+      expect(subscriptionsUpdateMock).not.toHaveBeenCalled();
+    });
+
     it("allows normal routes through once the tenant is active again", async () => {
       fakeDb = createFakeDb([[]]);
 
@@ -2636,9 +3153,10 @@ describe("admin-api handler", () => {
       expect(res.statusCode).toBe(200);
     });
 
-    it("GET /admin/usage returns product and AI-generation usage against the plan's limits", async () => {
+    it("GET /admin/usage returns product, AI-generation, and eBay-sync usage against the plan's limits", async () => {
       countProductsMock.mockResolvedValueOnce(12);
       getMonthlyAiGenerationCountMock.mockResolvedValueOnce(3);
+      getMonthlyEbaySyncCountMock.mockResolvedValueOnce(7);
 
       const res = await callHandler(makeEvent("GET", "/admin/usage"));
 
@@ -2647,6 +3165,8 @@ describe("admin-api handler", () => {
       expect(body.products).toEqual({ used: 12, limit: 300 });
       expect(body.aiGenerations).toMatchObject({ used: 3, limit: 100 });
       expect(typeof body.aiGenerations.periodStart).toBe("string");
+      expect(body.ebaySyncs).toMatchObject({ used: 7, limit: 300 });
+      expect(typeof body.ebaySyncs.periodStart).toBe("string");
     });
 
     it("GET /admin/usage is blocked (402) when the tenant isn't active, like every other non-billing route", async () => {
@@ -2655,6 +3175,97 @@ describe("admin-api handler", () => {
       const res = await callHandler(makeEvent("GET", "/admin/usage"));
 
       expect(res.statusCode).toBe(402);
+    });
+  });
+
+  describe("operator dashboard (/admin/ops/*)", () => {
+    const OPERATOR_EMAIL = "operator@example.com";
+    function opsEvent(method: string, path: string, body?: unknown, email = OPERATOR_EMAIL) {
+      return makeEvent(method, path, {}, body, { email, "custom:tenant_id": TENANT_A });
+    }
+
+    it("403s every /admin/ops/* route when OPERATOR_EMAIL isn't configured", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(403);
+      expect(listTenantsOpsSummaryMock).not.toHaveBeenCalled();
+    });
+
+    it("403s a caller whose email doesn't match the configured operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants", undefined, "someone-else@example.com"));
+
+      expect(res.statusCode).toBe(403);
+    });
+
+    it("GET /admin/ops/tenants returns the cross-tenant summary for the operator", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      listTenantsOpsSummaryMock.mockResolvedValueOnce([
+        { id: "tenant-b", name: "Shop B", plan: "standard", status: "active", contactEmail: "b@example.com", unresolvedErrorCount24h: 2, isolatedChannels: ["ebay"], lastActivityAt: null },
+      ]);
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).tenants).toHaveLength(1);
+      expect(listTenantsOpsSummaryMock).toHaveBeenCalledWith(fakeDb);
+    });
+
+    it("GET /admin/ops/tenants/{id}/sync-errors lists unresolved errors for the chosen tenant, not the caller's own", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([[{ error: { id: "err-1", tenantId: "tenant-b" }, productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]]);
+
+      const res = await callHandler(opsEvent("GET", "/admin/ops/tenants/tenant-b/sync-errors"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!).syncErrors).toEqual([{ id: "err-1", tenantId: "tenant-b", productTitle: "Widget", productSku: "SKU-1", jobType: "ebay_update" }]);
+    });
+
+    it("POST /admin/ops/tenants/{id}/sync-errors/{id}/retry re-queues the original job and marks the error resolved", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([
+        [{ id: "err-1", jobId: "job-1", tenantId: "tenant-b" }],
+        [{ id: "job-1", type: "ebay_update", productId: "product-1", payload: { foo: "bar", tenantId: "victim-tenant", productId: "victim-product", type: "ai_generate" } }],
+      ]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/sync-errors/err-1/retry"));
+
+      expect(res.statusCode).toBe(202);
+      expect(enqueueMock).toHaveBeenCalledWith(
+        "ebay-sync-url",
+        expect.objectContaining({ type: "ebay_update", tenantId: "tenant-b", productId: "product-1", foo: "bar" }),
+        expect.stringContaining("tenant-b:ops-retry:err-1:"),
+      );
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "sync_error_retried", entityId: "err-1" }),
+      );
+    });
+
+    it("POST /admin/ops/tenants/{id}/channel-isolation/{channel}/clear resolves that tenant's recent channel errors", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/ebay/clear"));
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body!)).toEqual({ channel: "ebay", cleared: true });
+      expect(recordAuditLogMock).toHaveBeenCalledWith(
+        fakeDb,
+        expect.objectContaining({ tenantId: "tenant-b", actor: `operator:${OPERATOR_EMAIL}`, action: "channel_isolation_cleared", entityId: "ebay" }),
+      );
+    });
+
+    it("rejects an unknown channel on the isolation-clear route", async () => {
+      process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+      fakeDb = createFakeDb([]);
+
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/shopify/clear"));
+
+      expect(res.statusCode).toBe(400);
     });
   });
 });

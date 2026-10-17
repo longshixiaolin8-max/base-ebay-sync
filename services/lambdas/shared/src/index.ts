@@ -13,3 +13,4 @@ export * from "./fx-rate.js";
 export * from "./metrics.js";
 export * from "./stripe.js";
 export * from "./email.js";
+export * from "./ebay-sync-retry-classification.js";

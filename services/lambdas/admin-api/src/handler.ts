@@ -1,13 +1,18 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
+import { boundedDashboardLimit } from "./query-limits.js";
 import {
   applyStandardAspectFallbacks,
   ChannelType,
   IMPLEMENTED_CHANNELS,
+  assessCustomsRisk,
+  assessDdpRequirement,
   classifyInventoryDiffMagnitude,
   classifyStaleness,
   computeDynamicPrice,
+  computeLearnedTargetMargin,
+  daysBetween,
   DEFAULT_SHIPPING_USD,
   DEFAULT_TARGET_MARGIN_RATIO,
   draftConfidenceScore,
@@ -16,6 +21,7 @@ import {
   ItemCondition,
   matchProductIdentity,
   OrderStatus,
+  PLAN_LIMITS,
   type ProductIdentityCandidate,
   ProductStatus,
 } from "@ai-ec/core";
@@ -31,22 +37,32 @@ import {
   countProducts,
   countProductsByStatus,
   DEFAULT_NOTIFICATION_PREFERENCES,
+  DdpConfirmationRequiredError,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
   getLatestSyncedAt,
   getLiveOrderProfit,
   getMonthlyAiGenerationCount,
+  getMonthlyEbaySyncCount,
   getSnsContent,
   getTenantBillingStatus,
+  getTenantMarginHistory,
   InvalidOrderTransitionError,
+  insertSyncJob,
   inventoryMaster,
   listOrdersForProduct,
+  listTenantsOpsSummary,
+  markEbayTrackingSynced,
   markSnsStatus,
+  markSyncJobCompleted,
+  markSyncJobFailed,
   oauthConnections,
   orders,
+  OrderStatusConflictError,
   predictStockoutRisk,
   productMaster,
+  PROFIT_AFFECTING_EXTRA_KEYS,
   reconstructInventory,
   releaseMonthlyAiGenerationReservation,
   resolveNotificationPreferences,
@@ -74,8 +90,12 @@ import {
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
+  recordSyncError,
   requireCloudFrontOrigin,
+  emitSecurityDenialMetric,
   requireEnv,
+  resolvePlanPriceIds,
+  sendEmail,
   signState,
   signWebhookDestinationToken,
   type EbayAppCredentials,
@@ -102,7 +122,11 @@ async function currentFxRate(): Promise<number> {
  * デフォルトのみ使う -- eBay向けの価格計算(USD建て)にのみ関係するため、国内(domestic)
  * 送料は無関係。
  */
-async function resolveTenantPricingDefaults(db: Database, tenantId: string, usdPerJpy: number): Promise<{ shippingUsd: number; targetMarginRatio: number }> {
+async function resolveTenantPricingDefaults(
+  db: Database,
+  tenantId: string,
+  usdPerJpy: number,
+): Promise<{ shippingUsd: number; targetMarginRatio: number; hasExplicitTenantDefault: boolean }> {
   const [row] = await db
     .select({ defaultShippingCostJpyIntl: tenants.defaultShippingCostJpyIntl, defaultTargetMarginBasisPoints: tenants.defaultTargetMarginBasisPoints })
     .from(tenants)
@@ -111,7 +135,38 @@ async function resolveTenantPricingDefaults(db: Database, tenantId: string, usdP
   return {
     shippingUsd: row?.defaultShippingCostJpyIntl != null ? row.defaultShippingCostJpyIntl * usdPerJpy : DEFAULT_SHIPPING_USD,
     targetMarginRatio: row?.defaultTargetMarginBasisPoints != null ? row.defaultTargetMarginBasisPoints / 10000 : DEFAULT_TARGET_MARGIN_RATIO,
+    hasExplicitTenantDefault: row?.defaultTargetMarginBasisPoints != null,
   };
+}
+
+/**
+ * Replaces the flat DEFAULT_TARGET_MARGIN_RATIO fallback (packages/core/src/margin-
+ * learning.ts's computeLearnedTargetMargin) with a margin personalized to this tenant's own
+ * realized sales history, nudged by this specific product's staleness/demand signal. Only
+ * ever reached as the LAST resort: a product's own per-product override and a tenant's own
+ * explicitly configured default (both deliberate choices made via the settings/pricing-
+ * config UI) always win outright before this function is even called -- see both call sites
+ * below, which only call this when `hasExplicitTenantDefault` is false.
+ */
+async function resolveLearnedMarginRatio(
+  db: Database,
+  tenantId: string,
+  product: { id: string; createdAt: Date },
+  usdPerJpy: number,
+): Promise<{ targetMarginRatio: number; baselineSource: string; adjustmentReason: string }> {
+  const [marginHistory, stockoutRisk] = await Promise.all([
+    getTenantMarginHistory(db, tenantId, usdPerJpy),
+    predictStockoutRisk(db, tenantId, product.id),
+  ]);
+  const daysListed = daysBetween(product.createdAt, new Date());
+  const learned = computeLearnedTargetMargin({
+    historicalAvgMarginRatio: marginHistory.avgMarkupRatio,
+    sampleSize: marginHistory.sampleSize,
+    fallbackMarginRatio: DEFAULT_TARGET_MARGIN_RATIO,
+    staleness: classifyStaleness(daysListed),
+    highDemand: stockoutRisk.highRisk,
+  });
+  return { targetMarginRatio: learned.targetMarginRatio, baselineSource: learned.baselineSource, adjustmentReason: learned.adjustmentReason };
 }
 
 function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
@@ -147,8 +202,28 @@ export class MissingTenantClaimError extends Error {
  */
 function tenantIdFromEvent(event: APIGatewayProxyEventV2): string {
   const tenantId = claimsFromEvent(event)?.["custom:tenant_id"];
-  if (!tenantId) throw new MissingTenantClaimError();
+  if (!tenantId) {
+    emitSecurityDenialMetric("tenant_claim_missing");
+    throw new MissingTenantClaimError();
+  }
   return tenantId;
+}
+
+/**
+ * Gates every "/admin/ops/*" route (the platform operator's own cross-tenant dashboard) --
+ * unlike every other route in this file, these act on a tenantId taken from the URL path,
+ * not the caller's own `custom:tenant_id` claim, so the normal per-tenant isolation that
+ * claim provides doesn't apply here at all. OPERATOR_EMAIL is only ever set (see
+ * infra/lib/lambda-stack.ts) once PlatformConfig.operatorEmail is configured; left unset,
+ * every "/admin/ops/*" call 403s for everyone, fail-closed rather than fail-open.
+ */
+function requireOperator(event: APIGatewayProxyEventV2): APIGatewayProxyResultV2 | undefined {
+  const operatorEmail = process.env.OPERATOR_EMAIL;
+  if (!operatorEmail || actorFromEvent(event) !== operatorEmail) {
+    emitSecurityDenialMetric("operator_access_denied");
+    return json(403, { error: "not_authorized" });
+  }
+  return undefined;
 }
 
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
@@ -180,7 +255,12 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       "POST /admin/billing/portal-session",
       "POST /admin/billing/checkout-session",
     ]);
-    if (!billingExemptRoutes.has(`${method} ${path}`)) {
+    // The operator dashboard ("/admin/ops/*") acts across every tenant, not just the
+    // caller's own -- its own tenant's billing state (the caller is almost always the
+    // platform operator's own tenant, incidental to this feature) has no bearing on whether
+    // ops access to OTHER tenants' data should work. requireOperator() below is this route
+    // family's real gate.
+    if (!billingExemptRoutes.has(`${method} ${path}`) && !path.startsWith("/admin/ops/")) {
       const billing = await getTenantBillingStatus(db, tenantId);
       const inGracePeriod =
         billing?.status === "canceled_grace" && !!billing.gracePeriodEndsAt && billing.gracePeriodEndsAt.getTime() > Date.now();
@@ -233,6 +313,21 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       }
       const stripe = createStripeClient(creds);
 
+      // Multi-tier commercial launch: an optional plan choice. Falls back to this tenant's
+      // own stored plan (tenants.plan -- set at signup time from the originally selected
+      // tier, see signup's confirmSignup/createPendingTenant) rather than hardcoding
+      // "standard", so a tenant resuming payment here after their initial Stripe Checkout
+      // Session creation failed (and whose frontend call sends no plan body at all) gets
+      // checked out for the tier they actually picked, not silently downgraded to Standard.
+      // Only a real PLAN_LIMITS entry is ever accepted -- an unrecognized name would
+      // otherwise resolve (via resolvePlanPriceIds's own fallback) to "standard"'s price
+      // while the tenant believes they're buying something else, a real-money mismatch
+      // worth rejecting outright rather than silently defaulting.
+      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan ?? billing.plan;
+      if (!(requestedPlan in PLAN_LIMITS)) return json(400, { error: "unknown_plan", plan: requestedPlan });
+      const priceId = resolvePlanPriceIds(creds)[requestedPlan];
+      if (!priceId) return json(409, { error: "plan_not_available", plan: requestedPlan });
+
       let customerId = billing.stripeCustomerId;
       if (!customerId) {
         const [tenant] = await db
@@ -252,13 +347,58 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const session = await stripe.checkout.sessions.create({
         mode: "subscription",
         customer: customerId,
-        line_items: [{ price: creds.priceId, quantity: 1 }],
+        line_items: [{ price: priceId, quantity: 1 }],
         success_url: `${requireEnv("ADMIN_APP_URL")}/login?checkout=success`,
         cancel_url: `${requireEnv("ADMIN_APP_URL")}/billing`,
         metadata: { tenantId },
         subscription_data: { trial_period_days: 30 },
       });
       return json(200, { url: session.url });
+    }
+
+    // Multi-tier commercial launch: lets an already-active tenant actually move between
+    // plans, which the Stripe customer portal link alone can't be relied on for -- whether
+    // the portal even offers a plan switch depends on Stripe Dashboard configuration this
+    // codebase has no control over. Updates the live subscription's price directly instead;
+    // Stripe's own customer.subscription.updated webhook (see stripe-webhook's handler)
+    // is what actually persists the new plan onto tenants.plan once Stripe confirms it,
+    // so this endpoint never writes tenants.plan itself -- it only requests the change.
+    if (method === "POST" && path === "/admin/billing/change-plan") {
+      const billing = await getTenantBillingStatus(db, tenantId);
+      // billing.status is already guaranteed "active" here -- this route isn't in
+      // billingExemptRoutes above, so the global gate itself already 402s any other
+      // status before this code ever runs.
+      if (!billing?.stripeSubscriptionId) return json(400, { error: "no_active_subscription" });
+
+      const requestedPlan = (JSON.parse(event.body ?? "{}") as { plan?: string }).plan;
+      if (!requestedPlan || !(requestedPlan in PLAN_LIMITS)) return json(400, { error: "unknown_plan", plan: requestedPlan });
+      if (requestedPlan === billing.plan) return json(409, { error: "already_on_plan", plan: requestedPlan });
+
+      const creds = await getAppCredentials<StripeAppCredentials>("stripe");
+      const priceId = resolvePlanPriceIds(creds)[requestedPlan];
+      if (!priceId) return json(409, { error: "plan_not_available", plan: requestedPlan });
+
+      const stripe = createStripeClient(creds);
+      const subscription = await stripe.subscriptions.retrieve(billing.stripeSubscriptionId);
+      const itemId = subscription.items.data[0]?.id;
+      if (!itemId) return json(409, { error: "subscription_has_no_items" });
+
+      await stripe.subscriptions.update(billing.stripeSubscriptionId, {
+        items: [{ id: itemId, price: priceId }],
+        proration_behavior: "create_prorations",
+      });
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "plan_change_requested",
+        entityType: "tenant",
+        entityId: tenantId,
+        before: { plan: billing.plan },
+        after: { plan: requestedPlan },
+      });
+
+      return json(202, { requestedPlan });
     }
 
     if (method === "POST" && path === "/admin/billing/portal-session") {
@@ -494,9 +634,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/admin/usage") {
       const billing = await getTenantBillingStatus(db, tenantId);
       const limits = getPlanLimits(billing?.plan ?? "standard");
-      const [productsUsed, aiGenerationsUsed] = await Promise.all([
+      const [productsUsed, aiGenerationsUsed, ebaySyncsUsed] = await Promise.all([
         countProducts(db, tenantId),
         getMonthlyAiGenerationCount(db, tenantId),
+        getMonthlyEbaySyncCount(db, tenantId),
       ]);
       const now = new Date();
       const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -506,6 +647,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         // 在庫監視ページの「監視対象商品数」と同じ real signal -- この基盤には商品カタログ
         // 全体とは別の「監視SKU」概念がないため、同じ数値・上限を再利用する。
         monitoredSkus: { used: productsUsed, limit: limits.maxProducts },
+        ebaySyncs: { used: ebaySyncsUsed, limit: limits.maxEbaySyncsPerMonth, periodStart: periodStart.toISOString() },
       });
     }
 
@@ -841,7 +983,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ condition: parsed.data }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ condition: parsed.data }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -878,7 +1020,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
       const merged = { ...draft.itemSpecifics, ...body.itemSpecifics };
-      await db.update(aiListingDraft).set({ itemSpecifics: merged }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ itemSpecifics: merged }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1011,7 +1153,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ suggestedPriceUsd: priceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: priceUsdCents }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1050,7 +1192,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .limit(1);
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
-      await db.update(aiListingDraft).set({ seoKeywords }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ seoKeywords }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1085,7 +1227,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!draft) return json(404, { error: "no_draft_for_product" });
 
       const internalNotes = body.internalNotes?.trim() || null;
-      await db.update(aiListingDraft).set({ internalNotes }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ internalNotes }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       return json(200, { productId: id, internalNotes });
     }
@@ -1140,10 +1282,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
       await enqueue(
         queueUrl,
-        { type: job.type, tenantId, productId: job.productId, ...job.payload },
+        { ...job.payload, type: job.type, tenantId, productId: job.productId },
         `${tenantId}:retry:${id}:${Date.now()}`,
       );
-      await db.update(syncErrors).set({ resolved: true }).where(eq(syncErrors.id, id));
+      await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, tenantId), eq(syncErrors.id, id)));
 
       await recordAuditLog(db, {
         tenantId,
@@ -1169,6 +1311,21 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!accountId) return json(409, { error: "no_ebay_account_connected" });
       const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
       const state = await adapter.debugOfferState(accessToken, sku);
+      return json(200, state);
+    }
+
+    // Ops diagnostic, no frontend UI: eBay's own Account API answer for what's actually
+    // blocking a SELLING_PRIVILEGE_REQUIRED (errorId 25002) rejection, which Seller Hub's own
+    // task list can show as fully complete while the Third-Party API still rejects every
+    // publish -- this calls eBay directly instead of guessing from the adapter's one bundled
+    // error message.
+    if (method === "GET" && path === "/admin/ebay/debug/payments-program") {
+      const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+      const adapter = createEbayAdapter(creds);
+      const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+      if (!accountId) return json(409, { error: "no_ebay_account_connected" });
+      const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+      const state = await adapter.getPaymentsProgramOnboarding(accessToken);
       return json(200, state);
     }
 
@@ -1631,6 +1788,37 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, risk);
     }
 
+    // Heuristic keyword scan for cross-border shipping red flags (lithium batteries,
+    // CITES-restricted materials, liquids/food, weapons/replicas, magnets) -- see
+    // assessCustomsRisk's own doc comment (@ai-ec/core) for exactly what this is and isn't.
+    // Scans both this product's own Japanese source text and, when one exists, the
+    // AI-generated English listing draft -- a keyword only present in the English draft
+    // (e.g. the AI translating "充電式" as "rechargeable lithium battery") still fires.
+    if (method === "GET" && /^\/admin\/products\/[^/]+\/customs-risk$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [product] = await db
+        .select()
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
+      if (!product) return json(404, { error: "product_not_found" });
+
+      const [draft] = await db
+        .select({ titleEn: aiListingDraft.titleEn, descriptionHtmlEn: aiListingDraft.descriptionHtmlEn })
+        .from(aiListingDraft)
+        .where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.productId, id)))
+        .orderBy(desc(aiListingDraft.createdAt))
+        .limit(1);
+
+      const result = assessCustomsRisk({
+        title: product.title,
+        descriptionJa: product.descriptionJa,
+        descriptionEn: draft ? `${draft.titleEn} ${draft.descriptionHtmlEn}` : null,
+        material: product.material,
+      });
+      return json(200, result);
+    }
+
     if (method === "GET" && /^\/admin\/products\/[^/]+\/dynamic-price$/.test(path)) {
       // Item #4 of the third hardening round ("価格の動的整合"). Preview only -- never
       // writes anything, and never touches suggestedPriceUsd (only used as a *fallback*
@@ -1644,6 +1832,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
+      // computeDynamicPrice marks up the product's own acquisition cost (仕入価格), never its
+      // BASE selling price -- a product synced before cost entry existed, or one whose cost
+      // simply hasn't been entered yet, has no meaningful markup to compute until it is.
+      if (product.costJpy === null) return json(409, { error: "cost_not_set" });
 
       const fx = await fetchFxRate();
       const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
@@ -1652,19 +1844,30 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         : product.shippingCostUsdCents !== null
           ? product.shippingCostUsdCents / 100
           : tenantDefaults.shippingUsd;
-      const targetMarginRatio = event.queryStringParameters?.targetMarginRatio
-        ? Number(event.queryStringParameters.targetMarginRatio)
-        : product.targetMarginBasisPoints !== null
-          ? product.targetMarginBasisPoints / 10000
-          : tenantDefaults.targetMarginRatio;
+
+      let targetMarginRatio: number;
+      let marginBaselineSource: string | null = null;
+      let marginAdjustmentReason: string | null = null;
+      if (event.queryStringParameters?.targetMarginRatio) {
+        targetMarginRatio = Number(event.queryStringParameters.targetMarginRatio);
+      } else if (product.targetMarginBasisPoints !== null) {
+        targetMarginRatio = product.targetMarginBasisPoints / 10000;
+      } else if (tenantDefaults.hasExplicitTenantDefault) {
+        targetMarginRatio = tenantDefaults.targetMarginRatio;
+      } else {
+        const learned = await resolveLearnedMarginRatio(db, tenantId, product, fx.fxRateUsdPerJpy);
+        targetMarginRatio = learned.targetMarginRatio;
+        marginBaselineSource = learned.baselineSource;
+        marginAdjustmentReason = learned.adjustmentReason;
+      }
 
       const price = computeDynamicPrice({
-        costJpy: product.priceJpy,
+        costJpy: product.costJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
         shippingUsd,
         targetMarginRatio,
       });
-      return json(200, { ...price, fxSource: fx.source });
+      return json(200, { ...price, fxSource: fx.source, marginBaselineSource, marginAdjustmentReason });
     }
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/apply-dynamic-price$/.test(path)) {
@@ -1681,6 +1884,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
         .limit(1);
       if (!product) return json(404, { error: "product_not_found" });
+      if (product.costJpy === null) return json(409, { error: "cost_not_set" });
 
       const [ebayListing] = await db
         .select()
@@ -1705,16 +1909,20 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const tenantDefaults = await resolveTenantPricingDefaults(db, tenantId, fx.fxRateUsdPerJpy);
       const shippingUsd = product.shippingCostUsdCents !== null ? product.shippingCostUsdCents / 100 : tenantDefaults.shippingUsd;
       const targetMarginRatio =
-        product.targetMarginBasisPoints !== null ? product.targetMarginBasisPoints / 10000 : tenantDefaults.targetMarginRatio;
+        product.targetMarginBasisPoints !== null
+          ? product.targetMarginBasisPoints / 10000
+          : tenantDefaults.hasExplicitTenantDefault
+            ? tenantDefaults.targetMarginRatio
+            : (await resolveLearnedMarginRatio(db, tenantId, product, fx.fxRateUsdPerJpy)).targetMarginRatio;
       const price = computeDynamicPrice({
-        costJpy: product.priceJpy,
+        costJpy: product.costJpy,
         fxRateUsdPerJpy: fx.fxRateUsdPerJpy,
         shippingUsd,
         targetMarginRatio,
       });
       const suggestedPriceUsdCents = Math.round(price.recommendedPriceUsd * 100);
 
-      await db.update(aiListingDraft).set({ suggestedPriceUsd: suggestedPriceUsdCents }).where(eq(aiListingDraft.id, draft.id));
+      await db.update(aiListingDraft).set({ suggestedPriceUsd: suggestedPriceUsdCents }).where(and(eq(aiListingDraft.tenantId, tenantId), eq(aiListingDraft.id, draft.id)));
 
       const queues = getQueueUrls();
       await enqueue(
@@ -1897,6 +2105,13 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         return {
           ...r.order,
           product: r.product,
+          ddp: assessDdpRequirement({
+            channel: r.order.channel,
+            shipToCountryCode: r.order.shipToCountryCode,
+            salePriceUsdCents: r.order.salePriceUsdCents,
+            quantity: r.order.quantity,
+            placedAt: r.order.placedAt,
+          }),
           profit: {
             finalized: Boolean(r.order.profitFinalizedAt),
             revenueUsdCents: live.revenueUsdCents,
@@ -2527,12 +2742,43 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // Every order status change is human-triggered here -- never automatic (matches this
       // platform's existing rule that AI never changes price/listing state without approval).
       const id = path.split("/")[3]!;
-      const body = JSON.parse(event.body ?? "{}") as { status?: string; extra?: Record<string, number> };
+      const body = JSON.parse(event.body ?? "{}") as {
+        status?: string;
+        extra?: Record<string, number>;
+        trackingNumber?: string;
+        shippingCarrierCode?: string;
+        ddpConfirmed?: boolean;
+      };
       const parsedStatus = OrderStatus.safeParse(body.status);
       if (!parsedStatus.success) return json(400, { error: "invalid_status", validValues: OrderStatus.options });
 
+      // body.extra is only ever meant to carry the specific financial fields documented on
+      // TransitionOrderStatusOptions.extra -- picked explicitly here (rather than spread)
+      // so a client can never smuggle an unrelated column (e.g. "status") into the DB update
+      // through this loosely-typed JSON field and bypass the validated state machine below.
+      // PROFIT_AFFECTING_EXTRA_KEYS is shared with transitionOrderStatus's own finalized-profit
+      // invalidation check, so this whitelist and "what counts as profit-affecting" can't drift.
+      const extraNumeric: Record<string, number> = {};
+      for (const key of PROFIT_AFFECTING_EXTRA_KEYS) {
+        const value = body.extra?.[key];
+        if (typeof value === "number") extraNumeric[key] = value;
+      }
+
       try {
-        const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, { extra: body.extra });
+        // transitionOrderStatus itself gates a DDP-required SHIPPED transition on
+        // body.ddpConfirmed (throwing DdpConfirmationRequiredError otherwise) -- see its own
+        // doc comment and assessDdpRequirement (@ai-ec/core) for why: eBay requires DDP
+        // (Delivered Duty Paid) customs clearance for US-bound Japan/Korea shipments under
+        // $2,500 (effective 2025-10-17), and this platform can't verify the shipping method
+        // itself, so a human must affirmatively confirm it was used.
+        const updated = await transitionOrderStatus(db, tenantId, id, parsedStatus.data, {
+          extra: {
+            ...extraNumeric,
+            ...(body.trackingNumber ? { trackingNumber: body.trackingNumber } : {}),
+            ...(body.shippingCarrierCode ? { shippingCarrierCode: body.shippingCarrierCode } : {}),
+          },
+          ddpConfirmed: body.ddpConfirmed === true,
+        });
         await recordAuditLog(db, {
           tenantId,
           actor: actorFromEvent(event),
@@ -2541,10 +2787,114 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           entityId: id,
           after: { status: parsedStatus.data },
         });
-        return json(200, { order: updated });
+
+        // eBay's own Fulfillment API push: best-effort, never blocks the status transition
+        // itself (the merchant's own record of "this shipped" is the important fact; the
+        // eBay sync is a secondary, retryable concern surfaced via sync_errors on failure,
+        // same pattern as every other outbound eBay call in this codebase). Unlike the other
+        // outbound eBay calls though, a failure here used to have no jobId to attach to its
+        // sync_errors row, which meant POST /admin/sync-errors/{id}/retry (it requires one)
+        // could never pick it back up -- a tracking number that failed to upload once could
+        // never be retried through the app at all. Creating the outbox job up front (see
+        // insertSyncJob) fixes that: a failure below always has a job to record against, and
+        // ebay-sync-worker's own ebay_tracking_upload branch is what the existing retry route
+        // re-enqueues it to.
+        let ebayTrackingSyncStatus: "synced" | "skipped" | "failed" = "skipped";
+        if (
+          parsedStatus.data === "SHIPPED" &&
+          updated.channel === "ebay" &&
+          updated.ebayLineItemId &&
+          updated.trackingNumber &&
+          updated.shippingCarrierCode
+        ) {
+          if (updated.ebayTrackingSyncedAt) {
+            // Already pushed by an earlier attempt on this same order -- never call eBay's
+            // Fulfillment API a second time for one shipment, which registers a new
+            // fulfillment record rather than updating the existing one.
+            ebayTrackingSyncStatus = "synced";
+          } else {
+            const job = await insertSyncJob(db, {
+              tenantId,
+              type: "ebay_tracking_upload",
+              idempotencyKey: `${tenantId}:ebay-tracking-upload:${id}`,
+              productId: updated.productId,
+              payload: { type: "ebay_tracking_upload", tenantId, orderId: id },
+            });
+            try {
+              const creds = await getAppCredentials<EbayAppCredentials>("ebay");
+              const adapter = createEbayAdapter(creds);
+              const [accountId] = await listConnectedAccountIds(db, tenantId, "ebay");
+              if (!accountId) throw new Error("no eBay account connected");
+              const accessToken = await getValidAccessToken(db, tenantId, adapter, accountId);
+              await adapter.createShippingFulfillment(
+                accessToken,
+                updated.externalOrderId,
+                updated.ebayLineItemId,
+                updated.quantity,
+                updated.trackingNumber,
+                updated.shippingCarrierCode,
+              );
+              await markEbayTrackingSynced(db, tenantId, id);
+              await markSyncJobCompleted(db, job.id);
+              ebayTrackingSyncStatus = "synced";
+            } catch (err) {
+              ebayTrackingSyncStatus = "failed";
+              await markSyncJobFailed(db, job.id, job.attempts);
+              await recordSyncError(db, {
+                tenantId,
+                jobId: job.id,
+                channel: "ebay",
+                productId: updated.productId,
+                errorCode: "ebay_tracking_sync_failed",
+                errorMessage: (err as Error).message,
+              });
+            }
+          }
+        }
+
+        // BASE has no webhook/notification feature of its own (confirmed against BASE's own
+        // help center), and this platform never writes order status back to BASE -- so unlike
+        // an eBay order (which eBay itself notifies the buyer for, once tracking is uploaded
+        // above), a BASE buyer would otherwise never hear that their order shipped at all.
+        // Best-effort, same reasoning as the eBay push: never blocks the status transition.
+        let shippingNoticeEmailStatus: "sent" | "skipped" | "failed" = "skipped";
+        if (parsedStatus.data === "SHIPPED" && updated.channel === "base" && updated.buyerEmail) {
+          try {
+            const [tenant] = await db.select({ name: tenants.name }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+            const tenantName = tenant?.name ?? "ショップ";
+            const greeting = updated.buyerName ? `${updated.buyerName} 様` : "お客様";
+            const trackingLine =
+              updated.trackingNumber && updated.shippingCarrierCode
+                ? `\n■追跡番号: ${updated.trackingNumber}(${updated.shippingCarrierCode})\n`
+                : "\n";
+            await sendEmail({
+              to: updated.buyerEmail,
+              subject: `【${tenantName}】ご注文の商品を発送いたしました`,
+              bodyText: `${greeting}\n\nいつもご利用ありがとうございます。\nご注文いただいた商品を発送いたしました。\n\n■ご注文番号: ${updated.externalOrderId}${trackingLine}\n今後ともよろしくお願いいたします。\n\n${tenantName}`,
+            });
+            shippingNoticeEmailStatus = "sent";
+          } catch (err) {
+            shippingNoticeEmailStatus = "failed";
+            await recordSyncError(db, {
+              tenantId,
+              channel: "base",
+              productId: updated.productId,
+              errorCode: "shipping_notice_email_failed",
+              errorMessage: (err as Error).message,
+            });
+          }
+        }
+
+        return json(200, { order: updated, ebayTrackingSyncStatus, shippingNoticeEmailStatus });
       } catch (err) {
         if (err instanceof InvalidOrderTransitionError) {
           return json(409, { error: "invalid_transition", message: err.message });
+        }
+        if (err instanceof DdpConfirmationRequiredError) {
+          return json(400, { error: "ddp_confirmation_required", message: err.reasonJa });
+        }
+        if (err instanceof OrderStatusConflictError) {
+          return json(409, { error: "status_conflict", message: err.message });
         }
         throw err;
       }
@@ -2717,6 +3067,19 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
 
     if (method === "POST" && /^\/admin\/products\/[^/]+\/sns\/status$/.test(path)) {
       const id = path.split("/")[3]!;
+      // sns_content.productId is this table's own primary key (not a (tenantId, productId)
+      // composite), and markSnsStatus's upsert never checks or sets tenantId on conflict --
+      // without this ownership check first, a tenant could flip another tenant's SNS status
+      // flags (or, if no row exists yet for that product, silently create one misattributed
+      // to itself) purely by guessing/learning another tenant's productId. Mirrors the same
+      // check POST /admin/products/{id}/sns/script already does above.
+      const [snsProduct] = await db
+        .select({ id: productMaster.id })
+        .from(productMaster)
+        .where(and(eq(productMaster.tenantId, tenantId), eq(productMaster.id, id)))
+        .limit(1);
+      if (!snsProduct) return json(404, { error: "product_not_found" });
+
       const body = JSON.parse(event.body ?? "{}") as {
         videoCreated?: boolean;
         instagramPosted?: boolean;
@@ -2980,7 +3343,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (!job) return json(404, { error: "not_found" });
       if (job.status !== "failed") return json(400, { error: "job_not_failed" });
 
-      await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, id));
+      await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, id)));
       await recordAuditLog(db, {
         tenantId,
         actor: actorFromEvent(event),
@@ -3002,7 +3365,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         .where(and(eq(syncJobs.tenantId, tenantId), inArray(syncJobs.id, ids), eq(syncJobs.status, "failed")));
 
       for (const row of failedJobs) {
-        await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(eq(syncJobs.id, row.id));
+        await db.update(syncJobs).set({ status: "pending", updatedAt: new Date() }).where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.id, row.id)));
         await recordAuditLog(db, {
           tenantId,
           actor: actorFromEvent(event),
@@ -3077,6 +3440,109 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       });
     }
 
+    // --- Operator dashboard ("/admin/ops/*"): cross-tenant visibility + action for the
+    // platform operator, built so a customer's sync trouble shows up here before they have
+    // to email support about it (see requireOperator()'s own doc comment for the access model).
+
+    if (method === "GET" && path === "/admin/ops/tenants") {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const summaries = await listTenantsOpsSummary(db);
+      return json(200, { tenants: summaries });
+    }
+
+    if (method === "GET" && /^\/admin\/ops\/tenants\/[^/]+\/sync-errors$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const opsTenantId = path.split("/")[4]!;
+      const rows = await db
+        .select({ error: syncErrors, productTitle: productMaster.title, productSku: productMaster.sku, jobType: syncJobs.type })
+        .from(syncErrors)
+        .leftJoin(productMaster, eq(productMaster.id, syncErrors.productId))
+        .leftJoin(syncJobs, eq(syncJobs.id, syncErrors.jobId))
+        .where(and(eq(syncErrors.tenantId, opsTenantId), eq(syncErrors.resolved, false)))
+        .orderBy(desc(syncErrors.createdAt))
+        .limit(200);
+      const syncErrorsOut = rows.map((r) => ({
+        ...r.error,
+        productTitle: r.productTitle ?? null,
+        productSku: r.productSku ?? null,
+        jobType: r.jobType ?? null,
+      }));
+      return json(200, { syncErrors: syncErrorsOut });
+    }
+
+    // Mirrors POST /admin/sync-errors/{id}/retry exactly, just scoped to an operator-chosen
+    // tenantId from the path instead of the caller's own claim.
+    if (method === "POST" && /^\/admin\/ops\/tenants\/[^/]+\/sync-errors\/[^/]+\/retry$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const [, , , , opsTenantId, , id] = path.split("/");
+      const [error] = await db
+        .select()
+        .from(syncErrors)
+        .where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.id, id!)))
+        .limit(1);
+      if (!error) return json(404, { error: "not_found" });
+      if (!error.jobId) return json(400, { error: "error_has_no_retryable_job" });
+
+      const [job] = await db
+        .select()
+        .from(syncJobs)
+        .where(and(eq(syncJobs.tenantId, opsTenantId!), eq(syncJobs.id, error.jobId)))
+        .limit(1);
+      if (!job) return json(404, { error: "original_job_not_found" });
+
+      const queues = getQueueUrls();
+      const queueUrl =
+        job.type === "ai_generate" ? queues.aiGenerate : job.type.startsWith("ebay_") ? queues.ebaySync : queues.inventorySync;
+      await enqueue(
+        queueUrl,
+        { ...job.payload, type: job.type, tenantId: opsTenantId, productId: job.productId },
+        `${opsTenantId}:ops-retry:${id}:${Date.now()}`,
+      );
+      await db.update(syncErrors).set({ resolved: true }).where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.id, id!)));
+
+      await recordAuditLog(db, {
+        tenantId: opsTenantId!,
+        actor: `operator:${actorFromEvent(event)}`,
+        action: "sync_error_retried",
+        entityType: "sync_error",
+        entityId: id!,
+      });
+
+      return json(202, { status: "retry_queued" });
+    }
+
+    // isChannelIsolated (packages/db/channel-isolation.ts) is deliberately stateless -- it
+    // recomputes isolation from recent sync_errors every time, rather than persisting an
+    // "isolated" flag anywhere to remember to clear. So "clear isolation" for an operator
+    // really means: stop those specific errors from counting toward the window any longer,
+    // i.e. mark them resolved. The next isChannelIsolated check then sees none and lifts
+    // isolation immediately, instead of waiting for the window to age out on its own.
+    if (method === "POST" && /^\/admin\/ops\/tenants\/[^/]+\/channel-isolation\/[^/]+\/clear$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const [, , , , opsTenantId, , channel] = path.split("/");
+      const channelParsed = ChannelType.safeParse(channel);
+      if (!channelParsed.success || !IMPLEMENTED_CHANNELS.includes(channelParsed.data)) return json(400, { error: "unknown_channel" });
+
+      await db
+        .update(syncErrors)
+        .set({ resolved: true })
+        .where(and(eq(syncErrors.tenantId, opsTenantId!), eq(syncErrors.channel, channelParsed.data), eq(syncErrors.resolved, false)));
+
+      await recordAuditLog(db, {
+        tenantId: opsTenantId!,
+        actor: `operator:${actorFromEvent(event)}`,
+        action: "channel_isolation_cleared",
+        entityType: "channel",
+        entityId: channelParsed.data,
+      });
+
+      return json(200, { channel: channelParsed.data, cleared: true });
+    }
+
     // --- Commercial-features round: unified commerce dashboard (UI, item requested separately) ---
 
     if (method === "GET" && path === "/admin/commerce-dashboard") {
@@ -3084,7 +3550,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // breakdown, orders, sns_content) run in parallel across products -- a modest default
       // keeps this endpoint's total concurrent RDS Data API calls bounded; pass ?limit= for
       // a larger catalog at the caller's own risk.
-      const limit = event.queryStringParameters?.limit ? Number(event.queryStringParameters.limit) : 30;
+      const limit = boundedDashboardLimit(event.queryStringParameters?.limit, 30, 100);
+      if (limit === null) return json(400, { error: "invalid_limit" });
       const products = await db
         .select()
         .from(productMaster)
@@ -3174,9 +3641,8 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // A dashboard-wide inventory rollup costs one breakdown call per product (same N+1
       // pattern /admin/commerce-dashboard already accepts) -- bounded the same way, via an
       // overridable default, rather than left unbounded for a large catalog.
-      const productLimit = event.queryStringParameters?.productLimit
-        ? Number(event.queryStringParameters.productLimit)
-        : 100;
+      const productLimit = boundedDashboardLimit(event.queryStringParameters?.productLimit, 100, 100);
+      if (productLimit === null) return json(400, { error: "invalid_product_limit" });
 
       const now = new Date();
       const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
