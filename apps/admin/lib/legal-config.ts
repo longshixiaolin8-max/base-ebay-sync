@@ -1,20 +1,20 @@
+// Only the public contact address is embedded in the statically exported frontend.
+// Keep the operator's legal name, physical address and phone out of public build variables.
 export const LEGAL_INFO = {
-  operatorName: process.env.NEXT_PUBLIC_LEGAL_OPERATOR_NAME ?? "未設定",
-  address: process.env.NEXT_PUBLIC_LEGAL_ADDRESS ?? "未設定",
-  phone: process.env.NEXT_PUBLIC_LEGAL_PHONE ?? "未設定",
-  email: process.env.NEXT_PUBLIC_LEGAL_EMAIL ?? "未設定",
+  email: process.env.NEXT_PUBLIC_LEGAL_EMAIL?.trim() || "",
 };
 
-// This is 特定商取引法 disclosure copy -- a production build that silently ships "未設定" for
-// any of these fields is a real compliance gap, not just a cosmetic placeholder, so it's
-// surfaced loudly in build/server logs rather than only being visible by clicking through to
-// /legal in a browser.
-if (process.env.NODE_ENV === "production" && Object.values(LEGAL_INFO).some((v) => v === "未設定")) {
+export const DISCLOSURE_SUBJECT = "特定商取引法に基づく事業者情報の開示請求";
+
+// A production build with no disclosure-request mailbox configured is a real compliance gap
+// (there would be no way to honor a 特定商取引法 disclosure request at all), so it's surfaced
+// loudly in build/server logs rather than only being visible by clicking through to /legal.
+if (process.env.NODE_ENV === "production" && !LEGAL_INFO.email) {
   console.error(
-    "[legal-config] One or more NEXT_PUBLIC_LEGAL_* environment variables are unset in a " +
-      "production build -- the /legal page will show \"未設定\" for required 特定商取引法 disclosure fields.",
+    "[legal-config] NEXT_PUBLIC_LEGAL_EMAIL is unset in a production build -- the /legal and " +
+      "/privacy pages will show no way to request the required 特定商取引法 disclosure.",
   );
 }
 
 export const TERMS_VERSION = "2026-10-03";
-export const PRIVACY_VERSION = "2026-10-03";
+export const PRIVACY_VERSION = "2026-10-11";

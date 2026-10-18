@@ -86,16 +86,13 @@ jobs:
       - name: Production public-SaaS configuration preflight
         if: inputs.environment == 'prod'
         env:
-          LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
-          LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
-          LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
           LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
           SES_FROM_EMAIL: ${{ vars.SES_FROM_EMAIL }}
           ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
         run: |
           set -euo pipefail
           missing=0
-          for name in LEGAL_OPERATOR_NAME LEGAL_ADDRESS LEGAL_PHONE LEGAL_EMAIL SES_FROM_EMAIL ALARM_EMAIL; do
+          for name in LEGAL_EMAIL SES_FROM_EMAIL ALARM_EMAIL; do
             if [ -z "${!name:-}" ]; then
               echo "::error::prod environment variable $name is required before the public SaaS frontend can be released."
               missing=1
@@ -314,9 +311,7 @@ jobs:
 
       - name: Build production-configured admin frontend
         env:
-          NEXT_PUBLIC_LEGAL_OPERATOR_NAME: ${{ vars.LEGAL_OPERATOR_NAME }}
-          NEXT_PUBLIC_LEGAL_ADDRESS: ${{ vars.LEGAL_ADDRESS }}
-          NEXT_PUBLIC_LEGAL_PHONE: ${{ vars.LEGAL_PHONE }}
+          # The static Next.js export is public: never embed private disclosure details.
           NEXT_PUBLIC_LEGAL_EMAIL: ${{ vars.LEGAL_EMAIL }}
           NEXT_PUBLIC_OPERATOR_EMAIL: ${{ vars.OPERATOR_EMAIL }}
         run: |
