@@ -92,6 +92,11 @@ export default function SignupPage() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setError("このメールアドレスはすでに登録されています。ログインまたはパスワード再設定をお試しください。");
+      } else if (err instanceof ApiError && err.status === 503) {
+        // SES (verification_email_unavailable) or another external dependency is down --
+        // "確認してもう一度お試しください" below would wrongly tell the user their own input
+        // is the problem, when it's this platform's email delivery that failed.
+        setError("確認メールを送信できませんでした。しばらくしてからもう一度お試しください。");
       } else {
         setError("登録を開始できませんでした。入力内容を確認してもう一度お試しください。");
       }

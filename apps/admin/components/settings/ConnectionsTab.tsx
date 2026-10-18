@@ -94,7 +94,10 @@ export default function ConnectionsTab() {
   const { notify } = useToast();
   const [connections, setConnections] = useState<ConnectionsResponseLite | null>(null);
   const [loading, setLoading] = useState(true);
-  const [checking, setChecking] = useState(false);
+  // Keyed per-channel rather than one shared boolean -- a shared flag meant clicking
+  // "接続確認" on BASE also disabled eBay's own button for the duration of the same load(),
+  // which reads as a stuck/unresponsive button since nothing explains why.
+  const [checkingChannel, setCheckingChannel] = useState<DisplayedChannel | null>(null);
   const [disconnecting, setDisconnecting] = useState<DisplayedChannel | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<DisplayedChannel | null>(null);
 
@@ -106,7 +109,7 @@ export default function ConnectionsTab() {
       notify(`接続状況の取得に失敗しました: ${(err as Error).message}`);
     } finally {
       setLoading(false);
-      setChecking(false);
+      setCheckingChannel(null);
     }
   }, [notify]);
 
@@ -117,7 +120,9 @@ export default function ConnectionsTab() {
   async function handleReconnect(channel: DisplayedChannel) {
     try {
       const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
-      window.open(res.url, "_blank", "noopener,noreferrer");
+      if (!window.open(res.url, "_blank", "noopener,noreferrer")) {
+        notify(`ポップアップがブロックされました。次のURLを手動で開いて連携してください: ${res.url}`);
+      }
     } catch (err) {
       notify(`再接続用リンクの取得に失敗しました: ${(err as Error).message}`);
     }
@@ -146,10 +151,10 @@ export default function ConnectionsTab() {
             channel={channel}
             detail={connections?.[channel] ?? null}
             loading={loading}
-            checking={checking}
+            checking={checkingChannel === channel}
             disconnecting={disconnecting === channel}
             onCheck={() => {
-              setChecking(true);
+              setCheckingChannel(channel);
               void load();
             }}
             onReconnect={() => handleReconnect(channel)}

@@ -47,6 +47,14 @@ export async function computeSyncConfidence(
   // sync_errors consumer still missing it. Only rows shaped like the adapters' own
   // "<Channel> API error <status>:" format are genuine evidence of that channel's API health.
   const failures = recentSyncErrors.filter((e) => API_ERROR_STATUS_PATTERN.test(e.errorMessage));
+  // Confirmed live (Oct 2026): a single SKU stuck on one persistent, externally-caused error
+  // (e.g. eBay requiring additional seller registration) gets retried -- by SQS's own
+  // redelivery-on-failure, DLQ redrive, or an admin's manual retry -- producing many
+  // sync_errors rows for that one product within the window. Counting raw rows let that one
+  // stuck listing alone crash the score to 0 and block every *other* product's publish too,
+  // even though it says nothing about eBay's API being broken for anything else. Counting
+  // distinct failing products instead means the gate only trips when several different
+  // listings are genuinely failing -- the actual signal this score exists to capture.
   const successes = await db
     .select()
     .from(channelListings)
@@ -61,8 +69,13 @@ export async function computeSyncConfidence(
   // (skippedReason "out_of_order", strictly older than the watermark) counts against the score.
   const events = rawEvents.filter((e) => e.skippedReason !== "unchanged");
 
+  // Dedupe by productId: repeated retries of the same stuck SKU collapse into one failure.
+  // A row with no productId (e.g. an OAuth/connection-level error) isn't tied to any one
+  // listing, so each such row still counts on its own rather than merging with the others.
+  const failedProductKeys = new Set(failures.map((f) => (f.productId ? `product:${f.productId}` : `row:${f.id}`)));
+
   const successCount = successes.length;
-  const failureCount = failures.length;
+  const failureCount = failedProductKeys.size;
   const totalAttempts = successCount + failureCount;
   const totalEventCount = events.length;
   const outOfOrderEventCount = events.filter((e) => !e.applied).length;

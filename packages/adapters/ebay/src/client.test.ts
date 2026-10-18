@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { EbayAdapter } from "./client.js";
+import { EbayAdapter, EbayApiError } from "./client.js";
 
 const config = {
   clientId: "cid",
@@ -227,6 +227,24 @@ describe("EbayAdapter", () => {
     );
   });
 
+  it("getRequiredItemAspects survives a transient 500 via fetchWithRetry instead of failing the whole publish preflight", async () => {
+    // Called before every publish/update (see ebay-sync-worker's publish()) -- before this
+    // was routed through fetchWithRetry, one transient 500 here failed the entire attempt
+    // and sent it through the full SQS-redelivery/DLQ cycle (minutes of delay) for what a
+    // single automatic retry would have resolved immediately.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ errors: [{ message: "temporary" }] }, 500))
+      .mockResolvedValueOnce(jsonResponse({ aspects: [{ localizedAspectName: "Brand", aspectConstraint: { aspectRequired: true } }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    const required = await adapter.getRequiredItemAspects("app-token", "262003");
+
+    expect(required).toEqual(["Brand"]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("creates a notification destination and returns its id from the Location header", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(createdResponse("dest-123"));
     vi.stubGlobal("fetch", fetchMock);
@@ -378,6 +396,32 @@ describe("EbayAdapter", () => {
       "https://api.example-ebay.test/sell/account/v1/fulfillment_policy",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("createShippingFulfillment posts the line item, quantity, and tracking info to eBay's Fulfillment API", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, status: 201, text: async () => "", json: async () => ({}) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await adapter.createShippingFulfillment("token", "order-1", "li-1", 2, "1234567890", "Japan Post");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example-ebay.test/sell/fulfillment/v1/order/order-1/shipping_fulfillment",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as { body: string }).body);
+    expect(body.lineItems).toEqual([{ lineItemId: "li-1", quantity: 2 }]);
+    expect(body.trackingNumber).toBe("1234567890");
+    expect(body.shippingCarrierCode).toBe("Japan Post");
+    expect(typeof body.shippedDate).toBe("string");
+  });
+
+  it("createShippingFulfillment throws eBay's own error when the request is rejected", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 400, text: async () => '{"errors":[{"message":"Invalid carrier"}]}' });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const adapter = new EbayAdapter(config);
+    await expect(adapter.createShippingFulfillment("token", "order-1", "li-1", 1, "123", "Bogus Carrier")).rejects.toThrow();
   });
 
   it("creates a payment policy and returns its id", async () => {
@@ -667,14 +711,14 @@ describe("EbayAdapter", () => {
     expect(body.product.aspects).toEqual({ Type: ["Bracelet"] });
   });
 
-  it("listRecentSales captures the line item's USD total as salePriceUsdCents", async () => {
+  it("listRecentSales captures the line item's USD total as salePriceUsdCents, and its lineItemId for later fulfillment", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(
       jsonResponse({
         orders: [
           {
             orderId: "order-1",
             creationDate: "2026-08-01T00:00:00.000Z",
-            lineItems: [{ sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
+            lineItems: [{ lineItemId: "li-1", sku: "SKU-1", quantity: 2, total: { value: "39.98", currency: "USD" } }],
           },
         ],
       }),
@@ -689,6 +733,7 @@ describe("EbayAdapter", () => {
         channel: "ebay",
         externalProductId: "SKU-1",
         externalOrderId: "order-1",
+        externalLineItemId: "li-1",
         quantitySold: 2,
         occurredAt: new Date("2026-08-01T00:00:00.000Z"),
         salePriceUsdCents: 3998,
@@ -856,6 +901,68 @@ describe("EbayAdapter", () => {
       const result = await adapter.refreshToken("original-refresh-token");
 
       expect(result.refreshToken).toBe("rotated-refresh-token");
+    });
+  });
+
+  describe("EbayApiError's parsed detail", () => {
+    it("extracts the human-readable message and actionable URL from a SELLING_PRIVILEGE_REQUIRED response (confirmed live shape)", async () => {
+      const sellingPrivilegeBody = {
+        errors: [
+          {
+            errorId: 25002,
+            domain: "API_INVENTORY",
+            subdomain: "Selling",
+            category: "Request",
+            message: "A user error has occurred. Before you can list this item we need some additional information to create a seller's account.",
+            parameters: [
+              { name: "0", value: "You need to create a seller's account." },
+              { name: "1", value: "Before you can list this item we need some additional information to create a seller's account." },
+              { name: "2", value: "1013" },
+              { name: "3", value: "https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API" },
+              { name: "4", value: "SELLING_PRIVILEGE_REQUIRED" },
+            ],
+          },
+        ],
+      };
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse({ offers: [] }))
+        .mockResolvedValueOnce(jsonResponse({ offerId: "offer-1" }))
+        .mockResolvedValueOnce(jsonResponse(sellingPrivilegeBody, 400));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const adapter = new EbayAdapter(config);
+      const promise = adapter.createListing("token", {
+        productId: "p1",
+        sku: "SKU-1",
+        titleEn: "Vintage Jacket",
+        descriptionHtmlEn: "<p>desc</p>",
+        priceUsd: 49.99,
+        quantity: 2,
+        images: [],
+        categoryId: "12345",
+        itemSpecifics: {},
+        condition: "NEW",
+      });
+
+      await expect(promise).rejects.toBeInstanceOf(EbayApiError);
+      try {
+        await promise;
+        expect.unreachable();
+      } catch (err) {
+        const error = err as EbayApiError;
+        expect(error.userMessage).toBe(
+          "A user error has occurred. Before you can list this item we need some additional information to create a seller's account.",
+        );
+        expect(error.actionUrl).toBe("https://ebaypayonboardingweb.ebay.com/seller-reg?client=THIRD_PARTY_API");
+      }
+    });
+
+    it("leaves userMessage/actionUrl undefined for a body that isn't eBay's error JSON shape", () => {
+      const error = new EbayApiError(500, "Internal Server Error");
+      expect(error.userMessage).toBeUndefined();
+      expect(error.actionUrl).toBeUndefined();
     });
   });
 });

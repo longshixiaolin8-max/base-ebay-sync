@@ -1,7 +1,9 @@
-import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { IMPLEMENTED_CHANNELS } from "@ai-ec/core";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import type { TenantStatus } from "./billing.js";
+import { isChannelIsolated } from "./channel-isolation.js";
 import type { Database } from "./client.js";
-import { tenants } from "./schema.js";
+import { channelListings, syncErrors, tenants } from "./schema.js";
 
 export type NotificationPreferenceKey = "inventoryDiffAlert" | "aiDraftCompleted" | "billingNotice" | "oauthExpiryNotice" | "importantNotice";
 export type NotificationPreferences = Record<NotificationPreferenceKey, boolean>;
@@ -136,4 +138,74 @@ export async function listOffboardingCandidates(db: Database): Promise<Array<{ i
     .select({ id: tenants.id })
     .from(tenants)
     .where(and(inArray(tenants.status, ["canceled_grace", "canceled"]), isNull(tenants.marketplaceOffboardedAt)));
+}
+
+export interface TenantOpsSummary {
+  id: string;
+  name: string;
+  plan: string;
+  status: TenantStatus;
+  contactEmail: string | null;
+  /** Unresolved sync_errors in the last 24h -- the operator dashboard's main "is this
+   *  customer currently having a bad time" signal. */
+  unresolvedErrorCount24h: number;
+  /** Channels isChannelIsolated currently reports as isolated for this tenant -- the same
+   *  stateless, window-based check sales-poller/ebay-sync-worker already gate on. */
+  isolatedChannels: string[];
+  lastActivityAt: string | null;
+}
+
+/**
+ * Cross-tenant health rollup for the platform operator's own "/admin/ops" dashboard --
+ * every other function in this file is deliberately scoped to a single tenantId; this is the
+ * one intentional exception, since "every tenant's health at a glance" has no meaningful
+ * single-tenant version to begin with. Access control lives at the API layer (admin-api's
+ * requireOperator()), not here -- this function trusts its caller completely, same as
+ * listWorkerEligibleTenants above already does for the scheduled workers that call it.
+ */
+export async function listTenantsOpsSummary(db: Database): Promise<TenantOpsSummary[]> {
+  const rows = await db
+    .select({ id: tenants.id, name: tenants.name, plan: tenants.plan, status: tenants.status, contactEmail: tenants.contactEmail })
+    .from(tenants)
+    .orderBy(tenants.name);
+
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  return Promise.all(
+    rows.map(async (tenant) => {
+      const [unresolvedErrors, isolationChecks, latestListing, latestError] = await Promise.all([
+        db
+          .select({ id: syncErrors.id })
+          .from(syncErrors)
+          .where(and(eq(syncErrors.tenantId, tenant.id), eq(syncErrors.resolved, false), gte(syncErrors.createdAt, since24h))),
+        Promise.all(IMPLEMENTED_CHANNELS.map((channel) => isChannelIsolated(db, tenant.id, channel))),
+        db
+          .select({ lastSyncedAt: channelListings.lastSyncedAt })
+          .from(channelListings)
+          .where(and(eq(channelListings.tenantId, tenant.id), isNotNull(channelListings.lastSyncedAt)))
+          .orderBy(desc(channelListings.lastSyncedAt))
+          .limit(1),
+        db
+          .select({ createdAt: syncErrors.createdAt })
+          .from(syncErrors)
+          .where(eq(syncErrors.tenantId, tenant.id))
+          .orderBy(desc(syncErrors.createdAt))
+          .limit(1),
+      ]);
+
+      const candidates = [latestListing[0]?.lastSyncedAt, latestError[0]?.createdAt].filter((d): d is Date => d != null);
+      const lastActivityAt = candidates.length ? new Date(Math.max(...candidates.map((d) => d.getTime()))).toISOString() : null;
+
+      return {
+        id: tenant.id,
+        name: tenant.name,
+        plan: tenant.plan,
+        status: tenant.status as TenantStatus,
+        contactEmail: tenant.contactEmail,
+        unresolvedErrorCount24h: unresolvedErrors.length,
+        isolatedChannels: isolationChecks.filter((c) => c.isolated).map((c) => c.channel),
+        lastActivityAt,
+      };
+    }),
+  );
 }

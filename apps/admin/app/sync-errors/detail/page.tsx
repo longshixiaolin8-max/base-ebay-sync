@@ -132,7 +132,9 @@ function SyncErrorDetailInner() {
     setReconnecting(true);
     try {
       const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
-      window.open(res.url, "_blank", "noopener,noreferrer");
+      if (!window.open(res.url, "_blank", "noopener,noreferrer")) {
+        notify(`ポップアップがブロックされました。次のURLを手動で開いて連携してください: ${res.url}`);
+      }
     } catch (err) {
       notify(`連携の開始に失敗しました: ${(err as Error).message}`);
     } finally {

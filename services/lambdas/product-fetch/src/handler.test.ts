@@ -256,7 +256,7 @@ describe("upsertProduct", () => {
     );
   });
 
-  it("does nothing when the content hash is unchanged since the last poll", async () => {
+  it("does nothing when the content hash is unchanged since the last poll and there's no published eBay listing to tell", async () => {
     const { contentHash } = await import("@ai-ec/core");
     const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
     const jobsStore: FakeJobRow[] = [];
@@ -265,6 +265,82 @@ describe("upsertProduct", () => {
     await upsertProduct(db, TENANT_ID, item, true);
 
     expect(jobsStore).toHaveLength(0);
+  });
+
+  it("stock-only変更もeBayへ伝播: a stock-only BASE change (contentHash unchanged) still enqueues an ebay_update job for an already-published listing", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: hash },
+      ebayListing: { status: "published" },
+      jobsStore,
+    });
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: true, quantity: 0 });
+
+    await upsertProduct(db, TENANT_ID, item, true);
+
+    // Nothing in product_master changed (same contentHash), so no content update is
+    // expected -- only the stock-triggered outbox job.
+    expect((db as unknown as { getProductUpdateCalls: () => unknown[] }).getProductUpdateCalls()).toHaveLength(0);
+    expect(jobsStore).toHaveLength(1);
+    expect(jobsStore[0]).toMatchObject({
+      type: "ebay_update",
+      status: "pending",
+      productId: "existing-id",
+      payload: { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
+    });
+    expect(jobsStore[0]!.idempotencyKey).toBe(`${TENANT_ID}:ebay-update:existing-id:stock:${item.updatedAt.getTime()}`);
+  });
+
+  it("does not enqueue anything for a stock-only change when the eBay listing is still pending approval", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: hash },
+      ebayListing: { status: "pending_approval" },
+      jobsStore,
+    });
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: true, quantity: 0 });
+
+    await upsertProduct(db, TENANT_ID, item, true);
+
+    expect(jobsStore).toHaveLength(0);
+  });
+
+  it("does not enqueue anything for an out-of-order/unchanged stock report, even with a published listing", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: hash },
+      ebayListing: { status: "published" },
+      jobsStore,
+    });
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: false, quantity: 5, reason: "unchanged" });
+
+    await upsertProduct(db, TENANT_ID, item, true);
+
+    expect(jobsStore).toHaveLength(0);
+  });
+
+  it("二度のstock-only変更が互いに潰し合わない: two distinct stock-only changes at different BASE timestamps each get their own outbox job", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const dbA = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash }, ebayListing: { status: "published" }, jobsStore });
+    const dbB = createFakeDb({ existingProduct: { id: "existing-id", contentHash: hash }, ebayListing: { status: "published" }, jobsStore });
+
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: true, quantity: 3 });
+    await upsertProduct(dbA, TENANT_ID, item, true);
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: true, quantity: 0 });
+    await upsertProduct(dbB, TENANT_ID, { ...item, quantity: 0, updatedAt: new Date(item.updatedAt.getTime() + 1000) }, true);
+
+    // Reusing contentHash as the idempotency key here (as the content-update path does)
+    // would have made the second call's insert silently collide with the first's -- this is
+    // exactly the bug that keying on sequenceAt instead avoids.
+    expect(jobsStore).toHaveLength(2);
   });
 
   it("updates the product but creates no outbox job when no eBay listing exists yet", async () => {

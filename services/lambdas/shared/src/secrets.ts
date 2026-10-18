@@ -151,58 +151,87 @@ export interface DeletedOAuthConnection {
   secretArn: string;
 }
 
-/** Shared by both delete-connections functions below: best-effort removes each row's
- *  Secrets Manager secret, tolerating one that's already gone (a retried offboarding pass,
- *  or a connection whose secret was somehow already cleaned up). */
-async function deleteSecretsFor(rows: { secretArn: string }[]): Promise<void> {
-  for (const row of rows) {
+/**
+ * Deletion is deliberately sequenced secret-first, per matching connection:
+ *   (1) delete the Secrets Manager credential (retryable if it fails);
+ *   (2) delete exactly the DB row whose secret ARN was deleted.
+ *
+ * Previously the DB rows were deleted first. A Secrets Manager failure then
+ * orphaned an OAuth secret forever, because a re-delivered eBay account-
+ * deletion request had no DB row left through which to find the secret.
+ *
+ * Never issue one bulk DB DELETE for multiple tenants after a partial secret
+ * deletion: each successfully purged credential commits independently, while
+ * failed ones retain their DB reference for a retry. A concurrent replacement
+ * of the row's secret ARN is protected by the conditional DELETE predicate.
+ */
+async function purgeOAuthConnections(
+  db: Database,
+  predicate: ReturnType<typeof and>,
+): Promise<DeletedOAuthConnection[]> {
+  const candidates = await db
+    .select({
+      tenantId: oauthConnections.tenantId,
+      channel: oauthConnections.channel,
+      externalAccountId: oauthConnections.externalAccountId,
+      secretArn: oauthConnections.secretArn,
+    })
+    .from(oauthConnections)
+    .where(predicate);
+
+  const deleted: DeletedOAuthConnection[] = [];
+  for (const row of candidates) {
     try {
-      await secretsClient.send(new DeleteSecretCommand({ SecretId: row.secretArn, ForceDeleteWithoutRecovery: true }));
+      await secretsClient.send(new DeleteSecretCommand({
+        SecretId: row.secretArn,
+        ForceDeleteWithoutRecovery: true,
+      }));
     } catch (err) {
+      // An earlier attempt may have removed the secret but crashed before
+      // deleting the database reference; treat that as safe to finish.
       if (!(err instanceof ResourceNotFoundException)) throw err;
     }
+
+    const removed = await db
+      .delete(oauthConnections)
+      .where(and(
+        eq(oauthConnections.tenantId, row.tenantId),
+        eq(oauthConnections.channel, row.channel),
+        eq(oauthConnections.externalAccountId, row.externalAccountId),
+        eq(oauthConnections.secretArn, row.secretArn),
+      ))
+      .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
+    deleted.push(...removed);
   }
+  return deleted;
 }
 
 /**
- * Marketplace Account Deletion compliance (eBay's Platform Notifications requirement for
- * every production keyset): permanently removes every oauth_connections row for a given
- * channel + externalAccountId -- across all tenants, since eBay's notification names the
- * external account, not which of our tenants it belongs to -- and the Secrets Manager
- * secret each one points at. Irreversible by design; this is real personal-data deletion,
- * not a soft status flag like the rest of this app's channel-connection state.
+ * eBay Marketplace Account Deletion: remove all tenant connections belonging
+ * to this verified external account, without orphaning tokens on partial
+ * Secrets Manager failures. Signed webhook authentication occurs upstream.
  */
 export async function deleteOAuthConnectionsByExternalAccount(
   db: Database,
   channel: string,
   externalAccountId: string,
 ): Promise<DeletedOAuthConnection[]> {
-  const rows = await db
-    .delete(oauthConnections)
-    .where(and(eq(oauthConnections.channel, channel), eq(oauthConnections.externalAccountId, externalAccountId)))
-    .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
-
-  await deleteSecretsFor(rows);
-  return rows;
+  return purgeOAuthConnections(
+    db,
+    and(eq(oauthConnections.channel, channel), eq(oauthConnections.externalAccountId, externalAccountId)),
+  );
 }
 
-/**
- * Tenant-initiated OAuth revoke (tenant-offboarding's final step, once every one of that
- * tenant's published listings on `channel` has been confirmed delisted): removes this
- * tenant's own oauth_connections row(s) for `channel` and their Secrets Manager secrets.
- * Deliberately scoped by tenantId, unlike deleteOAuthConnectionsByExternalAccount above --
- * that function's whole point is reacting to an external party naming an account with no
- * tenant context at all, which would be the wrong (too broad) tool for revoking one
- * specific tenant's own connection.
- */
-export async function deleteOAuthConnectionsForTenant(db: Database, tenantId: string, channel: string): Promise<DeletedOAuthConnection[]> {
-  const rows = await db
-    .delete(oauthConnections)
-    .where(and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)))
-    .returning({ tenantId: oauthConnections.tenantId, secretArn: oauthConnections.secretArn });
-
-  await deleteSecretsFor(rows);
-  return rows;
+/** Tenant-driven disconnect after safe marketplace offboarding. */
+export async function deleteOAuthConnectionsForTenant(
+  db: Database,
+  tenantId: string,
+  channel: string,
+): Promise<DeletedOAuthConnection[]> {
+  return purgeOAuthConnections(
+    db,
+    and(eq(oauthConnections.tenantId, tenantId), eq(oauthConnections.channel, channel)),
+  );
 }
 
 export async function listConnectedAccountIds(db: Database, tenantId: string, channel: string): Promise<string[]> {

@@ -130,6 +130,37 @@ export class MonitoringStack extends cdk.Stack {
       dashboard.addWidgets(new cloudwatch.GraphWidget({ title: `${fn.node.id} throttles`, left: [throttleMetric], width: 12 }));
     }
 
+    // Authentication/authorization denials are exported as low-cardinality,
+    // personal-data-free EMF counters by their handler Lambda. The existing
+    // SNS email channel gets deterministic alarms even if AI is offline.
+    // CloudWatch custom metrics/alarms can incur charges when deployed:
+    // review the AWS budget before enabling this in production.
+    for (const [eventType, threshold] of [
+      ["ebay_signature_invalid", 10],
+      ["ebay_destination_invalid", 5],
+      ["stripe_signature_invalid", 10],
+      ["operator_access_denied", 3],
+      ["tenant_claim_missing", 3],
+      ["cloudfront_origin_denied", 10],
+    ] as const) {
+      const metric = new cloudwatch.Metric({
+        namespace: "AiEcPlatform",
+        metricName: "SecurityDenials",
+        dimensionsMap: { EventType: eventType },
+        statistic: "Sum",
+        period: cdk.Duration.minutes(5),
+      });
+      const alarm = new cloudwatch.Alarm(this, `Security-${eventType}`, {
+        metric,
+        threshold,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: `Security denial: ${eventType} exceeded ${threshold} events per five minutes. Human investigation required.`,
+      });
+      alarm.addAlarmAction(new cwActions.SnsAction(alarmTopic));
+    }
+
     // Direct-notification gap (user's follow-up ask): a caught-and-retried failure like the
     // Bedrock daily-token-quota outage completes every Lambda invocation "successfully" --
     // caught, logged to sync_errors, no exception escapes -- so it never trips the per-function

@@ -11,16 +11,25 @@ import { ShieldIcon } from "@/components/icons";
 export default function SecurityTab() {
   const { notify } = useToast();
   const [mfaEnabled, setMfaEnabled] = useState<boolean | null>(null);
+  const [mfaError, setMfaError] = useState(false);
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
 
-  useEffect(() => {
+  function loadMfaPreference() {
+    setMfaError(false);
     fetchMFAPreference()
       .then((res) => setMfaEnabled((res.enabled ?? []).includes("TOTP")))
-      .catch(() => setMfaEnabled(null));
+      .catch(() => {
+        setMfaEnabled(null);
+        setMfaError(true);
+      });
+  }
+
+  useEffect(() => {
+    loadMfaPreference();
   }, []);
 
   async function handleChangePassword(e: FormEvent) {
@@ -87,10 +96,18 @@ export default function SecurityTab() {
             <strong>認証アプリ(TOTP)</strong>
             <span>初回サインイン時に設定が必須です。</span>
           </div>
-          <Badge tone={mfaEnabled === null ? "neutral" : mfaEnabled ? "ok" : "error"}>
-            {mfaEnabled === null ? "確認中..." : mfaEnabled ? "有効" : "未設定"}
+          <Badge tone={mfaError ? "error" : mfaEnabled === null ? "neutral" : mfaEnabled ? "ok" : "error"}>
+            {mfaError ? "取得失敗" : mfaEnabled === null ? "確認中..." : mfaEnabled ? "有効" : "未設定"}
           </Badge>
         </div>
+        {mfaError && (
+          <p className="settings-disabled-note">
+            設定状況の取得に失敗しました。
+            <button type="button" className="secondary" onClick={loadMfaPreference} style={{ marginLeft: "0.5rem" }}>
+              再読み込み
+            </button>
+          </p>
+        )}
         <p className="settings-disabled-note">
           認証アプリの再設定・無効化はセルフサービスでは行えません。認証アプリやデバイスを紛失した場合は、管理者による本人確認のうえでの復旧対応が必要です。
         </p>

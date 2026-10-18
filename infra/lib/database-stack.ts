@@ -38,8 +38,17 @@ export class DatabaseStack extends cdk.Stack {
       // never a bottleneck if promoted. Roughly doubles the cluster's ACU-hours cost, which
       // is exactly why dev (cost-sensitive, disposable) skips it.
       readers: config.envName === "prod" ? [rds.ClusterInstance.serverlessV2("reader", { scaleWithWriter: true })] : undefined,
-      serverlessV2MinCapacity: 0.5,
+      // Scale-to-zero (minCapacity 0 + an auto-pause duration), confirmed live as a real cost
+      // driver: every Lambda here only ever talks to Postgres through the Data API (HTTPS),
+      // which itself wakes a paused cluster on the next request -- unlike a direct TCP
+      // connection, there's no persistent client to break when capacity drops to 0. The
+      // previous fixed 0.5 ACU floor billed 24/7 on both environments even with zero traffic,
+      // which was confirmed as the dominant cost behind an AWS Budget forecast far above the
+      // configured monthly limit. 5 minutes is the shortest AWS allows; the first request after
+      // an idle period pays a resume delay (seconds, not minutes) in exchange.
+      serverlessV2MinCapacity: 0,
       serverlessV2MaxCapacity: config.envName === "prod" ? 8 : 2,
+      serverlessV2AutoPauseDuration: cdk.Duration.minutes(5),
       enableDataApi: true,
       defaultDatabaseName: this.databaseName,
       storageEncrypted: true,

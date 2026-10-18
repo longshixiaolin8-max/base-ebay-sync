@@ -77,6 +77,14 @@ interface BaseOrderDetail {
   unique_key: string;
   ordered: number;
   order_items: BaseOrderDetailItem[];
+  /** Buyer's own contact fields (not the order_receiver/shipping-destination block, which
+   *  has no email) -- verified against BASE's real API reference (gist.github.com/baseinc/
+   *  9930892). Used only to send this platform's own shipping-notice email, since BASE has
+   *  no webhook/notification feature of its own and this platform never writes order status
+   *  back to BASE. */
+  mail_address?: string;
+  first_name?: string;
+  last_name?: string;
 }
 interface BaseOrderDetailResponse {
   order: BaseOrderDetail;
@@ -159,7 +167,7 @@ export class BaseAdapter implements ChannelAdapter {
       client_secret: this.config.clientSecret,
       ...extra,
     });
-    const res = await fetch(`${this.apiBaseUrl}/1/oauth/token`, {
+    const res = await fetchWithRetry(`${this.apiBaseUrl}/1/oauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -268,6 +276,7 @@ export class BaseAdapter implements ChannelAdapter {
     for (const orderSummary of recentOrders) {
       const detailRes = await this.authedFetch(accessToken, `/1/orders/detail/${orderSummary.unique_key}`);
       const { order } = (await detailRes.json()) as BaseOrderDetailResponse;
+      const buyerName = [order.last_name, order.first_name].filter(Boolean).join(" ") || undefined;
       for (const item of order.order_items) {
         sales.push({
           channel: "base",
@@ -276,6 +285,8 @@ export class BaseAdapter implements ChannelAdapter {
           quantitySold: item.amount,
           occurredAt: new Date(order.ordered * 1000),
           salePriceJpy: item.total,
+          buyerEmail: order.mail_address || undefined,
+          buyerName,
         });
       }
     }

@@ -178,6 +178,10 @@ export async function runPhaseA(
       costJpy: productForOrder?.costJpy ?? null,
       salePriceJpy: sale.salePriceJpy ?? null,
       salePriceUsdCents: sale.salePriceUsdCents ?? null,
+      ebayLineItemId: sale.externalLineItemId ?? null,
+      buyerEmail: sale.buyerEmail ?? null,
+      buyerName: sale.buyerName ?? null,
+      shipToCountryCode: sale.shipToCountryCode ?? null,
     });
   } catch (err) {
     await recordSyncError(db, {

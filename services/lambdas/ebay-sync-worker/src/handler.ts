@@ -1,4 +1,4 @@
-import { EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
+import { EbayApiError, EbayPartialUpdateRolledBackError, type EbayAdapter } from "@ai-ec/adapter-ebay";
 import {
   applyStandardAspectFallbacks,
   buildIdempotencyKey,
@@ -8,6 +8,7 @@ import {
   findMissingRequiredAspects,
   finalSafetyCheckForNewListing,
   finalSafetyCheckForUpdate,
+  getPlanLimits,
   withIdempotency,
 } from "@ai-ec/core";
 import {
@@ -18,11 +19,19 @@ import {
   computeSyncConfidence,
   detectInventoryAnomaly,
   detectPriceAnomaly,
+  getOrderById,
+  getSyncJobByIdempotencyKey,
+  getTenantBillingStatus,
   inventoryMaster,
   isChannelIsolated,
+  markEbayTrackingSynced,
+  markSyncJobCompleted,
+  markSyncJobFailed,
   predictStockoutRisk,
   PREEMPTIVE_STOCKOUT_BUFFER,
   productMaster,
+  releaseMonthlyEbaySyncReservation,
+  tryReserveMonthlyEbaySync,
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
@@ -38,13 +47,40 @@ import {
   recordSyncError,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
+import { isNonRetryableEbaySellerSetupError } from "./retry-policy.js";
 import { desc, eq, and } from "drizzle-orm";
 import type { SQSEvent, SQSHandler } from "aws-lambda";
 
 interface EbaySyncMessage {
-  type: "ebay_publish" | "ebay_update";
+  type: "ebay_publish" | "ebay_update" | "ebay_tracking_upload";
   tenantId: string;
   productId: string;
+  /** Set only for ebay_tracking_upload -- see admin-api's SHIPPED-transition route, the only
+   *  place that ever creates this job type. */
+  orderId?: string;
+}
+
+/**
+ * The worker's own replay guard for an ebay_update job must change whenever
+ * inventory_master's CAS `version` does, not just when contentHash does. contentHash never
+ * changes for a stock-only event (a restock, or a sellout BASE never reports as an "order" --
+ * see product-fetch's propagateStockOnlyChangeToEbay, the only source of an ebay_update job
+ * whose contentHash is identical to one already synced), so keying purely on contentHash
+ * would make the *second* such stock-only event for the same product silently replay the
+ * first one's cached "completed" result via withIdempotency instead of actually re-syncing
+ * the new quantity to eBay. This isn't a TTL/retry concern either: createDbIdempotencyStore's
+ * own store never reclaims a "completed" row just because its TTL elapsed ("expiry only ever
+ * frees a stuck claim, never a finished one") -- so without folding in `version`, the very
+ * first stock-only update to ever run for a given content state would permanently block
+ * every later one for that same content, for as long as that content stays unchanged.
+ */
+export function buildEbayUpdateIdempotencyKey(
+  tenantId: string,
+  productId: string,
+  contentHash: string,
+  inventoryVersion: number,
+): string {
+  return buildIdempotencyKey(tenantId, ["ebay_update", productId, contentHash, inventoryVersion]);
 }
 
 const USD_PER_JPY_FALLBACK = 0.0067; // last-resort rate if the real FX API call itself fails
@@ -92,6 +128,31 @@ const SYNC_CONFIDENCE_PUBLISH_THRESHOLD = 40;
  * noise, not evidence the whole channel is unreliable.
  */
 const MIN_FAILURES_TO_PAUSE_PUBLISHING = 3;
+
+/**
+ * Commercial-launch quota enforcement: thrown when a tenant has used up this calendar
+ * month's plan-limited eBay publish+update calls. Not retryable until next month -- the
+ * SQS handler's catch block below recognizes this by name and doesn't push it to
+ * batchItemFailures, matching ai-generate-worker's own AiQuotaExceededError handling.
+ */
+class EbaySyncQuotaExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Tenant has reached its plan's monthly eBay sync limit (${limit})`);
+    this.name = "EbaySyncQuotaExceededError";
+  }
+}
+
+/** Shared by publish() and update(): reserves one unit of this tenant's monthly eBay-sync
+ *  quota, throwing EbaySyncQuotaExceededError if the plan's maxEbaySyncsPerMonth limit is
+ *  already used up. Call immediately before the real eBay API call it's gating. */
+async function reserveEbaySyncQuota(db: ReturnType<typeof getDb>, tenantId: string): Promise<void> {
+  const billing = await getTenantBillingStatus(db, tenantId);
+  const limit = getPlanLimits(billing?.plan ?? "standard").maxEbaySyncsPerMonth;
+  const reserved = await tryReserveMonthlyEbaySync(db, tenantId, limit);
+  if (!reserved) {
+    throw new EbaySyncQuotaExceededError(limit);
+  }
+}
 
 /**
  * Item #2 of the hardening list ("動的安全在庫"): recomputes and persists the product's
@@ -214,6 +275,77 @@ async function enforceAnomalyFree(
   );
 }
 
+/**
+ * Processes a retried ebay_tracking_upload job -- reached only once admin-api's own
+ * synchronous first attempt (in its SHIPPED-transition route) has already failed and the
+ * resulting sync_errors row was requeued here through the same retry path every other eBay
+ * job type uses (POST /admin/sync-errors/{id}/retry, or this queue's own DLQ redrive). Never
+ * re-registers a shipment eBay already has a fulfillment record for: SQS's at-least-once
+ * delivery means this exact message can arrive more than once even for a single logical
+ * retry, and orders.ebayTrackingSyncedAt is the one durable signal of "already succeeded."
+ *
+ * The job id itself never travels in the message body (only tenantId/orderId do) -- this
+ * reconstructs the same deterministic idempotencyKey admin-api used to create the job and
+ * looks it up by that, rather than needing every retry payload to carry it.
+ */
+export async function processTrackingUploadRetry(
+  db: ReturnType<typeof getDb>,
+  adapter: EbayAdapter,
+  message: EbaySyncMessage,
+  messageId: string,
+): Promise<{ retryable: boolean }> {
+  const orderId = message.orderId;
+  if (!orderId) {
+    console.error(`ebay-sync-worker: ebay_tracking_upload message ${messageId} is missing orderId`);
+    return { retryable: false };
+  }
+
+  const idempotencyKey = `${message.tenantId}:ebay-tracking-upload:${orderId}`;
+  const job = await getSyncJobByIdempotencyKey(db, message.tenantId, idempotencyKey);
+
+  try {
+    const order = await getOrderById(db, message.tenantId, orderId);
+    if (!order) throw new Error(`orders row not found for id ${orderId}`);
+
+    if (order.ebayTrackingSyncedAt) {
+      if (job) await markSyncJobCompleted(db, job.id);
+      return { retryable: false };
+    }
+    if (!order.ebayLineItemId || !order.trackingNumber || !order.shippingCarrierCode) {
+      throw new Error(`order ${orderId} is missing its eBay line item id, tracking number, or carrier code`);
+    }
+
+    const [accountId] = await listConnectedAccountIds(db, message.tenantId, "ebay");
+    if (!accountId) throw new Error("No eBay account connected — complete eBay OAuth first");
+    const accessToken = await getValidAccessToken(db, message.tenantId, adapter, accountId);
+
+    await adapter.createShippingFulfillment(
+      accessToken,
+      order.externalOrderId,
+      order.ebayLineItemId,
+      order.quantity,
+      order.trackingNumber,
+      order.shippingCarrierCode,
+    );
+    await markEbayTrackingSynced(db, message.tenantId, orderId);
+    if (job) await markSyncJobCompleted(db, job.id);
+    return { retryable: false };
+  } catch (err) {
+    const error = err as Error;
+    if (job) await markSyncJobFailed(db, job.id, job.attempts);
+    await recordSyncError(db, {
+      tenantId: message.tenantId,
+      jobId: job?.id ?? null,
+      channel: "ebay",
+      productId: message.productId ?? null,
+      errorCode: "ebay_tracking_sync_failed",
+      errorMessage: error.message,
+      payload: { messageId },
+    });
+    return { retryable: true };
+  }
+}
+
 export const handler: SQSHandler = async (event: SQSEvent) => {
   const db = getDb();
   const creds = await getAppCredentials<EbayAppCredentials>("ebay");
@@ -223,6 +355,13 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
 
   for (const record of event.Records) {
     const message = JSON.parse(record.body) as EbaySyncMessage;
+
+    if (message.type === "ebay_tracking_upload") {
+      const { retryable } = await processTrackingUploadRetry(db, adapter, message, record.messageId);
+      if (retryable) failures.push({ itemIdentifier: record.messageId });
+      continue;
+    }
+
     const idempotencyStore = getIdempotencyStore(message.tenantId);
 
     try {
@@ -248,27 +387,74 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
         const key = buildIdempotencyKey(message.tenantId, ["ebay_publish", product.id, product.contentHash]);
         await withIdempotency(idempotencyStore, key, () => publish(db, message.tenantId, adapter, accessToken, product.id));
       } else {
-        const key = buildIdempotencyKey(message.tenantId, ["ebay_update", product.id, product.contentHash]);
+        const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, product.id)).limit(1);
+        const key = buildEbayUpdateIdempotencyKey(message.tenantId, product.id, product.contentHash, inventory?.version ?? 0);
         await withIdempotency(idempotencyStore, key, () =>
           update(db, message.tenantId, adapter, accessToken, product.id, listing.externalId!),
         );
       }
     } catch (err) {
       const error = err as Error;
-      if (error.name !== "IdempotencyInProgressError") {
+      if (error instanceof EbaySyncQuotaExceededError) {
+        // Not retryable until next month -- not pushed to `failures`, matching how
+        // ai-generate-worker's own AiQuotaExceededError is handled.
         await recordSyncError(db, {
           tenantId: message.tenantId,
           channel: "ebay",
           productId: message.productId,
-          errorCode: `${message.type}_failed`,
+          errorCode: "ebay_sync_quota_exceeded",
           errorMessage: error.message,
-          payload: { messageId: record.messageId },
+          payload: { messageId: record.messageId, limit: error.limit },
         });
         await db
           .update(channelListings)
-          .set({ status: "error", lastError: error.message, updatedAt: new Date() })
+          .set({
+            // A listing already live on eBay must stay "published" even while this
+            // month's quota blocks it -- product-fetch's propagation gate and
+            // inventory-sync-worker only ever push stock/content to a "published"
+            // listing, and nothing else ever flips status back once quota resets next
+            // month, so marking it "error" here would permanently exclude it from
+            // resyncing (an eBay-side oversell risk). Only an ebay_publish hitting
+            // quota is accurately "error" -- nothing is live on eBay for it yet.
+            ...(message.type === "ebay_publish" ? { status: "error" } : {}),
+            lastError: `今月のeBay同期回数の上限(${error.limit}件)に達しました。来月になると自動的にリセットされます。`,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
+        continue;
+      }
+      const sellerSetupRequired = isNonRetryableEbaySellerSetupError(error);
+      if (error.name !== "IdempotencyInProgressError") {
+        // sync_errors keeps the raw error.message (full status+body) for ops debugging;
+        // channel_listings.lastError is seller-facing, so when eBay's response carries its
+        // own human-readable message (and sometimes an actionable URL, e.g. a seller
+        // registration link for SELLING_PRIVILEGE_REQUIRED), show that instead of a raw
+        // JSON blob no seller using this platform could otherwise act on.
+        const displayError =
+          error instanceof EbayApiError && error.userMessage
+            ? error.actionUrl
+              ? `${error.userMessage}\n\n次のステップ: ${error.actionUrl}`
+              : error.userMessage
+            : error.message;
+        await recordSyncError(db, {
+          tenantId: message.tenantId,
+          channel: "ebay",
+          productId: message.productId,
+          errorCode: sellerSetupRequired ? "ebay_seller_setup_required" : `${message.type}_failed`,
+          errorMessage: error.message,
+          payload: { messageId: record.messageId, retryable: !sellerSetupRequired },
+        });
+        await db
+          .update(channelListings)
+          .set({ status: "error", lastError: displayError, updatedAt: new Date() })
           .where(and(eq(channelListings.productId, message.productId), eq(channelListings.channel, "ebay")));
       }
+      // A seller account blocked by eBay cannot recover through SQS retries.
+      // Preserve the actionable error in sync_errors/channel_listings, acknowledge
+      // this job, and let the seller requeue it after completing eBay onboarding.
+      // Only match explicit seller-privilege messages: errorId 25002 alone can
+      // also mean invalid/missing item specifics and is NOT a reliable classifier.
+      if (sellerSetupRequired) continue;
       failures.push({ itemIdentifier: record.messageId });
     }
   }
@@ -366,12 +552,22 @@ export async function publish(
     throw new Error(`Refusing to publish product ${productId} to eBay: ${safetyCheck.violations.join("; ")}`);
   }
 
-  const { externalId } = await adapter.createListing(accessToken, {
-    productId,
-    sku: product.sku,
-    ...listingPayload,
-    itemSpecifics,
-  });
+  await reserveEbaySyncQuota(db, tenantId);
+  let externalId: string;
+  try {
+    ({ externalId } = await adapter.createListing(accessToken, {
+      productId,
+      sku: product.sku,
+      ...listingPayload,
+      itemSpecifics,
+    }));
+  } catch (err) {
+    // The reservation above already consumed one unit of quota; refund it so a failed
+    // attempt (eBay rejection, network error) isn't charged against the tenant's monthly
+    // limit -- same "no charge on failure" guarantee as AI generation's own quota.
+    await releaseMonthlyEbaySyncReservation(db, tenantId);
+    throw err;
+  }
 
   await db
     .update(channelListings)
@@ -470,6 +666,7 @@ export async function update(
     throw new Error(`Refusing to update product ${productId} on eBay: ${safetyCheck.violations.join("; ")}`);
   }
 
+  await reserveEbaySyncQuota(db, tenantId);
   try {
     await adapter.updateListing(accessToken, externalId, {
       ...updatePayload,
@@ -481,6 +678,8 @@ export async function update(
       itemSpecifics,
     });
   } catch (err) {
+    // Same "no charge on failure" refund as publish() -- see reserveEbaySyncQuota's doc comment.
+    await releaseMonthlyEbaySyncReservation(db, tenantId);
     if (err instanceof EbayPartialUpdateRolledBackError) {
       // Item #3 of the second hardening round ("自動ロールバック"): the adapter already
       // reverted eBay's live listing content back to its prior state. Record that it

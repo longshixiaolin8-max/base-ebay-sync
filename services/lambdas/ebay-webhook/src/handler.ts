@@ -17,6 +17,7 @@ import {
   recordAuditLog,
   recordSyncError,
   requireCloudFrontOrigin,
+  emitSecurityDenialMetric,
   verifyWebhookDestinationToken,
   type EbayAppCredentials,
 } from "@ai-ec/lambda-shared";
@@ -107,8 +108,11 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
         actor: "system:ebay-webhook",
         action: "ebay_account_deletion_purge",
         entityType: "ebay_account",
-        entityId: userId,
-        after: { secretArn: row.secretArn },
+        // Account deletion must not be undermined by retaining the eBay
+        // user's personal identifier or a sensitive credential ARN in
+        // our own long-lived audit records.
+        entityId: "ebay_account_deletion",
+        after: { credentialDeleted: true },
       });
     }
   } catch (err) {
@@ -121,8 +125,11 @@ async function handleAccountDeletion(payload: EbayNotificationPayload): Promise<
       channel: "ebay",
       productId: null,
       errorCode: "ebay_account_deletion_failed",
-      errorMessage: (err as Error).message,
-      payload: { userId },
+      // A retried eBay notification supplies userId again. Avoid storing
+      // identity and provider exception details in the durable sync-error
+      // record, where they could remain after a later successful purge.
+      errorMessage: "eBay account credential purge failed; retry delivery",
+      payload: {},
     });
     return { statusCode: 500 };
   }
@@ -151,6 +158,15 @@ async function handleChallenge(event: APIGatewayProxyEventV2): Promise<APIGatewa
   const baseEndpoint = process.env.EBAY_WEBHOOK_ENDPOINT_URL;
   if (!baseEndpoint) return { statusCode: 500, body: "EBAY_WEBHOOK_ENDPOINT_URL is not configured" };
   const token = event.pathParameters?.token;
+  if (token) {
+    try {
+      verifyWebhookDestinationToken(creds.clientSecret, token);
+    } catch {
+      emitSecurityDenialMetric("ebay_destination_invalid");
+      console.warn("ebay-webhook: forged destination in ownership challenge");
+      return { statusCode: 403 };
+    }
+  }
   const endpoint = token ? `${baseEndpoint}/${token}` : baseEndpoint;
 
   const challengeResponse = computeChallengeResponse(challengeCode, creds.webhookVerificationToken, endpoint);
@@ -182,14 +198,17 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
       const publicKey = await adapter.getNotificationPublicKey(appAccessToken, kid);
       const verified = verifyNotificationSignature(rawBody, signatureHeader, publicKey);
       if (!verified) {
+        emitSecurityDenialMetric("ebay_signature_invalid");
         console.warn("ebay-webhook: signature verification failed, ignoring delivery");
         return { statusCode: 412 };
       }
     } catch (err) {
-      console.warn("ebay-webhook: could not verify signature, ignoring delivery", (err as Error).message);
+      emitSecurityDenialMetric("ebay_signature_invalid");
+      console.warn("ebay-webhook: could not verify signature, ignoring delivery");
       return { statusCode: 412 };
     }
   } else {
+    emitSecurityDenialMetric("ebay_signature_invalid");
     console.warn("ebay-webhook: notification had no X-EBAY-SIGNATURE header, ignoring delivery");
     return { statusCode: 412 };
   }
@@ -223,7 +242,9 @@ async function handleNotification(event: APIGatewayProxyEventV2): Promise<APIGat
     try {
       tenantId = verifyWebhookDestinationToken(creds.clientSecret, token);
     } catch (err) {
-      console.warn("ebay-webhook: notification's destination token failed verification, falling back to the bootstrap tenant", (err as Error).message);
+      emitSecurityDenialMetric("ebay_destination_invalid");
+      console.warn("ebay-webhook: invalid destination tenant token; rejecting notification");
+      return { statusCode: 403 };
     }
   }
   await triggerCoalescedPoll(tenantId, "ebay");
@@ -256,7 +277,8 @@ async function handlePlatformNotification(event: APIGatewayProxyEventV2): Promis
   try {
     tenantId = verifyWebhookDestinationToken(creds.clientSecret, token);
   } catch (err) {
-    console.warn("ebay-webhook: platform-notifications token invalid, ignoring delivery", (err as Error).message);
+    emitSecurityDenialMetric("ebay_destination_invalid");
+    console.warn("ebay-webhook: platform-notifications token invalid, ignoring delivery");
     return { statusCode: 403 };
   }
 
