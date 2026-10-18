@@ -55,21 +55,30 @@ export interface PlatformConfig {
    */
   sesFromEmail?: string;
   /**
-   * Confirmed live (a failed dev deploy): this account's Lambda "Concurrent executions"
-   * quota is NOT the AWS default of 1000 -- it was 10, the lowest AWS allows, most likely
-   * because a fresh/lightly-used account hasn't yet had it auto-raised. AWS enforces a hard
-   * floor of 10 *unreserved* executions account-wide, so on an account capped at 10 total,
-   * reserving even a single unit for one function is mathematically impossible ("decreases
-   * account's UnreservedConcurrentExecution below its minimum value of [10]"). makeFn's own
+   * Originally false by default: this account's Lambda "Concurrent executions" quota was
+   * NOT the AWS default of 1000 -- it was 10, the lowest AWS allows, most likely because a
+   * fresh/lightly-used account hadn't yet had it auto-raised. AWS enforces a hard floor of
+   * 10 *unreserved* executions account-wide, so on an account capped at 10 total, reserving
+   * even a single unit for one function was mathematically impossible ("decreases account's
+   * UnreservedConcurrentExecution below its minimum value of [10]"). makeFn's own
    * reservedConcurrency argument (lambda-stack.ts) is therefore only actually applied when
-   * this is true -- false (default) leaves every Lambda unreserved, exactly like before that
-   * feature existed, so a low-quota account can still deploy everything else. A quota
-   * increase request to 1000 was filed via Service Quotas (RequestServiceQuotaIncrease,
-   * lambda/L-B99A9384) but isn't guaranteed to be approved automatically or quickly -- flip
-   * this to true only after confirming (GetServiceQuota) the account's live quota is
-   * comfortably above the sum of every reservedConcurrency value this stack sets.
+   * this is true.
+   *
+   * Confirmed live (2026-10-09, AWS Support case): a requested quota increase to 1000 in
+   * us-east-2 was approved, comfortably above the sum of every reservedConcurrency value
+   * this stack sets (35 total) -- bin/infra.ts now defaults this to true. Only pass false
+   * explicitly if that quota is ever lowered again.
    */
   lambdaConcurrencyLimitsEnabled: boolean;
+  /**
+   * The platform operator's own login email -- gates the cross-tenant "/admin/ops/*" routes
+   * (admin-api handler.ts's requireOperator()) and the frontend's /ops nav item. Left unset
+   * by default: those routes 403 unconditionally until this is configured, so a fresh deploy
+   * never accidentally exposes every tenant's data to whichever Cognito user happens to sign
+   * in. Not a secret (it's the same address already public on /legal) -- just an identity
+   * check, so it ships as a plain Lambda env var, not a Secrets Manager entry.
+   */
+  operatorEmail?: string;
 }
 
 export function loadConfig(
@@ -81,6 +90,7 @@ export function loadConfig(
   ebayPlatformNotificationThrottleEnabled?: string,
   sesFromEmail?: string,
   lambdaConcurrencyLimitsEnabled?: string,
+  operatorEmail?: string,
 ): PlatformConfig {
   return {
     envName,
@@ -91,5 +101,6 @@ export function loadConfig(
     ebayPlatformNotificationThrottleEnabled: ebayPlatformNotificationThrottleEnabled === "true",
     sesFromEmail,
     lambdaConcurrencyLimitsEnabled: lambdaConcurrencyLimitsEnabled === "true",
+    operatorEmail,
   };
 }

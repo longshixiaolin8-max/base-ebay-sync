@@ -51,6 +51,7 @@ const createStripeClientMock = vi.fn(() => ({
   checkout: { sessions: { create: checkoutSessionsCreateMock } },
   prices: { retrieve: pricesRetrieveMock },
 }));
+const resolvePlanPriceIdsMock = vi.fn((creds: { priceId: string }): Record<string, string> => ({ standard: creds.priceId }));
 vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: (...args: unknown[]) => getAppCredentialsMock(...args),
   getDb: () => getDbMock(),
@@ -59,6 +60,7 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   requireEnv: (name: string) => requireEnvMock(name),
   sendEmail: (...args: unknown[]) => sendEmailMock(...args),
   createStripeClient: () => createStripeClientMock(),
+  resolvePlanPriceIds: (...args: unknown[]) => resolvePlanPriceIdsMock(...(args as [{ priceId: string }])),
 }));
 
 const { handler } = await import("./handler.js");
@@ -198,7 +200,7 @@ describe("public signup", () => {
   });
 
   it("rate limits verification-code reissue for the same email", async () => {
-    getSignupVerificationMock.mockResolvedValueOnce({
+    getSignupVerificationMock.mockResolvedValue({
       ...validChallenge(),
       resendAvailableAt: new Date(Date.now() + 30_000),
     });
@@ -207,6 +209,29 @@ describe("public signup", () => {
 
     expect(res.statusCode).toBe(429);
     expect(res.headers?.["Retry-After"]).toBeTruthy();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it("never sends a resend OTP to an email without a live prior signup challenge", async () => {
+    const response = await callHandler({ action: "resend", email: "new@example.com" });
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body!)).toEqual({ error: "verification_not_started" });
+    expect(upsertSignupVerificationMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects forged inputs, pathological payloads and invalid emails before touching SES", async () => {
+    const base = { action: "start", companyName: "Acme", password: "Password!123", acceptedTerms: true };
+    for (const bad of [
+      { ...base, email: { address: "a@example.com" } },
+      { ...base, email: "not-a-real-email" },
+      { ...base, email: "a@example.com", companyName: "X".repeat(200) },
+      { ...base, email: "a@example.com", password: "P".repeat(200) + "!a1" },
+    ]) {
+      expect((await callHandler(bad)).statusCode).toBe(400);
+    }
+    expect((await callHandler(null)).statusCode).toBe(400);
+    expect((await callHandler({ ...base, email: "a@example.com", padding: "z".repeat(17000) })).statusCode).toBe(413);
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 
@@ -283,7 +308,7 @@ describe("public signup", () => {
     expect(createPendingTenantMock).toHaveBeenCalledWith(
       expect.anything(),
       "Acme",
-      { id: tenantId, contactEmail: "a@example.com" },
+      { id: tenantId, contactEmail: "a@example.com", plan: "standard" },
     );
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -305,6 +330,96 @@ describe("public signup", () => {
       }),
     );
     expect(JSON.parse(res.body!)).toEqual({ checkoutUrl: "https://checkout.stripe.example/session" });
+  });
+
+  it("rejects an unconfigured paid tier before consuming OTP or creating an account", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    // Only Standard has a live Price. No fallback to its price for Starter/Pro.
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1" });
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body!)).toEqual({ error: "plan_not_available", plan: "pro" });
+    expect(claimSignupVerificationMock).not.toHaveBeenCalled();
+    expect(cognitoSendMock).not.toHaveBeenCalled();
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
+    expect(customersCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("uses the requested plan's own Stripe price for checkout when one is specified", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1", pro: "price_pro" });
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(checkoutSessionsCreateMock).toHaveBeenCalledWith(expect.objectContaining({ line_items: [{ price: "price_pro", quantity: 1 }] }));
+    // The originally selected tier is persisted onto the pending tenant row itself, not just
+    // used transiently for this Checkout Session -- otherwise, if Stripe checkout creation
+    // failed right after this (a real, handled failure mode -- see the next test), there
+    // would be no record anywhere of which plan this signer actually chose, and resuming
+    // payment later would silently fall back to Standard.
+    expect(createPendingTenantMock).toHaveBeenCalledWith(expect.anything(), "Acme", expect.objectContaining({ plan: "pro" }));
+  });
+
+  it("persists the selected plan on the pending tenant even when Stripe checkout creation fails right after account creation", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+    resolvePlanPriceIdsMock.mockReturnValueOnce({ standard: "price_1", pro: "price_pro" });
+    checkoutSessionsCreateMock.mockRejectedValueOnce(new Error("Stripe outage"));
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "pro",
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body!)).toEqual({ error: "checkout_unavailable", accountCreated: true });
+    // The account (and its originally selected plan) is already durably recorded before the
+    // Stripe call that just failed -- this is exactly the gap POST /admin/billing/checkout-
+    // session's own plan fallback (admin-api's handler.ts) depends on to resume payment for
+    // the right tier later, instead of defaulting to Standard.
+    expect(createPendingTenantMock).toHaveBeenCalledWith(expect.anything(), "Acme", expect.objectContaining({ plan: "pro" }));
+  });
+
+  it("rejects an unknown plan name before creating any Cognito user or tenant row", async () => {
+    getSignupVerificationMock.mockResolvedValueOnce(validChallenge());
+
+    const res = await callHandler({
+      action: "confirm",
+      companyName: "Acme",
+      email: "a@example.com",
+      password: "Password!123",
+      confirmationCode: "123456",
+      acceptedTerms: true,
+      plan: "enterprise-deluxe",
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body!)).toEqual({ error: "unknown_plan", plan: "enterprise-deluxe" });
+    expect(cognitoSendMock).not.toHaveBeenCalled();
+    expect(createPendingTenantMock).not.toHaveBeenCalled();
   });
 
   it("compensates Cognito if tenant/audit persistence fails", async () => {

@@ -13,8 +13,12 @@
  */
 export interface OrderProfitInputs {
   /** JPY per unit acquisition cost, snapshotted at sale time (product_master.cost_jpy can
-   *  change later; the order's own snapshot is what profit history should reflect). */
+   *  change later; the order's own snapshot is what profit history should reflect). Scaled by
+   *  `quantity` below -- unlike salePriceJpy/salePriceUsdCents, which both channels already
+   *  report as the line-item TOTAL (quantity * unit price), this one is still per-unit. */
   costJpy: number | null;
+  /** Units sold on this order/line item -- see costJpy's own note for why this matters. */
+  quantity: number;
   /** Set for a BASE sale. */
   salePriceJpy: number | null;
   /** Set for an eBay sale. */
@@ -39,7 +43,11 @@ export interface OrderProfitResult {
   profitMarginBasisPoints: number | null;
 }
 
-function jpyToUsdCents(jpy: number, usdPerJpy: number): number {
+/** Shared by computeOrderProfit and any other caller that needs the same JPY->USD-cents
+ *  conversion this module's own cost accounting uses (see getTenantMarginHistory in
+ *  packages/db/src/orders.ts, which must reconstruct an order's historical acquisition-cost-
+ *  in-USD the same way this function derives it, not approximate it differently). */
+export function jpyToUsdCents(jpy: number, usdPerJpy: number): number {
   return Math.round(jpy * usdPerJpy * 100);
 }
 
@@ -48,7 +56,7 @@ export function computeOrderProfit(inputs: OrderProfitInputs): OrderProfitResult
     inputs.salePriceUsdCents ?? (inputs.salePriceJpy != null ? jpyToUsdCents(inputs.salePriceJpy, inputs.usdPerJpy) : 0);
 
   const costUsdCents =
-    (inputs.costJpy != null ? jpyToUsdCents(inputs.costJpy, inputs.usdPerJpy) : 0) +
+    (inputs.costJpy != null ? jpyToUsdCents(inputs.costJpy * inputs.quantity, inputs.usdPerJpy) : 0) +
     (inputs.shippingCostJpy != null ? jpyToUsdCents(inputs.shippingCostJpy, inputs.usdPerJpy) : 0) +
     (inputs.ebayFeeUsdCents ?? 0) +
     (inputs.paymentFeeUsdCents ?? 0) +

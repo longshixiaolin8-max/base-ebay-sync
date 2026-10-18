@@ -11,7 +11,8 @@
     "test": "pnpm -r --if-present run test",
     "lint": "pnpm -r --if-present run lint",
     "typecheck": "pnpm -r --if-present run typecheck",
-    "cdk:synth": "pnpm --filter infra run synth"
+    "cdk:synth": "pnpm --filter infra run synth",
+    "security:report": "node scripts/security-report.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.16.11",
@@ -25,7 +26,8 @@
   "pnpm": {
     "overrides": {
       "postcss": "8.5.18",
-      "drizzle-orm": "0.45.2"
+      "drizzle-orm": "0.45.2",
+      "source-map-js": "1.2.2"
     }
   }
 }

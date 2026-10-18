@@ -75,14 +75,7 @@ export function OrdersTable({
   onBulkFinalize,
   bulkFinalizing,
 }: OrdersTableProps) {
-  // 利益状況 is not a server-side filter -- applied to the already-fetched page only, same
-  // client-side-narrowing convention as the チャネル同期 job queue's channel filter.
-  const visibleOrders = orders.filter((o) => {
-    if (profitStatus === "finalized") return o.profit.finalized;
-    if (profitStatus === "unfinalized") return !o.profit.finalized;
-    if (profitStatus === "below_average") return o.belowAverageMargin;
-    return true;
-  });
+  const visibleOrders = orders;
   const allSelected = visibleOrders.length > 0 && visibleOrders.every((o) => selectedIds.has(o.id));
 
   return (
@@ -165,6 +158,16 @@ export function OrdersTable({
                     {o.hasPossibleDoubleSale && (
                       <div>
                         <Badge tone="error">重複の可能性</Badge>
+                      </div>
+                    )}
+                    {o.ddp.status === "required" && !o.ddpConfirmedAt && (
+                      <div>
+                        <Badge tone="warn">DDP要対応</Badge>
+                      </div>
+                    )}
+                    {o.ddp.status === "unknown" && (
+                      <div>
+                        <Badge tone="warn">DDP要確認</Badge>
                       </div>
                     )}
                   </td>

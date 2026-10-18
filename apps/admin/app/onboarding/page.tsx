@@ -123,8 +123,17 @@ export default function OnboardingPage() {
     setBusy(channel);
     try {
       const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
-      window.open(res.url, "_blank", "noopener,noreferrer");
-      notify(`${channel === "base" ? "BASE" : "eBay"}の連携画面を別タブで開きました。完了したらこのタブに戻ってきてください。`);
+      const channelLabel = channel === "base" ? "BASE" : "eBay";
+      // window.open returns null when the browser blocks the popup (common on mobile
+      // Safari/Chrome for a call made after an await) -- without this check, the success
+      // toast below used to fire unconditionally, confirming a tab that never actually
+      // opened with no visible error or way to retry.
+      const win = window.open(res.url, "_blank", "noopener,noreferrer");
+      if (win) {
+        notify(`${channelLabel}の連携画面を別タブで開きました。完了したらこのタブに戻ってきてください。`);
+      } else {
+        notify(`ポップアップがブロックされました。次のURLを手動で開いて${channelLabel}と連携してください: ${res.url}`);
+      }
     } catch (err) {
       notify(`連携の開始に失敗しました: ${(err as Error).message}`);
     } finally {

@@ -45,6 +45,48 @@ describe("createPendingTenant", () => {
     expect(result).toEqual({ id: "new-tenant-id" });
     expect(inserted).toEqual({ name: "Acme Inc", status: "pending_payment" });
   });
+
+  it("persists the originally selected plan when one is given", async () => {
+    let inserted: Record<string, unknown> | undefined;
+    const db = {
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted = v;
+          return { returning: async () => [{ id: "new-tenant-id" }] };
+        },
+      }),
+    } as unknown as Database;
+
+    await createPendingTenant(db, "Acme Inc", { id: "tenant-1", contactEmail: "a@example.com", plan: "pro" });
+
+    // Without this, a tenant whose initial Stripe Checkout Session creation fails right after
+    // signup has no record anywhere of which tier they picked (see createPendingTenant's own
+    // doc comment) -- resuming payment through POST /admin/billing/checkout-session would
+    // otherwise have no better fallback than hardcoding "standard".
+    expect(inserted).toEqual({
+      id: "tenant-1",
+      name: "Acme Inc",
+      status: "pending_payment",
+      contactEmail: "a@example.com",
+      plan: "pro",
+    });
+  });
+
+  it("omits the plan field entirely when none is given, leaving the schema's own default", async () => {
+    let inserted: Record<string, unknown> | undefined;
+    const db = {
+      insert: () => ({
+        values: (v: Record<string, unknown>) => {
+          inserted = v;
+          return { returning: async () => [{ id: "new-tenant-id" }] };
+        },
+      }),
+    } as unknown as Database;
+
+    await createPendingTenant(db, "Acme Inc", { id: "tenant-1" });
+
+    expect(inserted).not.toHaveProperty("plan");
+  });
 });
 
 describe("getTenantBillingStatus", () => {
@@ -105,6 +147,32 @@ describe("markTenantActive", () => {
       gracePeriodEndsAt: null,
       lastBillingEventAt: eventCreatedAt,
     });
+  });
+
+  it("also sets plan when the caller resolved one from the subscription's actual Stripe Price id", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+    const eventCreatedAt = new Date("2026-01-01T00:00:00Z");
+
+    await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456", plan: "pro" }, eventCreatedAt);
+
+    expect(sink.patch).toEqual({
+      status: "active",
+      stripeCustomerId: "cus_123",
+      stripeSubscriptionId: "sub_456",
+      gracePeriodEndsAt: null,
+      lastBillingEventAt: eventCreatedAt,
+      plan: "pro",
+    });
+  });
+
+  it("leaves the tenant's existing plan untouched when the caller passes no plan", async () => {
+    const sink: { patch?: Record<string, unknown> } = {};
+    const db = dbWithLastBillingEventAt(null, sink);
+
+    await markTenantActive(db, "tenant-a", { stripeCustomerId: "cus_123", stripeSubscriptionId: "sub_456" }, new Date("2026-01-01T00:00:00Z"));
+
+    expect(sink.patch).not.toHaveProperty("plan");
   });
 
   it("does not apply an event older than the tenant's already-applied event (out-of-order guard)", async () => {

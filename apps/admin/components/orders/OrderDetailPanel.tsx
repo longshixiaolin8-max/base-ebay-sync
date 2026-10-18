@@ -14,6 +14,8 @@ export interface ExtraFields {
   adSpendUsdCents: string;
   fxCostUsdCents: string;
   returnAmountUsdCents: string;
+  trackingNumber: string;
+  shippingCarrierCode: string;
 }
 
 interface OrderDetailPanelProps {
@@ -26,6 +28,8 @@ interface OrderDetailPanelProps {
   onNextStatusChange: (status: OrderStatus | null) => void;
   extra: ExtraFields;
   onExtraChange: (extra: ExtraFields) => void;
+  ddpConfirmed: boolean;
+  onDdpConfirmedChange: (confirmed: boolean) => void;
   onSubmitStatusChange: () => void;
   onFinalizeProfit: () => void;
   busy: boolean;
@@ -50,6 +54,8 @@ export function OrderDetailPanel({
   onNextStatusChange,
   extra,
   onExtraChange,
+  ddpConfirmed,
+  onDdpConfirmedChange,
   onSubmitStatusChange,
   onFinalizeProfit,
   busy,
@@ -59,6 +65,8 @@ export function OrderDetailPanel({
   const revenueJpy = usdPerJpy ? Math.round(order.profit.revenueUsdCents / 100 / usdPerJpy) : null;
   const feesJpy = usdPerJpy ? Math.round(((order.ebayFeeUsdCents ?? 0) + (order.paymentFeeUsdCents ?? 0)) / 100 / usdPerJpy) : null;
   const netProfitJpy = usdPerJpy ? Math.round(order.profit.netProfitUsdCents / 100 / usdPerJpy) : null;
+  const ddpUnconfirmed = order.ddp.status === "required" && !order.ddpConfirmedAt;
+  const ddpUnknown = order.ddp.status === "unknown";
 
   return (
     <div className="card inventory-detail-panel">
@@ -82,6 +90,20 @@ export function OrderDetailPanel({
           <LinkIcon width={16} height={16} />
         </Link>
       </div>
+
+      {ddpUnconfirmed && (
+        <div className="order-margin-alert">
+          DDP(関税前払い)対応が必要な可能性があります
+          <p>{order.ddp.reasonJa}</p>
+        </div>
+      )}
+
+      {ddpUnknown && (
+        <div className="order-margin-alert">
+          DDP(関税前払い)対応が必要か判定できません
+          <p>{order.ddp.reasonJa}</p>
+        </div>
+      )}
 
       {order.belowAverageMargin && (
         <div className="order-margin-alert">
@@ -122,8 +144,26 @@ export function OrderDetailPanel({
               <dt>数量</dt>
               <dd>{order.quantity}</dd>
             </div>
+            {order.trackingNumber && (
+              <div>
+                <dt>追跡番号</dt>
+                <dd>
+                  {order.trackingNumber}({order.shippingCarrierCode ?? "—"})
+                  {order.channel === "ebay" &&
+                    (order.ebayTrackingSyncedAt ? (
+                      <span className="badge ok" style={{ marginLeft: "0.4rem" }}>
+                        eBay連携済み
+                      </span>
+                    ) : (
+                      <span className="badge warn" style={{ marginLeft: "0.4rem" }}>
+                        eBay未連携
+                      </span>
+                    ))}
+                </dd>
+              </div>
+            )}
           </dl>
-          <p className="inventory-detail-hint">支払い方法・配送方法・追跡番号は現在記録されていません。</p>
+          <p className="inventory-detail-hint">支払い方法・配送先住所は現在記録されていません。</p>
 
           {!order.profitFinalizedAt && (
             <>
@@ -171,8 +211,34 @@ export function OrderDetailPanel({
                         <input type="text" inputMode="decimal" value={extra.returnAmountUsdCents} onChange={(e) => onExtraChange({ ...extra, returnAmountUsdCents: e.target.value })} />
                       </label>
                     )}
+                    {nextStatus === "SHIPPED" && (
+                      <>
+                        <label className="specifics-field">
+                          <span>追跡番号</span>
+                          <input type="text" value={extra.trackingNumber} onChange={(e) => onExtraChange({ ...extra, trackingNumber: e.target.value })} />
+                        </label>
+                        <label className="specifics-field">
+                          <span>運送会社</span>
+                          <input type="text" placeholder="例: Japan Post" value={extra.shippingCarrierCode} onChange={(e) => onExtraChange({ ...extra, shippingCarrierCode: e.target.value })} />
+                        </label>
+                      </>
+                    )}
                   </div>
-                  <button type="button" style={{ marginTop: "0.75rem" }} onClick={onSubmitStatusChange} disabled={busy}>
+                  {nextStatus === "SHIPPED" && order.channel === "ebay" && (
+                    <p className="inventory-detail-hint">追跡番号と運送会社の両方を入力すると、eBayに自動連携されます。空欄のままでも発送処理自体は完了します。</p>
+                  )}
+                  {nextStatus === "SHIPPED" && ddpUnconfirmed && (
+                    <label className="specifics-field" style={{ marginTop: "0.75rem", flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                      <input type="checkbox" checked={ddpConfirmed} onChange={(e) => onDdpConfirmedChange(e.target.checked)} />
+                      <span>DDP(関税前払い)対応の配送方法で発送済みです</span>
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    style={{ marginTop: "0.75rem" }}
+                    onClick={onSubmitStatusChange}
+                    disabled={busy || (nextStatus === "SHIPPED" && ddpUnconfirmed && !ddpConfirmed)}
+                  >
                     {busy ? "更新中..." : `「${ORDER_STATUS_LABEL[nextStatus]}」に更新`}
                   </button>
                 </div>
@@ -184,9 +250,23 @@ export function OrderDetailPanel({
 
       {activeTab === "customer" && (
         <div className="inventory-detail-overview">
-          <EmptyState>
-            購入者名・配送先住所は現在記録されていません。BASE/eBayの注文Webhookが購入者情報を渡していても、このプラットフォームはまだ保存していません。
-          </EmptyState>
+          {order.channel === "base" && order.buyerEmail ? (
+            <dl className="inventory-detail-rows">
+              <div>
+                <dt>購入者名</dt>
+                <dd>{order.buyerName ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>メールアドレス</dt>
+                <dd>{order.buyerEmail}</dd>
+              </div>
+            </dl>
+          ) : order.channel === "ebay" ? (
+            <EmptyState>eBayはプライバシー保護のため、購入者のメールアドレスをAPI経由で提供していません。配送先住所はeBay側の注文画面でご確認ください。</EmptyState>
+          ) : (
+            <EmptyState>購入者情報がまだ記録されていません(この注文がこの機能の追加前に同期された可能性があります)。</EmptyState>
+          )}
+          <p className="inventory-detail-hint">配送先住所は現在記録されていません。</p>
         </div>
       )}
 

@@ -3,7 +3,7 @@
 import type { ProductMaster } from "@ai-ec/core";
 import { fetchAuthSession } from "aws-amplify/auth";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
 import { apiGet, apiPost } from "@/lib/api-client";
@@ -49,6 +49,7 @@ function stripHtml(html: string): string {
 function LinkExistingListingsInner() {
   const { ready } = useRequireAuth();
   const { notify } = useToast();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const fromOnboarding = searchParams.get("onboarding") === "1";
   const exitHref = fromOnboarding ? "/onboarding" : "/products";
@@ -167,7 +168,11 @@ function LinkExistingListingsInner() {
   }
 
   function saveForLater() {
+    // Every decision is already persisted to localStorage as it's made (see persist()
+    // above) -- this button's own job is just to actually leave the page, since otherwise
+    // it told the user their progress was saved without doing anything else itself.
     notify("進行状況を保存しました。後でこのページに戻ると続きから再開できます。", "success");
+    router.push(exitHref);
   }
 
   async function confirmAll() {

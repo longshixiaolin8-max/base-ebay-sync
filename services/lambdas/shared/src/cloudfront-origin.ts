@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { emitSecurityDenialMetric } from "./metrics.js";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 /**
@@ -23,11 +24,15 @@ export function requireCloudFrontOrigin(event: APIGatewayProxyEventV2): APIGatew
   if (!expected) return null;
 
   const provided = event.headers?.["x-cloudfront-secret"] ?? event.headers?.["X-CloudFront-Secret"];
-  if (!provided) return { statusCode: 403, body: "Direct access to this API is not permitted" };
+  if (!provided) {
+    emitSecurityDenialMetric("cloudfront_origin_denied");
+    return { statusCode: 403, body: "Direct access to this API is not permitted" };
+  }
 
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    emitSecurityDenialMetric("cloudfront_origin_denied");
     return { statusCode: 403, body: "Direct access to this API is not permitted" };
   }
 

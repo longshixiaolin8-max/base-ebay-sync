@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiGet, apiPatch, apiPost } from "@/lib/api-client";
+import { billingErrorMessage } from "@/lib/billing-error-copy";
 import { formatStripeAmount, planLabel } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { Card } from "@/components/ui/Card";
@@ -15,6 +16,12 @@ const STATUS_LABEL: Record<BillingStatus["status"], string> = {
   canceled_grace: "解約済み(閲覧可能)",
   canceled: "解約済み",
 };
+
+/** Every plan tier this platform currently sells, in display order -- see
+ *  packages/core/src/plan-limits.ts's own PLAN_LIMITS keys, the source of truth for which
+ *  plans actually exist and what each one's limits are (deliberately not duplicated here;
+ *  this UI only needs the names to offer a switch, not the numbers). */
+const AVAILABLE_PLANS = ["starter", "standard", "pro"] as const;
 
 const STATUS_MESSAGE: Record<BillingStatus["status"], string | null> = {
   pending_payment: "決済が完了していません。Stripeの決済画面で登録を完了してください。",
@@ -65,6 +72,7 @@ export default function PlanTab() {
   const [openingCheckout, setOpeningCheckout] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [changingPlan, setChangingPlan] = useState<string | null>(null);
 
   useEffect(() => {
     apiGet<BillingStatus>("/admin/billing/status")
@@ -90,8 +98,25 @@ export default function PlanTab() {
       const { url } = await apiPost<{ url: string }>("/admin/billing/portal-session");
       window.location.href = url;
     } catch (err) {
-      notify(`Stripeポータルを開けませんでした: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "Stripeポータルを開けませんでした。しばらくしてからもう一度お試しください。"));
       setOpeningPortal(false);
+    }
+  }
+
+  async function changePlan(plan: string) {
+    setChangingPlan(plan);
+    try {
+      await apiPost("/admin/billing/change-plan", { plan });
+      // Stripe's own customer.subscription.updated webhook is what actually persists the
+      // new plan (see stripe-webhook's handler) once Stripe confirms the change -- this
+      // response only means the request was accepted, so billing.plan here deliberately
+      // isn't optimistically updated to avoid showing a plan that hasn't actually taken
+      // effect yet.
+      notify("プラン変更をリクエストしました。反映まで少し時間がかかる場合があります。", "success");
+    } catch (err) {
+      notify(billingErrorMessage(err, "プラン変更に失敗しました。しばらくしてからもう一度お試しください。"));
+    } finally {
+      setChangingPlan(null);
     }
   }
 
@@ -101,7 +126,7 @@ export default function PlanTab() {
       const { url } = await apiPost<{ url: string }>("/admin/billing/checkout-session");
       window.location.href = url;
     } catch (err) {
-      notify(`お支払い設定を再開できませんでした: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "お支払い設定を再開できませんでした。しばらくしてからもう一度お試しください。"));
       setOpeningCheckout(false);
     }
   }
@@ -119,7 +144,7 @@ export default function PlanTab() {
       setDetails((prev) => (prev?.subscription ? { ...prev, subscription: { ...prev.subscription, cancelAtPeriodEnd: true } } : prev));
       setConfirmingCancel(false);
     } catch (err) {
-      notify(`解約の予約に失敗しました: ${(err as Error).message}`);
+      notify(billingErrorMessage(err, "解約の予約に失敗しました。しばらくしてからもう一度お試しください。"));
     } finally {
       setCanceling(false);
     }
@@ -247,9 +272,25 @@ export default function PlanTab() {
               {openingPortal ? "開いています..." : "Stripeでお支払い方法を管理"}
             </button>
           )}
-          <p style={{ marginTop: "0.6rem", fontSize: "0.76rem", color: "var(--fg-subtle)" }}>
-            現在はスタンダードプランのみご提供しています。他プランへの変更はご用意がありません。
-          </p>
+          {billing.status === "active" && (
+            <div style={{ marginTop: "1rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+              <p style={{ margin: "0 0 0.6rem", fontSize: "0.82rem", color: "var(--fg-muted)" }}>プランを変更</p>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                {AVAILABLE_PLANS.map((plan) => (
+                  <button
+                    key={plan}
+                    type="button"
+                    className={plan === billing.plan ? undefined : "secondary"}
+                    disabled={plan === billing.plan || changingPlan !== null}
+                    onClick={() => changePlan(plan)}
+                    style={{ flex: 1 }}
+                  >
+                    {changingPlan === plan ? "変更中..." : planLabel(plan)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {details?.paymentMethod && (
             <p style={{ marginTop: "1rem", fontSize: "0.85rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
@@ -298,6 +339,7 @@ export default function PlanTab() {
           <h2 style={{ fontSize: "0.95rem", margin: 0 }}>利用状況</h2>
           <UsageRow label="商品登録数" used={usage.products.used} limit={usage.products.limit} />
           <UsageRow label="AI生成(今月)" used={usage.aiGenerations.used} limit={usage.aiGenerations.limit} />
+          <UsageRow label="eBay同期(今月)" used={usage.ebaySyncs.used} limit={usage.ebaySyncs.limit} />
           <UsageRow label="監視対象SKU数" used={usage.monitoredSkus.used} limit={usage.monitoredSkus.limit} />
         </Card>
       )}

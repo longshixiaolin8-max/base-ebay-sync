@@ -84,6 +84,7 @@ export default function CommercePage() {
   const { notify } = useToast();
   const [rows, setRows] = useState<CommerceRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Record<string, string>>({});
   const [query, setQuery] = useState("");
@@ -98,10 +99,15 @@ export default function CommercePage() {
 
   async function load() {
     setLoading(true);
+    setLoadError(false);
     try {
       const res = await apiGet<{ products: CommerceRow[] }>("/admin/commerce-dashboard");
       setRows(res.products);
     } catch (err) {
+      // Without this, a fetch failure left `rows` at its initial [] and rendered the exact
+      // same "商品がまだありません" empty-state as a tenant with genuinely zero products --
+      // telling them to check their BASE connection when the real problem was this request.
+      setLoadError(true);
       notify(`コマース統合ビューの取得に失敗しました: ${(err as Error).message}`);
     } finally {
       setLoading(false);
@@ -115,7 +121,11 @@ export default function CommercePage() {
   async function reconnectEbay() {
     try {
       const res = await apiGet<{ url: string }>("/admin/oauth/ebay/authorize-url");
-      window.open(res.url, "_blank", "noopener,noreferrer");
+      // window.open returns null when the browser blocks the popup -- without this check, a
+      // blocked popup left the user with no feedback at all (no tab opened, no error shown).
+      if (!window.open(res.url, "_blank", "noopener,noreferrer")) {
+        notify(`ポップアップがブロックされました。次のURLを手動で開いて連携してください: ${res.url}`);
+      }
     } catch (err) {
       notify(`連携の開始に失敗しました: ${(err as Error).message}`);
     }
@@ -328,10 +338,19 @@ export default function CommercePage() {
 
             {rows.length === 0 ? (
               <div className="table-wrapper" style={{ marginTop: "1.25rem" }}>
-                <EmptyState>
-                  商品がまだありません。BASEの商品は自動で取り込まれます(最短15分ごと)。導入設定がお済みでない場合は
-                  <Link href="/onboarding">導入設定</Link>からBASE連携をご確認ください。
-                </EmptyState>
+                {loadError ? (
+                  <EmptyState>
+                    コマース統合ビューの取得に失敗しました。
+                    <button type="button" className="secondary" onClick={() => void load()} style={{ marginLeft: "0.6rem" }}>
+                      再読み込み
+                    </button>
+                  </EmptyState>
+                ) : (
+                  <EmptyState>
+                    商品がまだありません。BASEの商品は自動で取り込まれます(最短15分ごと)。導入設定がお済みでない場合は
+                    <Link href="/onboarding">導入設定</Link>からBASE連携をご確認ください。
+                  </EmptyState>
+                )}
               </div>
             ) : (
               <>
@@ -510,7 +529,7 @@ export default function CommercePage() {
               </>
             )}
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem", marginTop: "1.5rem" }}>
+            <div className="two-col-grid" style={{ marginTop: "1.5rem" }}>
               <div className="card card-pad">
                 <h2 style={{ marginBottom: "0.5rem" }}>対応が必要</h2>
                 <Link href="/products" className="attention-item">

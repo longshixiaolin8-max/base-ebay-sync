@@ -97,6 +97,29 @@ interface DynamicPrice {
   netMarginRatio: number;
   costMarkupRatio: number;
   fxRateUsdPerJpy: number;
+  /** Set only when neither this product nor the tenant has an explicit target-margin
+   *  override -- see computeLearnedTargetMargin (@ai-ec/core) and admin-api's
+   *  resolveLearnedMarginRatio. Null whenever a merchant's own deliberate setting was used
+   *  instead, so this UI only ever explains a number it actually personalized. */
+  marginBaselineSource: "tenant_history" | "fallback_default" | null;
+  marginAdjustmentReason: string | null;
+}
+
+const MARGIN_BASELINE_LABEL: Record<string, string> = {
+  tenant_history: "過去の販売実績から学習した利益率を基準にしています",
+  fallback_default: "初期設定の利益率を基準にしています(販売実績が増えると自動で学習します)",
+};
+
+interface CustomsRiskFlag {
+  category: string;
+  matchedKeyword: string;
+  labelJa: string;
+  reasonJa: string;
+}
+
+interface CustomsRiskResult {
+  flags: CustomsRiskFlag[];
+  hasRisk: boolean;
 }
 
 function ProductDetailInner() {
@@ -111,6 +134,7 @@ function ProductDetailInner() {
   const [draft, setDraft] = useState<AiListingDraft | null>(null);
   const [inventory, setInventory] = useState<InventoryBreakdown | null>(null);
   const [dynamicPrice, setDynamicPrice] = useState<DynamicPrice | null>(null);
+  const [customsRisk, setCustomsRisk] = useState<CustomsRiskResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -180,6 +204,13 @@ function ProductDetailInner() {
       .then(setDynamicPrice)
       .catch(() => setDynamicPrice(null));
   }, [id, draft]);
+
+  useEffect(() => {
+    if (!id) return;
+    apiGet<CustomsRiskResult>(`/admin/products/${id}/customs-risk`)
+      .then(setCustomsRisk)
+      .catch(() => setCustomsRisk(null));
+  }, [id]);
 
   const mergedSpecifics = useMemo(() => ({ ...(draft?.itemSpecifics ?? {}), ...edits }), [draft, edits]);
   const editedKeys = useMemo(() => Object.keys(edits).filter((k) => edits[k] !== (draft?.itemSpecifics[k] ?? "")), [edits, draft]);
@@ -355,6 +386,22 @@ function ProductDetailInner() {
           <EmptyStateBlock>商品が見つかりませんでした。</EmptyStateBlock>
         ) : (
           <div className="detail-doc">
+            {customsRisk?.hasRisk && (
+              <section className="card card-pad">
+                <div className="order-margin-alert">
+                  海外発送時に注意が必要な可能性があります
+                  {customsRisk.flags.map((flag) => (
+                    <p key={flag.category}>
+                      ・{flag.labelJa}(該当ワード: 「{flag.matchedKeyword}」) — {flag.reasonJa}
+                    </p>
+                  ))}
+                  <p>
+                    ※これはタイトル・商品説明・素材欄のキーワードを機械的に検出した簡易チェックです。法的な判断ではありません。実際に発送可能か、送り先の国の規制もあわせてご確認ください。
+                  </p>
+                </div>
+              </section>
+            )}
+
             {/* 1. 商品写真 */}
             <section className="card card-pad">
               {product.images[0] ? (
@@ -526,6 +573,14 @@ function ProductDetailInner() {
                     </div>
                   ) : (
                     <p style={{ color: "var(--fg-subtle)", fontSize: "0.85rem" }}>価格計算に必要な情報が未設定です(送料・目標利益率)。</p>
+                  )}
+                  {dynamicPrice?.marginBaselineSource && (
+                    <p style={{ fontSize: "0.8rem", color: "var(--fg-subtle)" }}>
+                      {MARGIN_BASELINE_LABEL[dynamicPrice.marginBaselineSource]}
+                      {dynamicPrice.marginAdjustmentReason && dynamicPrice.marginAdjustmentReason !== "調整なし"
+                        ? ` ${dynamicPrice.marginAdjustmentReason}。`
+                        : ""}
+                    </p>
                   )}
                   <p style={{ fontSize: "0.76rem", color: "var(--fg-subtle)" }}>
                     為替レート・eBay手数料・送料をもとに算出した見込み値です。確定した利益ではありません。

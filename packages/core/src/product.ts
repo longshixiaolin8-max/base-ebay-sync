@@ -70,6 +70,16 @@ export interface SaleEvent {
   externalProductId: string;
   /** Idempotency source: same order should never be double-processed. */
   externalOrderId: string;
+  /** eBay's own line-item id within externalOrderId -- needed to later call eBay's
+   *  Fulfillment API (createShippingFulfillment) for this specific line item. Undefined for
+   *  a BASE sale, which has no such concept. */
+  externalLineItemId?: string;
+  /** The buyer's own contact info, when the channel's order API exposes it. Only BASE does
+   *  (mail_address/first_name/last_name on its order detail response) -- eBay's API doesn't
+   *  expose buyer email at all, and doesn't need to: eBay notifies the buyer itself once
+   *  tracking is uploaded via createShippingFulfillment. */
+  buyerEmail?: string;
+  buyerName?: string;
   quantitySold: number;
   occurredAt: Date;
   /** Total amount actually charged for this line item, in the channel's own native
@@ -78,4 +88,9 @@ export interface SaleEvent {
    *  orders API response for this sale. Only one of these two is ever set, per channel. */
   salePriceJpy?: number;
   salePriceUsdCents?: number;
+  /** ISO 3166-1 alpha-2 shipping destination country, when the channel's orders API exposes
+   *  one. Only eBay attempts this today (needed for assessDdpRequirement) -- eBay's own
+   *  shipTo address has been reported empty on some live orders, so this is best-effort and
+   *  may be undefined even for an eBay sale. */
+  shipToCountryCode?: string;
 }

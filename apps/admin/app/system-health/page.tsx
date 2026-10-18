@@ -128,7 +128,7 @@ export default function SystemHealthPage() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.25rem", marginTop: "1.5rem" }}>
+            <div className="two-col-grid" style={{ marginTop: "1.5rem" }}>
               <div className="card card-pad">
                 <h2 style={{ marginBottom: "0.75rem" }}>失敗キュー(DLQ)の滞留</h2>
                 {data.dlqDepths === null ? (

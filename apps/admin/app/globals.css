@@ -785,6 +785,18 @@ a.stat-card:hover {
   gap: 0.85rem;
 }
 
+.two-col-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+@media (max-width: 640px) {
+  .two-col-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1759,6 +1771,7 @@ tbody tr:hover {
   display: flex;
   gap: 0.6rem;
   justify-content: center;
+  flex-wrap: wrap;
 }
 
 input.otp-digit {
@@ -1775,6 +1788,21 @@ input.otp-digit {
   input.otp-digit {
     width: 38px !important;
     height: 46px;
+  }
+}
+
+/* 6 boxes at the 380px-breakpoint width (38px + 0.6rem gaps) still add up to 276px, wider
+   than the content area left inside .auth-card's own padding at a 320-360px viewport -- shrink
+   further so the row fits on one line instead of overflowing or wrapping awkwardly. */
+@media (max-width: 360px) {
+  .otp-digit-row {
+    gap: 0.35rem;
+  }
+
+  input.otp-digit {
+    width: 32px !important;
+    height: 42px;
+    font-size: 1.1rem;
   }
 }
 
@@ -1983,6 +2011,14 @@ input.otp-digit {
 @media (max-width: 640px) {
   .landing-menu-button {
     display: inline-flex;
+  }
+
+  /* The hamburger menu already has its own ログイン link (.landing-mobile-menu) -- at a
+     320-360px viewport, the brand mark+wordmark (white-space: nowrap) plus this link plus
+     the menu button no longer all fit on one row, so drop this now-redundant copy rather
+     than let the topbar overflow. */
+  .landing-login-link {
+    display: none;
   }
 }
 
@@ -3095,6 +3131,11 @@ input.otp-digit {
   gap: 0.4rem;
   font-size: 0.82rem;
   color: var(--fg-muted);
+  /* Two native date inputs (each with a browser-drawn minimum width) plus a trailing
+     button don't all fit on one line at a ~375px viewport -- wrap instead of overflowing
+     the page (this row has no room of its own to shrink further). */
+  flex-wrap: wrap;
+  row-gap: 0.5rem;
 }
 
 .draft-date-range input[type="date"] {
@@ -4357,6 +4398,10 @@ tr[data-active="true"] {
   gap: 0.5rem;
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.5rem;
+  /* 5 groups x 2 fixed-width bars each don't shrink below their nowrap value-label text, so
+     on a narrow viewport the row can be wider than the card -- scroll within the chart
+     instead of letting it push the whole page into horizontal scroll. */
+  overflow-x: auto;
 }
 
 .channel-profit-group {
@@ -4409,6 +4454,24 @@ tr[data-active="true"] {
   font-size: 0.7rem;
   color: var(--fg-subtle);
   margin: 0;
+}
+
+@media (max-width: 480px) {
+  .channel-profit-bar-wrap {
+    width: 28px;
+  }
+
+  .channel-profit-bar-value {
+    font-size: 0.56rem;
+  }
+
+  .channel-profit-group-label {
+    font-size: 0.68rem;
+  }
+
+  .channel-profit-groups {
+    gap: 0.3rem;
+  }
 }
 
 /* ---------- Analytics page ---------- */

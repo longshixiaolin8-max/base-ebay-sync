@@ -71,11 +71,6 @@ export function InventoryTable({
             <option value="base">BASE</option>
             <option value="ebay">eBay</option>
           </Select>
-          {/* この商品カタログにはカテゴリ体系が存在しないため(product_masterにカテゴリ列なし)、
-              /products一覧と同じ規約で「表示はするが機能しない」フィルタとして残す。 */}
-          <Select label="カテゴリ" value="all" onChange={() => {}} disabled>
-            <option value="all">すべてのカテゴリ</option>
-          </Select>
         </div>
       </div>
 

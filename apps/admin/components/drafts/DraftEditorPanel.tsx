@@ -144,20 +144,12 @@ export function DraftEditorPanel({
         </select>
       </section>
 
+      <p className="draft-editor-readonly-note">
+        差し戻し・AI再生成は現在未提供です。内容を修正する場合はBASE側の商品情報を編集し、保存してください。
+      </p>
       <div className="draft-action-bar">
-        <button type="button" className="secondary" disabled title="この操作には現在対応していません(下書きを差し戻す機能は未実装です)">
-          差し戻し
-        </button>
         <button type="button" className="secondary" onClick={onSave} disabled={!dirty || saving}>
           {saving ? "保存中..." : "保存"}
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled
-          title="この操作には現在対応していません(AI再生成は現状の冪等性キーの仕組み上、内容が変わらない限り新しい下書きを生成できません)"
-        >
-          再生成
         </button>
         <button type="button" className="button" onClick={onApprove} disabled={approving}>
           {approving ? "公開中..." : "承認して出品"}

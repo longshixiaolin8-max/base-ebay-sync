@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { type FormEvent, useEffect, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
+import { cognitoErrorMessage } from "@/lib/cognito-error-copy";
 import { OtpInput } from "@/components/OtpInput";
 import { EyeIcon, EyeOffIcon, ShieldIcon } from "@/components/icons";
 
@@ -148,7 +149,7 @@ export default function LoginPage() {
         handleNextStep(result.nextStep);
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError(cognitoErrorMessage(err, "ログインできませんでした。しばらくしてからもう一度お試しください。"));
     } finally {
       setSubmitting(false);
     }
@@ -166,7 +167,7 @@ export default function LoginPage() {
         handleNextStep(result.nextStep);
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError(cognitoErrorMessage(err, "パスワードを設定できませんでした。しばらくしてからもう一度お試しください。"));
     } finally {
       setSubmitting(false);
     }
@@ -184,7 +185,7 @@ export default function LoginPage() {
         handleNextStep(result.nextStep);
       }
     } catch (err) {
-      setError((err as Error).message);
+      setError(cognitoErrorMessage(err, "確認コードを確認できませんでした。もう一度お試しください。"));
       setCode("");
     } finally {
       setSubmitting(false);

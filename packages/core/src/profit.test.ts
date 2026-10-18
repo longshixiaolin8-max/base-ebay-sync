@@ -3,6 +3,7 @@ import { computeOrderProfit, computeProfitVelocityUsdCentsPerDay, daysBetween, t
 
 const baseInputs: OrderProfitInputs = {
   costJpy: null,
+  quantity: 1,
   salePriceJpy: null,
   salePriceUsdCents: null,
   ebayFeeUsdCents: null,
@@ -33,6 +34,16 @@ describe("computeOrderProfit", () => {
     expect(result.costUsdCents).toBe(3691);
     expect(result.netProfitUsdCents).toBe(1309);
     expect(result.profitMarginBasisPoints).toBe(Math.round((1309 / 5000) * 10000));
+  });
+
+  it("scales the per-unit cost by quantity, since sale price is already the line-item total", () => {
+    const result = computeOrderProfit({
+      ...baseInputs,
+      costJpy: 3000, // per unit
+      quantity: 3,
+      salePriceUsdCents: 15000, // total for all 3 units
+    });
+    expect(result.costUsdCents).toBe(Math.round(3000 * 3 * 0.0067 * 100));
   });
 
   it("converts a BASE-side JPY sale price using the supplied FX rate", () => {
