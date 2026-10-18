@@ -78,18 +78,10 @@ export function JobQueueTable({
         <button type="button" className="secondary" onClick={onBulkRetry} disabled={selectedFailedCount === 0 || bulkRetrying}>
           {bulkRetrying ? "再試行中..." : `一括再試行(${selectedFailedCount})`}
         </button>
-        <button type="button" className="secondary" disabled title="チャネルの隔離は失敗パターンから自動的に判定・解除される仕組みで、手動での隔離操作には現在対応していません">
-          チャネルを隔離
-        </button>
-        <button
-          type="button"
-          className="secondary"
-          disabled
-          title="DLQの自動再処理は30分ごとに実行されています。手動での即時再実行には現在対応していません"
-        >
-          DLQを再実行
-        </button>
       </div>
+      <p className="inventory-detail-hint">
+        チャネルの隔離・解除は失敗パターンから自動的に判定されます。DLQの再処理も30分ごとに自動実行されるため、どちらも手動操作はありません。
+      </p>
 
       {loading ? (
         <SkeletonRows />

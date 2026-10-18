@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useState } from "react";
 import { ensureAmplifyConfigured } from "@/lib/amplify-config";
+import { cognitoErrorMessage } from "@/lib/cognito-error-copy";
 import { OtpInput } from "@/components/OtpInput";
 
 function Brand() {
@@ -47,7 +48,7 @@ export default function ForgotPasswordPage() {
       await resetPassword({ username: email });
       setStage({ step: "confirm" });
     } catch (err) {
-      setError((err as Error).message);
+      setError(cognitoErrorMessage(err, "確認コードを送信できませんでした。しばらくしてからもう一度お試しください。"));
     } finally {
       setSubmitting(false);
     }
@@ -62,7 +63,7 @@ export default function ForgotPasswordPage() {
       setNotice("パスワードを更新しました。新しいパスワードでログインしてください。");
       setTimeout(() => router.replace("/login"), 1500);
     } catch (err) {
-      setError((err as Error).message);
+      setError(cognitoErrorMessage(err, "パスワードを更新できませんでした。もう一度お試しください。"));
       setCode("");
     } finally {
       setSubmitting(false);
@@ -99,6 +100,9 @@ export default function ForgotPasswordPage() {
                   onChange={(e) => setNewPassword(e.target.value)}
                 />
               </label>
+              <p style={{ fontSize: "0.75rem", color: "var(--fg-subtle)", marginTop: "0.3rem" }}>
+                12文字以上で、大文字・小文字・数字・記号を組み合わせてください。
+              </p>
             </div>
             {error && <p className="auth-error">{error}</p>}
             {notice && (

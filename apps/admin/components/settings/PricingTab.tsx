@@ -37,14 +37,29 @@ export default function PricingTab() {
       .finally(() => setLoading(false));
   }, []);
 
+  function parseOrNull(raw: string): number | null | "invalid" {
+    if (raw.trim() === "") return null;
+    const n = Number(raw);
+    // JSON.stringify(NaN) silently serializes as null, so without this check an invalid
+    // (but non-empty) value would save as "no override" with no error shown at all.
+    return Number.isFinite(n) ? n : "invalid";
+  }
+
   async function save() {
     if (!form) return;
+    const domestic = parseOrNull(form.domestic);
+    const intl = parseOrNull(form.intl);
+    const marginPercent = parseOrNull(form.marginPercent);
+    if (domestic === "invalid" || intl === "invalid" || marginPercent === "invalid") {
+      notify("入力された数値が正しくありません。内容を確認してください。");
+      return;
+    }
     setSaving(true);
     try {
       const body = {
-        defaultShippingCostJpyDomestic: form.domestic.trim() === "" ? null : Number(form.domestic),
-        defaultShippingCostJpyIntl: form.intl.trim() === "" ? null : Number(form.intl),
-        defaultTargetMarginPercent: form.marginPercent.trim() === "" ? null : Number(form.marginPercent),
+        defaultShippingCostJpyDomestic: domestic,
+        defaultShippingCostJpyIntl: intl,
+        defaultTargetMarginPercent: marginPercent,
       };
       const updated = await apiPatch<PricingDefaults>("/admin/tenant/pricing-defaults", body);
       setDefaults(updated);

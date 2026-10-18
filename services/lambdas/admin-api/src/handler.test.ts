@@ -1730,10 +1730,10 @@ describe("admin-api handler", () => {
         returnRequestedAt: null,
       };
       fakeDb = createFakeDb([
-        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }], // rows
-        [{ count: 1 }], // totalRows
         [], // recentOrdersForBaseline
         [], // unresolvedDoubleSale
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }], // rows
+        [{ count: 1 }], // totalRows
       ]);
       getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 });
 
@@ -1768,10 +1768,10 @@ describe("admin-api handler", () => {
         ddpConfirmedAt: null,
       };
       fakeDb = createFakeDb([
-        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }],
-        [{ count: 1 }],
-        [],
-        [],
+        [], // recentOrdersForBaseline
+        [], // unresolvedDoubleSale
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }], // rows
+        [{ count: 1 }], // totalRows
       ]);
       getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 150, costUsdCents: 100, netProfitUsdCents: 50, profitMarginBasisPoints: 3333 });
 
@@ -1792,10 +1792,10 @@ describe("admin-api handler", () => {
         returnRequestedAt: null,
       };
       fakeDb = createFakeDb([
-        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }],
-        [{ count: 1 }],
-        [],
+        [], // recentOrdersForBaseline
         [{ productId: "p1" }], // unresolvedDoubleSale
+        [{ order, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } }], // rows
+        [{ count: 1 }], // totalRows
       ]);
       getLiveOrderProfitMock.mockReturnValue({ revenueUsdCents: 3600, costUsdCents: 2000, netProfitUsdCents: 1600, profitMarginBasisPoints: 4444 });
 
@@ -1811,6 +1811,47 @@ describe("admin-api handler", () => {
       const parsed = JSON.parse(res.body!);
       expect(parsed.orders).toEqual([]);
       expect(parsed.total).toBe(0);
+    });
+
+    it("GET /admin/orders?profitStatus=below_average filters and paginates server-side rather than narrowing an already-paginated page", async () => {
+      // belowAverageMargin can't be pushed into SQL (it depends on a computed baseline average
+      // that ignores the active filters), so this route takes a different code path for this
+      // one profitStatus value: fetch every matching order, filter in memory, then paginate the
+      // filtered list -- `total` must reflect the filtered count, not the unfiltered one.
+      const lowMarginOrder = {
+        id: "o-low",
+        productId: "p1",
+        channel: "ebay",
+        status: "SHIPPED",
+        placedAt: new Date("2024-04-30T14:23:00.000Z"),
+        profitFinalizedAt: null,
+        finalizedNetProfitUsdCents: null,
+        returnRequestedAt: null,
+      };
+      const highMarginOrder = { ...lowMarginOrder, id: "o-high" };
+      const baselineOrder = { ...lowMarginOrder, id: "o-baseline" };
+      fakeDb = createFakeDb([
+        [baselineOrder], // recentOrdersForBaseline -- drives a non-null avgProfitMarginBasisPoints
+        [], // unresolvedDoubleSale
+        [
+          { order: lowMarginOrder, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } },
+          { order: highMarginOrder, product: { id: "p1", sku: "SKU-1", title: "Product One", images: [] } },
+        ], // allMatching (no limit/offset applied to this query -- filtering/pagination happens in JS)
+      ]);
+      getLiveOrderProfitMock.mockImplementation((order: { id: string }) => {
+        // The baseline (which sets the average) and "o-high" both score a high margin; only
+        // "o-low" scores low enough to clear the 5pp-below-average gap.
+        if (order.id === "o-low") return { revenueUsdCents: 3600, costUsdCents: 3400, netProfitUsdCents: 200, profitMarginBasisPoints: 556 };
+        return { revenueUsdCents: 3600, costUsdCents: 1000, netProfitUsdCents: 2600, profitMarginBasisPoints: 7222 };
+      });
+
+      const res = await callHandler(makeEvent("GET", "/admin/orders", { profitStatus: "below_average" }));
+      expect(res.statusCode).toBe(200);
+      const parsed = JSON.parse(res.body!);
+      expect(parsed.orders).toHaveLength(1);
+      expect(parsed.orders[0].id).toBe("o-low");
+      expect(parsed.orders[0].belowAverageMargin).toBe(true);
+      expect(parsed.total).toBe(1);
     });
 
     describe("GET /admin/orders/summary", () => {

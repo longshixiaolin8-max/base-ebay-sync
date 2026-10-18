@@ -117,14 +117,6 @@ export function ProductDetailPanel({
                   {applyingReconstruct ? "適用中..." : "在庫再構築"}
                 </button>
               )}
-              <button
-                type="button"
-                className="secondary"
-                disabled
-                title="この操作には現在対応していません(在庫再構築と同じ処理のみが実装されており、別の即時再同期アクションは存在しません)"
-              >
-                チャネル在庫再同期
-              </button>
             </div>
 
             {possibleDoubleSaleErrorId && (

@@ -101,7 +101,7 @@ import {
   type EbayAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
-import { and, desc, eq, gte, ilike, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
@@ -2039,37 +2039,26 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       const q = event.queryStringParameters?.q?.trim();
       const limit = Math.min(200, Math.max(1, Number(event.queryStringParameters?.limit) || 50));
       const offset = Math.max(0, Number(event.queryStringParameters?.offset) || 0);
+      const profitStatusRaw = event.queryStringParameters?.profitStatus;
+      const profitStatus =
+        profitStatusRaw === "finalized" || profitStatusRaw === "unfinalized" || profitStatusRaw === "below_average"
+          ? profitStatusRaw
+          : undefined;
 
       const conditions = [eq(orders.tenantId, tenantId)];
       if (statusParsed.success) conditions.push(eq(orders.status, statusParsed.data));
       if (channelFilter) conditions.push(eq(orders.channel, channelFilter));
       if (fromRaw) conditions.push(gte(orders.placedAt, new Date(fromRaw)));
       if (toRaw) conditions.push(lte(orders.placedAt, new Date(`${toRaw}T23:59:59.999Z`)));
+      if (profitStatus === "finalized") conditions.push(isNotNull(orders.profitFinalizedAt));
+      else if (profitStatus === "unfinalized") conditions.push(isNull(orders.profitFinalizedAt));
       if (q) {
         const searchCondition = or(ilike(productMaster.title, `%${q}%`), ilike(productMaster.sku, `%${q}%`), ilike(orders.externalOrderId, `%${q}%`));
         if (searchCondition) conditions.push(searchCondition);
       }
       const whereClause = and(...conditions);
 
-      // The orders table only has product_id -- every other order-management screen this
-      // platform has (commerce-dashboard, product detail) already joins in sku/title/images
-      // for display, so the standalone order list does the same rather than making the
-      // frontend show a bare UUID or fire one lookup per row. A left join, not inner -- an
-      // order whose product was since deleted must still appear rather than silently vanish.
-      const [rows, totalRows, usdPerJpy, recentOrdersForBaseline, unresolvedDoubleSale] = await Promise.all([
-        db
-          .select({ order: orders, product: productMaster })
-          .from(orders)
-          .leftJoin(productMaster, eq(productMaster.id, orders.productId))
-          .where(whereClause)
-          .orderBy(desc(orders.placedAt))
-          .limit(limit)
-          .offset(offset),
-        db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(orders)
-          .leftJoin(productMaster, eq(productMaster.id, orders.productId))
-          .where(whereClause),
+      const [usdPerJpy, recentOrdersForBaseline, unresolvedDoubleSale] = await Promise.all([
         currentFxRate(),
         // 直近200件(現在のフィルタとは無関係)を「平均的な利益率」の基準として使う -- 現在
         // 表示中のページだけから平均を取ると、フィルタで絞るたびに基準自体が動いてしまう。
@@ -2084,7 +2073,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // always safe to recompute live -- only the cost/profit side is frozen at finalization.
       // This lets a finalized order still get a real, consistent margin figure here (finalized_
       // net_profit_usd_cents / this same live revenue) instead of one being unavailable.
-      function marginBasisPointsFor(order: (typeof rows)[number]["order"]): number | null {
+      function marginBasisPointsFor(order: typeof orders.$inferSelect): number | null {
         const live = getLiveOrderProfit(order, usdPerJpy);
         if (!order.profitFinalizedAt) return live.profitMarginBasisPoints;
         return live.revenueUsdCents > 0 ? Math.round(((order.finalizedNetProfitUsdCents ?? 0) / live.revenueUsdCents) * 10000) : null;
@@ -2099,7 +2088,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // flagging that would make the signal meaningless.
       const BELOW_AVERAGE_GAP_BPS = 500;
 
-      const enriched = rows.map((r) => {
+      function enrich(r: { order: typeof orders.$inferSelect; product: typeof productMaster.$inferSelect | null }) {
         const live = getLiveOrderProfit(r.order, usdPerJpy);
         const marginBasisPoints = marginBasisPointsFor(r.order);
         return {
@@ -2123,11 +2112,55 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
           belowAverageMargin:
             avgMarginBasisPoints !== null && marginBasisPoints !== null && marginBasisPoints < avgMarginBasisPoints - BELOW_AVERAGE_GAP_BPS,
         };
-      });
+      }
+
+      // The orders table only has product_id -- every other order-management screen this
+      // platform has (commerce-dashboard, product detail) already joins in sku/title/images
+      // for display, so the standalone order list does the same rather than making the
+      // frontend show a bare UUID or fire one lookup per row. A left join, not inner -- an
+      // order whose product was since deleted must still appear rather than silently vanish.
+      let enriched: ReturnType<typeof enrich>[];
+      let total: number;
+
+      if (profitStatus === "below_average") {
+        // belowAverageMargin isn't a stored column -- it's computed from a baseline average
+        // that itself ignores the current filters, so it can't be pushed into the SQL WHERE
+        // like the other filters are. Fetch every order matching the other filters, compute
+        // it in memory, then filter and paginate that list here instead of in Postgres --
+        // otherwise `total`/pagination would reflect the unfiltered count while the visible
+        // page silently showed only the handful of rows that happened to match.
+        const allMatching = await db
+          .select({ order: orders, product: productMaster })
+          .from(orders)
+          .leftJoin(productMaster, eq(productMaster.id, orders.productId))
+          .where(whereClause)
+          .orderBy(desc(orders.placedAt));
+        const allEnriched = allMatching.map((r) => enrich(r)).filter((r) => r.belowAverageMargin);
+        total = allEnriched.length;
+        enriched = allEnriched.slice(offset, offset + limit);
+      } else {
+        const [rows, totalRows] = await Promise.all([
+          db
+            .select({ order: orders, product: productMaster })
+            .from(orders)
+            .leftJoin(productMaster, eq(productMaster.id, orders.productId))
+            .where(whereClause)
+            .orderBy(desc(orders.placedAt))
+            .limit(limit)
+            .offset(offset),
+          db
+            .select({ count: sql<number>`count(*)::int` })
+            .from(orders)
+            .leftJoin(productMaster, eq(productMaster.id, orders.productId))
+            .where(whereClause),
+        ]);
+        enriched = rows.map((r) => enrich(r));
+        total = totalRows[0]?.count ?? 0;
+      }
 
       return json(200, {
         orders: enriched,
-        total: totalRows[0]?.count ?? 0,
+        total,
         avgProfitMarginBasisPoints: avgMarginBasisPoints,
         // Shared conversion rate this response's own per-row `profit` figures were computed
         // with -- returned so the frontend can derive further JPY breakdowns (fees, shipping)

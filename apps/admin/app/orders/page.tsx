@@ -100,6 +100,7 @@ export default function OrdersPage() {
       if (q.trim()) params.set("q", q.trim());
       if (channel !== "all") params.set("channel", channel);
       if (status !== "all") params.set("status", status);
+      if (profitStatus !== "all") params.set("profitStatus", profitStatus);
       if (from) params.set("from", from);
       if (to) params.set("to", to);
       const res = await apiGet<{ orders: OrderRow[]; total: number; avgProfitMarginBasisPoints: number | null; usdPerJpy: number }>(
@@ -114,7 +115,7 @@ export default function OrdersPage() {
     } finally {
       setListLoading(false);
     }
-  }, [page, pageSize, q, channel, status, from, to, notify]);
+  }, [page, pageSize, q, channel, status, profitStatus, from, to, notify]);
 
   useEffect(() => {
     if (ready) void loadSummary();
@@ -304,7 +305,10 @@ export default function OrdersPage() {
                 setPage(1);
               }}
               profitStatus={profitStatus}
-              onProfitStatusChange={setProfitStatus}
+              onProfitStatusChange={(v) => {
+                setProfitStatus(v);
+                setPage(1);
+              }}
               onClearFilters={clearFilters}
               page={page}
               pageSize={pageSize}

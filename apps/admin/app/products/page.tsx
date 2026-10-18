@@ -227,9 +227,6 @@ function ProductsPageInner() {
                 <label className="products-search">
                   <input type="text" placeholder="商品名・SKUで検索..." value={query} onChange={(e) => setQuery(e.target.value)} />
                 </label>
-                <Select label="カテゴリ" value="" onChange={() => {}} disabled>
-                  <option value="">すべて</option>
-                </Select>
                 <Select label="販売チャネル" value={channel} onChange={setChannel}>
                   <option value="">すべて</option>
                   <option value="base">BASE</option>

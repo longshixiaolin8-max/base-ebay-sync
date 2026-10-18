@@ -2,11 +2,11 @@
 
 import type { AuditLogEntry, ChannelSyncState, ProductMaster, SyncError } from "@ai-ec/core";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet } from "@/lib/api-client";
 import { ERROR_CODE_LABEL } from "@/lib/sync-error-copy";
 import { useRequireAuth } from "@/lib/use-require-auth";
-import { SkeletonRows } from "@/components/Skeleton";
+import { SkeletonRows, EmptyState } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { TrendChart } from "@/components/TrendChart";
@@ -83,9 +83,11 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<AuditLogEntry[]>([]);
   const [metric, setMetric] = useState<"revenue" | "profit">("revenue");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
-  useEffect(() => {
-    if (!ready) return;
+  const load = useCallback(() => {
+    setLoading(true);
+    setLoadError(false);
     Promise.all([
       apiGet<{ products: ProductMaster[] }>("/admin/products"),
       apiGet<{ syncErrors: SyncError[] }>("/admin/sync-errors?resolved=false"),
@@ -104,9 +106,20 @@ export default function DashboardPage() {
         setSlo(sloRes);
         setActivity(auditRes.auditLog.slice(0, 6));
       })
-      .catch((err) => notify(`ダッシュボードの取得に失敗しました: ${(err as Error).message}`))
+      .catch((err) => {
+        // Any one of the 7 parallel calls failing used to leave summary/slo permanently
+        // null, which the render guard below reads as "still loading" forever -- a stuck
+        // skeleton screen with only a one-shot toast and no way to retry short of a full
+        // page reload. loadError gives the render an explicit failure branch instead.
+        setLoadError(true);
+        notify(`ダッシュボードの取得に失敗しました: ${(err as Error).message}`);
+      })
       .finally(() => setLoading(false));
-  }, [ready, notify]);
+  }, [notify]);
+
+  useEffect(() => {
+    if (ready) load();
+  }, [ready, load]);
 
   // The public GET /oauth/ebay/authorize route was removed (round 12 hardening); OAuth
   // connect now always starts from this authenticated admin session via the authenticated
@@ -115,7 +128,11 @@ export default function DashboardPage() {
   async function reconnect(channel: "base" | "ebay") {
     try {
       const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
-      window.open(res.url, "_blank", "noopener,noreferrer");
+      // window.open returns null when the browser blocks the popup -- without this check, a
+      // blocked popup left the user with no feedback at all (no tab opened, no error shown).
+      if (!window.open(res.url, "_blank", "noopener,noreferrer")) {
+        notify(`ポップアップがブロックされました。次のURLを手動で開いて連携してください: ${res.url}`);
+      }
     } catch (err) {
       notify(`連携の開始に失敗しました: ${(err as Error).message}`);
     }
@@ -286,7 +303,18 @@ export default function DashboardPage() {
           }
         />
 
-        {!ready || loading || !summary || !slo ? (
+        {!ready || (loading && !summary) ? (
+          <SkeletonRows count={4} />
+        ) : loadError && (!summary || !slo) ? (
+          <div className="table-wrapper">
+            <EmptyState>
+              読み込みに失敗しました。
+              <button type="button" className="secondary" style={{ marginLeft: "0.6rem" }} onClick={() => load()}>
+                再試行
+              </button>
+            </EmptyState>
+          </div>
+        ) : !summary || !slo ? (
           <SkeletonRows count={4} />
         ) : (
           <>
