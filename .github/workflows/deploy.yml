@@ -159,6 +159,14 @@ jobs:
 
       - name: Refresh GitHub OIDC deploy role
         working-directory: infra
+        # Best-effort, not a precondition for the rest of this job: the role + OIDC provider
+        # were originally created outside this exact stack's CloudFormation tracking (the
+        # IAM::OIDCProvider construct is a Lambda-backed custom resource, which `cdk import`
+        # cannot adopt), so `cdk deploy` on this stack always fails with "already exists"
+        # until that's properly reconciled. Confirmed (2026-10-21) this is cosmetic, not a
+        # live gap: the role's policy is kept in sync by hand in the meantime. Never let this
+        # step's known failure block CDK deploy / DB migration / the frontend publish below.
+        continue-on-error: true
         run: |
           set -euo pipefail
           # The role already exists (this workflow is running under it), so unlike the
