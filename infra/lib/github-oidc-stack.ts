@@ -96,5 +96,40 @@ export class GithubOidcStack extends cdk.Stack {
         resources: [`arn:aws:amplify:*:${this.account}:apps/*`],
       }),
     );
+
+    // deploy.yml's "Production public-SaaS configuration preflight" step (prod only) calls
+    // these AWS CLI commands directly with this same role's credentials -- it's a plain
+    // bash script, never routed through the CDK bootstrap roles above -- to confirm Stripe
+    // is live-mode, BASE/eBay OAuth app credentials are complete, and SES production access
+    // + the sender identity are verified, before ever building/shipping the public frontend.
+    // Read-only, and scoped to this app's own secret-name prefix (never a blanket
+    // secretsmanager:* grant) -- covers both dev's flat "ai-ec-platform/app-credentials/*"
+    // and prod's "ai-ec-platform/prod/app-credentials/*" naming.
+    this.deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadAppCredentialSecretsForPreflight",
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [
+          `arn:aws:secretsmanager:*:${this.account}:secret:ai-ec-platform/app-credentials/*`,
+          `arn:aws:secretsmanager:*:${this.account}:secret:ai-ec-platform/*/app-credentials/*`,
+        ],
+      }),
+    );
+    this.deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadSesStatusForPreflight",
+        // GetAccount has no resource-level permissions (SES requires "*"); GetEmailIdentity
+        // is scoped to the identity ARNs this platform could ever configure as SES_FROM_EMAIL.
+        actions: ["sesv2:GetAccount"],
+        resources: ["*"],
+      }),
+    );
+    this.deployRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "ReadSesIdentityForPreflight",
+        actions: ["sesv2:GetEmailIdentity"],
+        resources: [`arn:aws:ses:*:${this.account}:identity/*`],
+      }),
+    );
   }
 }
