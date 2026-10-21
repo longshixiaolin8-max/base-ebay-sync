@@ -118,16 +118,20 @@ export class GithubOidcStack extends cdk.Stack {
     this.deployRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "ReadSesStatusForPreflight",
-        // GetAccount has no resource-level permissions (SES requires "*"); GetEmailIdentity
-        // is scoped to the identity ARNs this platform could ever configure as SES_FROM_EMAIL.
-        actions: ["sesv2:GetAccount"],
+        // The CLI calls these as `aws sesv2 ...`, but IAM kept both operations under the
+        // original "ses:" action namespace rather than a separate "sesv2:" one -- confirmed
+        // live after "sesv2:GetAccount" was rejected with AccessDenied even though it was
+        // granted. GetAccount has no resource-level permissions (SES requires "*");
+        // GetEmailIdentity is scoped to the identity ARNs this platform could ever configure
+        // as SES_FROM_EMAIL.
+        actions: ["ses:GetAccount"],
         resources: ["*"],
       }),
     );
     this.deployRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "ReadSesIdentityForPreflight",
-        actions: ["sesv2:GetEmailIdentity"],
+        actions: ["ses:GetEmailIdentity"],
         resources: [`arn:aws:ses:*:${this.account}:identity/*`],
       }),
     );
