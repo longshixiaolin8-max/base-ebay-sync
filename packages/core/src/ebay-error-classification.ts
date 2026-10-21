@@ -11,7 +11,7 @@
  * safe to automatically resubmit.
  */
 export function isSellerSetupRequiredMessage(text: string): boolean {
-  return /SELLING_PRIVILEGE_REQUIRED|(?:required|necessary) selling privileges|(?:do(?:es)? not have|without) (?:the )?(?:required )?selling privileges|(?:create|register) (?:a )?seller['’]?s account/i.test(
+  return /SELLING_PRIVILEGE_REQUIRED|(?:required|necessary) selling privileges|(?:do(?:es)? not have|without) (?:the )?(?:required )?selling privileges|(?:create|register) (?:a )?seller['’]?s account|SRM_ROW_\w*KYC_failure_block|Payoneer will contact you to verify your status/i.test(
     text,
   );
 }

@@ -11,6 +11,17 @@ describe("isSellerSetupRequiredMessage", () => {
     expect(isSellerSetupRequiredMessage("You need to create a seller's account")).toBe(true);
   });
 
+  it("matches the Payoneer payout-verification variant of this same block (errorId 25019, a different message/code than SELLING_PRIVILEGE_REQUIRED's 25002)", () => {
+    expect(
+      isSellerSetupRequiredMessage(
+        '{"errors":[{"errorId":25019,"message":"Cannot revise listing.","parameters":[{"name":"2","value":"SRM_ROW_Payoneer_KYC_failure_block"}]}]}',
+      ),
+    ).toBe(true);
+    expect(isSellerSetupRequiredMessage("Payoneer will contact you to verify your status. This process might take a few days.")).toBe(
+      true,
+    );
+  });
+
   it("does not match an unrelated item-specifics validation failure sharing errorId 25002", () => {
     expect(isSellerSetupRequiredMessage('{"errors":[{"errorId":25002,"message":"Missing required item specifics: Type"}]}')).toBe(false);
   });
