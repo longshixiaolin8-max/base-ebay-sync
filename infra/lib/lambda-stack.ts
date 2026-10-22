@@ -426,7 +426,15 @@ export class LambdaStack extends cdk.Stack {
     this.signupHandlerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+        // Confirmed live (2026-10-22): SES's SendEmail also authorizes against the account's
+        // *default* configuration set when one is attached (here, "my-first-configuration-set",
+        // created out-of-band via the SES console) -- identity/* alone isn't enough even though
+        // our own SendEmailCommand call never references a configuration set itself. Grants
+        // both resource types rather than tracking/pinning the current default set's name.
+        resources: [
+          `arn:aws:ses:${this.region}:${this.account}:identity/*`,
+          `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
+        ],
       }),
     );
 
@@ -448,7 +456,11 @@ export class LambdaStack extends cdk.Stack {
     this.stripeWebhookFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+        // See the matching comment on SignupHandler's own grant above.
+        resources: [
+          `arn:aws:ses:${this.region}:${this.account}:identity/*`,
+          `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
+        ],
       }),
     );
 
@@ -574,7 +586,11 @@ export class LambdaStack extends cdk.Stack {
     this.adminApiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: [`arn:aws:ses:${this.region}:${this.account}:identity/*`],
+        // See the matching comment on SignupHandler's own grant in this file.
+        resources: [
+          `arn:aws:ses:${this.region}:${this.account}:identity/*`,
+          `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
+        ],
       }),
     );
     // Needed for the commercial-features round's AI endpoints (SNS script generation,
