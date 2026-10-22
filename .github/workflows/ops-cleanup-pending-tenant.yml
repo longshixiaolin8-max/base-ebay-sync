@@ -52,7 +52,7 @@ jobs:
           set -euo pipefail
           jq -n --arg email "${{ vars.OPERATOR_EMAIL }}" '{
             rawPath: "/admin/ops/tenants",
-            requestContext: { http: { method: "GET" }, authorizer: { jwt: { claims: { email: $email } } } }
+            requestContext: { http: { method: "GET" }, authorizer: { jwt: { claims: { email: $email, "custom:tenant_id": "00000000-0000-0000-0000-000000000000" } } } }
           }' > /tmp/list-payload.json
           aws lambda invoke \
             --cli-binary-format raw-in-base64-out \
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           jq -n --arg email "${{ vars.OPERATOR_EMAIL }}" --arg tenantId "$TENANT_ID" '{
             rawPath: ("/admin/ops/tenants/" + $tenantId),
-            requestContext: { http: { method: "DELETE" }, authorizer: { jwt: { claims: { email: $email } } } }
+            requestContext: { http: { method: "DELETE" }, authorizer: { jwt: { claims: { email: $email, "custom:tenant_id": "00000000-0000-0000-0000-000000000000" } } } }
           }' > /tmp/delete-payload.json
           aws lambda invoke \
             --cli-binary-format raw-in-base64-out \
