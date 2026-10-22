@@ -1,6 +1,14 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+class UserNotFoundExceptionFake extends Error {}
+const cognitoSendMock = vi.fn().mockResolvedValue({});
+vi.mock("@aws-sdk/client-cognito-identity-provider", () => ({
+  CognitoIdentityProviderClient: vi.fn().mockImplementation(() => ({ send: cognitoSendMock })),
+  AdminDeleteUserCommand: vi.fn((input: unknown) => ({ kind: "AdminDeleteUser", input })),
+  UserNotFoundException: UserNotFoundExceptionFake,
+}));
+
 const computeSyncConfidenceMock = vi.fn().mockResolvedValue({
   channel: "ebay",
   score: 100,
@@ -66,6 +74,7 @@ const countChannelListingsByStatusMock = vi.fn().mockResolvedValue(0);
 const getMonthlyAiGenerationCountMock = vi.fn().mockResolvedValue(0);
 const getMonthlyEbaySyncCountMock = vi.fn().mockResolvedValue(0);
 const listTenantsOpsSummaryMock = vi.fn().mockResolvedValue([]);
+const deletePendingTenantMock = vi.fn().mockResolvedValue(undefined);
 const getTenantMarginHistoryMock = vi.fn().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
 const markEbayTrackingSyncedMock = vi.fn().mockResolvedValue(undefined);
 const insertSyncJobMock = vi.fn().mockResolvedValue({ id: "job-1", attempts: 0 });
@@ -85,7 +94,7 @@ class OrderStatusConflictErrorFake extends Error {}
 vi.mock("@ai-ec/db", () => ({
   productMaster: {},
   channelListings: { productId: "productId" },
-  tenants: { id: "id", ebayFulfillmentPolicyId: "ebayFulfillmentPolicyId", ebayPaymentPolicyId: "ebayPaymentPolicyId", ebayReturnPolicyId: "ebayReturnPolicyId" },
+  tenants: { id: "id", status: "status", contactEmail: "contactEmail", ebayFulfillmentPolicyId: "ebayFulfillmentPolicyId", ebayPaymentPolicyId: "ebayPaymentPolicyId", ebayReturnPolicyId: "ebayReturnPolicyId" },
   inventoryMaster: {},
   syncErrors: { createdAt: "createdAt" },
   syncJobs: {},
@@ -128,6 +137,7 @@ vi.mock("@ai-ec/db", () => ({
   getMonthlyAiGenerationCount: (...args: unknown[]) => getMonthlyAiGenerationCountMock(...args),
   getMonthlyEbaySyncCount: (...args: unknown[]) => getMonthlyEbaySyncCountMock(...args),
   listTenantsOpsSummary: (...args: unknown[]) => listTenantsOpsSummaryMock(...args),
+  deletePendingTenant: (...args: unknown[]) => deletePendingTenantMock(...args),
   getTenantMarginHistory: (...args: unknown[]) => getTenantMarginHistoryMock(...args),
   markEbayTrackingSynced: (...args: unknown[]) => markEbayTrackingSyncedMock(...args),
   insertSyncJob: (...args: unknown[]) => insertSyncJobMock(...args),
@@ -356,6 +366,8 @@ describe("admin-api handler", () => {
     getMonthlyAiGenerationCountMock.mockClear().mockResolvedValue(0);
     getMonthlyEbaySyncCountMock.mockClear().mockResolvedValue(0);
     listTenantsOpsSummaryMock.mockClear().mockResolvedValue([]);
+    deletePendingTenantMock.mockClear().mockResolvedValue(undefined);
+    cognitoSendMock.mockClear().mockResolvedValue({});
     getTenantMarginHistoryMock.mockClear().mockResolvedValue({ avgMarkupRatio: null, sampleSize: 0 });
     markEbayTrackingSyncedMock.mockClear();
     insertSyncJobMock.mockClear().mockResolvedValue({ id: "job-1", attempts: 0 });
@@ -3253,6 +3265,69 @@ describe("admin-api handler", () => {
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body!).tenants).toHaveLength(1);
       expect(listTenantsOpsSummaryMock).toHaveBeenCalledWith(fakeDb);
+    });
+
+    describe("DELETE /admin/ops/tenants/{id}", () => {
+      it("deletes the Cognito user and the pending tenant row for a signup that never paid", async () => {
+        process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+        requireEnvMock.mockReturnValueOnce("us-east-2_pool");
+        fakeDb = createFakeDb([[{ id: "tenant-c", status: "pending_payment", contactEmail: "c@example.com" }]]);
+
+        const res = await callHandler(opsEvent("DELETE", "/admin/ops/tenants/tenant-c"));
+
+        expect(res.statusCode).toBe(200);
+        expect(JSON.parse(res.body!)).toEqual({ deleted: true });
+        expect(cognitoSendMock).toHaveBeenCalledWith(
+          expect.objectContaining({ kind: "AdminDeleteUser", input: { UserPoolId: "us-east-2_pool", Username: "c@example.com" } }),
+        );
+        expect(deletePendingTenantMock).toHaveBeenCalledWith(fakeDb, "tenant-c");
+        expect(recordAuditLogMock).toHaveBeenCalledWith(
+          fakeDb,
+          expect.objectContaining({ tenantId: "tenant-c", action: "pending_tenant_deleted" }),
+        );
+      });
+
+      it("404s for a tenant id that doesn't exist", async () => {
+        process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+        fakeDb = createFakeDb([[]]);
+
+        const res = await callHandler(opsEvent("DELETE", "/admin/ops/tenants/does-not-exist"));
+
+        expect(res.statusCode).toBe(404);
+        expect(deletePendingTenantMock).not.toHaveBeenCalled();
+      });
+
+      it("409s (never deletes) a tenant that already completed Stripe Checkout", async () => {
+        process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+        fakeDb = createFakeDb([[{ id: "tenant-b", status: "active", contactEmail: "b@example.com" }]]);
+
+        const res = await callHandler(opsEvent("DELETE", "/admin/ops/tenants/tenant-b"));
+
+        expect(res.statusCode).toBe(409);
+        expect(cognitoSendMock).not.toHaveBeenCalled();
+        expect(deletePendingTenantMock).not.toHaveBeenCalled();
+      });
+
+      it("still deletes the pending tenant row when the Cognito user is already gone", async () => {
+        process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+        fakeDb = createFakeDb([[{ id: "tenant-c", status: "pending_payment", contactEmail: "c@example.com" }]]);
+        cognitoSendMock.mockRejectedValueOnce(new UserNotFoundExceptionFake("gone"));
+
+        const res = await callHandler(opsEvent("DELETE", "/admin/ops/tenants/tenant-c"));
+
+        expect(res.statusCode).toBe(200);
+        expect(deletePendingTenantMock).toHaveBeenCalledWith(fakeDb, "tenant-c");
+      });
+
+      it("403s a non-operator caller instead of deleting anything", async () => {
+        process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
+        fakeDb = createFakeDb([[{ id: "tenant-c", status: "pending_payment", contactEmail: "c@example.com" }]]);
+
+        const res = await callHandler(opsEvent("DELETE", "/admin/ops/tenants/tenant-c", undefined, "someone-else@example.com"));
+
+        expect(res.statusCode).toBe(403);
+        expect(deletePendingTenantMock).not.toHaveBeenCalled();
+      });
     });
 
     it("GET /admin/ops/tenants/{id}/sync-errors lists unresolved errors for the chosen tenant, not the caller's own", async () => {

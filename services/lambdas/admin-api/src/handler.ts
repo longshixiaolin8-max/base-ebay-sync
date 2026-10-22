@@ -1,6 +1,11 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
 import type { EbayInventoryLocationAddress } from "@ai-ec/adapter-ebay";
 import { createAIModelClient, generateSnsScript, suggestStaleProductImprovement } from "@ai-ec/ai";
+import {
+  AdminDeleteUserCommand,
+  CognitoIdentityProviderClient,
+  UserNotFoundException,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { boundedDashboardLimit } from "./query-limits.js";
 import {
   applyStandardAspectFallbacks,
@@ -38,6 +43,7 @@ import {
   countProductsByStatus,
   DEFAULT_NOTIFICATION_PREFERENCES,
   DdpConfirmationRequiredError,
+  deletePendingTenant,
   finalizeOrderProfit,
   findStaleProducts,
   getInventoryBreakdown,
@@ -105,6 +111,10 @@ import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, or, sql } f
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 
 const USD_PER_JPY_FALLBACK = 0.0067;
+// Only for DELETE /admin/ops/tenants/{id} -- cleaning up a tenant abandoned before it ever
+// paid (see that route's own doc comment). Every other Cognito user lifecycle action
+// (create/set-password/delete-on-rollback) already lives in signup's own handler.
+const cognitoClient = new CognitoIdentityProviderClient({});
 
 async function currentFxRate(): Promise<number> {
   try {
@@ -3482,6 +3492,48 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       if (authError) return authError;
       const summaries = await listTenantsOpsSummary(db);
       return json(200, { tenants: summaries });
+    }
+
+    // Cleans up a signup that never completed Stripe Checkout (abandoned trial/test accounts
+    // -- e.g. an operator's own live end-to-end signup test). deletePendingTenant (@ai-ec/db)
+    // is itself scoped to status='pending_payment' in its WHERE clause, so this can never
+    // touch a real paying or formerly-paying tenant even if an operator passes the wrong id;
+    // a tenant that ever completed checkout moves to 'active' and stays out of reach here.
+    if (method === "DELETE" && /^\/admin\/ops\/tenants\/[^/]+$/.test(path)) {
+      const authError = requireOperator(event);
+      if (authError) return authError;
+      const opsTenantId = path.split("/")[4]!;
+      const [tenant] = await db
+        .select({ id: tenants.id, status: tenants.status, contactEmail: tenants.contactEmail })
+        .from(tenants)
+        .where(eq(tenants.id, opsTenantId))
+        .limit(1);
+      if (!tenant) return json(404, { error: "not_found" });
+      if (tenant.status !== "pending_payment") return json(409, { error: "tenant_not_pending" });
+
+      if (tenant.contactEmail) {
+        try {
+          await cognitoClient.send(
+            new AdminDeleteUserCommand({
+              UserPoolId: requireEnv("COGNITO_USER_POOL_ID"),
+              Username: tenant.contactEmail,
+            }),
+          );
+        } catch (err) {
+          if (!(err instanceof UserNotFoundException)) throw err;
+        }
+      }
+
+      await deletePendingTenant(db, opsTenantId);
+      await recordAuditLog(db, {
+        tenantId: opsTenantId,
+        actor: `operator:${actorFromEvent(event)}`,
+        action: "pending_tenant_deleted",
+        entityType: "tenant",
+        entityId: opsTenantId,
+      });
+
+      return json(200, { deleted: true });
     }
 
     if (method === "GET" && /^\/admin\/ops\/tenants\/[^/]+\/sync-errors$/.test(path)) {
