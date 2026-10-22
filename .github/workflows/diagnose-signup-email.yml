@@ -56,7 +56,12 @@ jobs:
             isBase64Encoded: false
           }')
           echo "$PAYLOAD" > /tmp/payload.json
+          # AWS CLI v2 defaults --cli-binary-format to "base64", which treats a plain-JSON
+          # --payload file as already-base64 and silently mis-decodes it (confirmed live:
+          # produced "Unexpected character code 173" from the garbage bytes) -- raw-in-base64-out
+          # restores the v1 behavior of base64-encoding our plaintext payload ourselves.
           aws lambda invoke \
+            --cli-binary-format raw-in-base64-out \
             --function-name "$FN_NAME" \
             --log-type Tail \
             --payload file:///tmp/payload.json \
