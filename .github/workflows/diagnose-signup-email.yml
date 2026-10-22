@@ -1,0 +1,71 @@
+name: Diagnose signup email delivery
+
+# One-off, read-only diagnostic: invokes the already-deployed SignupHandler Lambda directly
+# (not through the public API) with LogType=Tail, which returns the last 4KB of that
+# invocation's own CloudWatch log output inline in the Lambda invoke response. This needs no
+# new IAM grant beyond lambda:InvokeFunction, which the GitHub deploy role already has
+# (github-oidc-stack.ts's InvokeDbMigrateAndDescribeStacks statement), and no log group read
+# permission. Triggered manually; not part of the deploy pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: prod
+      testEmail:
+        description: "Email address to use in the synthetic signup 'start' request"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Resolve SignupHandler function name
+        run: |
+          set -euo pipefail
+          FN_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Lambdas" \
+            --query "Stacks[0].Outputs[?OutputKey=='ExportsOutputFnGetAttSignupHandler941F5121Arn0E0E6AEC'].OutputValue" \
+            --output text)
+          test -n "$FN_NAME" && test "$FN_NAME" != "None"
+          echo "FN_NAME=$FN_NAME" >> "$GITHUB_ENV"
+          echo "Resolved SignupHandler ARN: $FN_NAME"
+
+      - name: Invoke SignupHandler with LogType=Tail
+        run: |
+          set -euo pipefail
+          PAYLOAD=$(jq -n --arg email "${{ inputs.testEmail }}" '{
+            rawPath: "/signup",
+            requestContext: { http: { method: "POST" } },
+            body: ({ action: "start", companyName: "Diagnostics", email: $email, password: "DiagTest!2026Verify#1", acceptedTerms: true } | tojson),
+            isBase64Encoded: false
+          }')
+          echo "$PAYLOAD" > /tmp/payload.json
+          aws lambda invoke \
+            --function-name "$FN_NAME" \
+            --log-type Tail \
+            --payload file:///tmp/payload.json \
+            /tmp/response.json > /tmp/invoke-result.json
+          echo "--- Invoke metadata ---"
+          cat /tmp/invoke-result.json
+          echo ""
+          echo "--- Function response payload ---"
+          cat /tmp/response.json
+          echo ""
+          echo "--- Decoded CloudWatch log tail ---"
+          jq -r '.LogResult' /tmp/invoke-result.json | base64 -d
