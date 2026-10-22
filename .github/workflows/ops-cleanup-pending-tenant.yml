@@ -1,0 +1,88 @@
+name: Ops cleanup - delete a pending tenant by contact email
+
+# One-off, operator-only cleanup: invokes the already-deployed AdminApi Lambda directly (not
+# through the public API) to call its own GET /admin/ops/tenants and DELETE /admin/ops/tenants/{id}
+# routes, the same way diagnose-signup-email.yml invokes SignupHandler directly. The synthetic
+# event carries requestContext.authorizer.jwt.claims.email = the configured OPERATOR_EMAIL, which
+# is exactly what API Gateway's real Cognito JWT authorizer would attach for an authenticated
+# operator request -- requireOperator() in handler.ts can't tell the difference. DELETE is itself
+# scoped server-side to status='pending_payment', so this can never touch a real paying tenant.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: prod
+      contactEmail:
+        description: "contactEmail of the pending tenant to delete"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Resolve AdminApi function name
+        run: |
+          set -euo pipefail
+          FN_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Lambdas" \
+            --query "Stacks[0].Outputs[?OutputKey=='ExportsOutputFnGetAttAdminApi059A0912ArnF73D9CFB'].OutputValue" \
+            --output text)
+          test -n "$FN_NAME" && test "$FN_NAME" != "None"
+          echo "FN_NAME=$FN_NAME" >> "$GITHUB_ENV"
+          echo "Resolved AdminApi ARN: $FN_NAME"
+
+      - name: List pending tenants and find the matching id
+        run: |
+          set -euo pipefail
+          jq -n --arg email "${{ vars.OPERATOR_EMAIL }}" '{
+            rawPath: "/admin/ops/tenants",
+            requestContext: { http: { method: "GET" }, authorizer: { jwt: { claims: { email: $email } } } }
+          }' > /tmp/list-payload.json
+          aws lambda invoke \
+            --cli-binary-format raw-in-base64-out \
+            --function-name "$FN_NAME" \
+            --payload file:///tmp/list-payload.json \
+            /tmp/list-response.json > /tmp/list-invoke-result.json
+          cat /tmp/list-invoke-result.json
+          echo "--- tenants response ---"
+          cat /tmp/list-response.json
+          echo ""
+          TENANT_ID=$(jq -r '.body | fromjson | .tenants[] | select(.contactEmail == "${{ inputs.contactEmail }}") | .id' /tmp/list-response.json | head -1)
+          if [ -z "$TENANT_ID" ]; then
+            echo "::error::No tenant found with contactEmail ${{ inputs.contactEmail }}"
+            exit 1
+          fi
+          echo "TENANT_ID=$TENANT_ID" >> "$GITHUB_ENV"
+          echo "Found tenant id: $TENANT_ID"
+
+      - name: Delete the pending tenant
+        run: |
+          set -euo pipefail
+          jq -n --arg email "${{ vars.OPERATOR_EMAIL }}" --arg tenantId "$TENANT_ID" '{
+            rawPath: ("/admin/ops/tenants/" + $tenantId),
+            requestContext: { http: { method: "DELETE" }, authorizer: { jwt: { claims: { email: $email } } } }
+          }' > /tmp/delete-payload.json
+          aws lambda invoke \
+            --cli-binary-format raw-in-base64-out \
+            --function-name "$FN_NAME" \
+            --payload file:///tmp/delete-payload.json \
+            /tmp/delete-response.json > /tmp/delete-invoke-result.json
+          cat /tmp/delete-invoke-result.json
+          echo "--- delete response ---"
+          cat /tmp/delete-response.json
