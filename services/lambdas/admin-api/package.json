@@ -15,6 +15,7 @@
     "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
     "@ai-ec/lambda-shared": "workspace:*",
+    "@aws-sdk/client-cognito-identity-provider": "^3.687.0",
     "drizzle-orm": "^0.36.1"
   },
   "devDependencies": {

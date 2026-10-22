@@ -532,6 +532,9 @@ export class LambdaStack extends cdk.Stack {
         // every such send threw (caught, logged as a sync_error) instead of actually
         // reaching the buyer, even on a fully SES-configured deployment.
         ...(props.config.sesFromEmail ? { SES_FROM_EMAIL: props.config.sesFromEmail } : {}),
+        // DELETE /admin/ops/tenants/{id} (cleans up a signup that abandoned Stripe Checkout
+        // before ever paying) needs this to find the matching Cognito user by email.
+        COGNITO_USER_POOL_ID: props.userPoolId,
       },
       // POST /admin/ebay/webhook-setup blocks on eBay's real challenge-code round trip to our
       // own endpoint during destination creation; GET /admin/commerce-dashboard fans out
@@ -591,6 +594,15 @@ export class LambdaStack extends cdk.Stack {
           `arn:aws:ses:${this.region}:${this.account}:identity/*`,
           `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
         ],
+      }),
+    );
+    // DELETE /admin/ops/tenants/{id} -- deletes only the Cognito user behind a tenant this
+    // route has already confirmed (in handler.ts, before this is ever reached) never left
+    // 'pending_payment'. Scoped to this one user pool, not a blanket cognito-idp:* grant.
+    this.adminApiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cognito-idp:AdminDeleteUser"],
+        resources: [props.userPoolArn],
       }),
     );
     // Needed for the commercial-features round's AI endpoints (SNS script generation,
