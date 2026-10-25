@@ -1,0 +1,18 @@
+name: Debug - echo repo Actions variables (no AWS, no environment gate)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo OPERATOR_EMAIL as seen by this workflow
+        run: |
+          echo "OPERATOR_EMAIL raw length: ${#OPERATOR_EMAIL}"
+          echo "OPERATOR_EMAIL=[${OPERATOR_EMAIL}]"
+        env:
+          OPERATOR_EMAIL: ${{ vars.OPERATOR_EMAIL }}
