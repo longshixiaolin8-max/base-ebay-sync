@@ -6,7 +6,7 @@ settings:
 
 overrides:
   postcss: 8.5.18
-  drizzle-orm: 0.45.2
+  drizzle-orm: 0.45.4
   source-map-js: 1.2.2
 
 importers:
@@ -221,8 +221,8 @@ importers:
         specifier: ^3.687.0
         version: 3.1120.0
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -261,8 +261,8 @@ importers:
         specifier: ^3.687.0
         version: 3.1127.0
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -289,8 +289,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -311,8 +311,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -355,8 +355,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -411,8 +411,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -442,8 +442,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -514,8 +514,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -579,8 +579,8 @@ importers:
         specifier: ^3.687.0
         version: 3.1120.0
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
       stripe:
         specifier: ^22.6.1
         version: 22.6.1(@types/node@20.19.43)
@@ -663,8 +663,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       drizzle-orm:
-        specifier: 0.45.2
-        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
+        specifier: 0.45.4
+        version: 0.45.4(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145
@@ -2426,8 +2426,8 @@ packages:
     resolution: {integrity: sha512-JimOV+ystXTWMgZkLHYHf2w3oS28hxiH1FR0dkmJLc7GHzdGJoJAQtQS5DRppnabsRZwE2U1F6CuezVBgmsBBQ==}
     hasBin: true
 
-  drizzle-orm@0.45.2:
-    resolution: {integrity: sha512-kY0BSaTNYWnoDMVoyY8uxmyHjpJW1geOmBMdSSicKo9CIIWkSxMIj2rkeSR51b8KAPB7m+qysjuHme5nKP+E5Q==}
+  drizzle-orm@0.45.4:
+    resolution: {integrity: sha512-NiM1YZpJ2UxyeE67DpDDZ+Tsw4YLX3trSlkNT7Tm9eKoUNb1LvaAaQzXgYQsWs+AQ9TUmmwMmBOCXuqqxUWKKQ==}
     peerDependencies:
       '@aws-sdk/client-rds-data': '>=3'
       '@cloudflare/workers-types': '>=4'
@@ -2435,6 +2435,7 @@ packages:
       '@libsql/client': '>=0.10.0'
       '@libsql/client-wasm': '>=0.10.0'
       '@neondatabase/serverless': '>=0.10.0'
+      '@netlify/db': '>=0.4.0'
       '@op-engineering/op-sqlite': '>=2'
       '@opentelemetry/api': ^1.4.1
       '@planetscale/database': '>=1.13'
@@ -2470,6 +2471,8 @@ packages:
       '@libsql/client-wasm':
         optional: true
       '@neondatabase/serverless':
+        optional: true
+      '@netlify/db':
         optional: true
       '@op-engineering/op-sqlite':
         optional: true
@@ -4756,7 +4759,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.45.2(@aws-sdk/client-rds-data@3.1120.0):
+  drizzle-orm@0.45.4(@aws-sdk/client-rds-data@3.1120.0):
     optionalDependencies:
       '@aws-sdk/client-rds-data': 3.1120.0
 
