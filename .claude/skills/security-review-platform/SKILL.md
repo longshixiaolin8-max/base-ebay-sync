@@ -110,7 +110,32 @@ model-generated text is rendered as markup rather than as plain text.
   one; see the git history around "特商法：開示請求方式への切替と公開ビルドの個人情報保護" for the
   real incident this guards against.
 
-## 8. Dependency vulnerabilities
+## 8. The GitHub OIDC deploy role is shared across dev and prod (known gap)
+
+`github-oidc-stack.ts` creates exactly one IAM role (`roleName: "ai-ec-platform-github-deploy"`,
+hardcoded, not parameterized by environment), trusted by **both** `environment:dev` and
+`environment:prod` GitHub Actions OIDC subject claims, with resource grants scoped to
+`AiEcPlatform-*` (every environment's stacks/functions/secrets, not just one). Since only the
+`prod` GitHub Environment has a required-reviewer approval gate, a `workflow_dispatch` job that
+declares `environment: dev` can assume this same role with no approval and, within that
+wildcard, invoke prod Lambdas, read prod's Stripe/BASE/eBay secrets, and describe prod stacks --
+confirmed by inspecting the trust policy and grants, not yet exploited or fixed.
+
+Properly fixing this means two separate roles (one per environment, each trusting only its own
+`environment:<name>` subject claim, each scoped to only `AiEcPlatform-<name>-*`) plus splitting
+`AWS_DEPLOY_ROLE_ARN` into a GitHub **Environment** variable (not the current repository-level
+one) so `dev` and `prod` jobs each resolve a different ARN. This is a real, bounded code change,
+but landing the new role(s) live still needs the same one-time human-run bootstrap
+(`cdk deploy <stackPrefix>-GithubOidc --context bootstrapOidc=true`, locally, with the account
+owner's own AWS credentials) that `github-oidc-stack.ts`'s own top comment already describes --
+and a mistake here (wrong trust policy, role deleted before the new one is confirmed working)
+can lock every future deploy out with no GitHub-Actions-only recovery path. Treat this as a
+report-and-confirm item, not a silent automated fix, unless the person running this review has
+real AWS console access standing by to recover from a mistake. The practical risk today is low
+only because this repo currently has a single operator with full access either way -- re-raise
+this the moment a second person gets GitHub write access to this repo.
+
+## 9. Dependency vulnerabilities
 
 Run `pnpm audit` at the repo root periodically. When triaging a finding:
 
