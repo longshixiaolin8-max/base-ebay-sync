@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { CONFIDENCE_LABEL, FIELD_LABEL_JA } from "@/lib/ai-draft-copy";
+import { sanitizeDraftHtml } from "@/lib/sanitize-html";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { SkeletonRows } from "@/components/Skeleton";
 import { Topbar } from "@/components/Topbar";
@@ -513,7 +514,7 @@ function ProductDetailInner() {
                   <h3 style={{ marginBottom: "0.4rem" }}>{draft.titleEn}</h3>
                   <div
                     className="ai-description-preview"
-                    dangerouslySetInnerHTML={{ __html: draft.descriptionHtmlEn }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeDraftHtml(draft.descriptionHtmlEn) }}
                   />
                 </section>
 
