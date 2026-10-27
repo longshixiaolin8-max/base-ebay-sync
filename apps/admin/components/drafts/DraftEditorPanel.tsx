@@ -1,4 +1,5 @@
 import { EBAY_ITEM_CONDITIONS } from "@/lib/ai-draft-copy";
+import { sanitizeDraftHtml } from "@/lib/sanitize-html";
 import type { AiListingDraftRow, DynamicPrice, PreflightCheck, ProductDetailRow } from "./types";
 import { Badge } from "@/components/ui/Badge";
 
@@ -75,7 +76,7 @@ export function DraftEditorPanel({
 
       <section className="card card-pad">
         <div className="section-eyebrow">eBay 商品説明(HTML)</div>
-        <div className="ai-description-preview" dangerouslySetInnerHTML={{ __html: draft.descriptionHtmlEn }} />
+        <div className="ai-description-preview" dangerouslySetInnerHTML={{ __html: sanitizeDraftHtml(draft.descriptionHtmlEn) }} />
       </section>
 
       <section className="card card-pad">

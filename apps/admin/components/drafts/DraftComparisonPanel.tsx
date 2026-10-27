@@ -1,3 +1,4 @@
+import { sanitizeDraftHtml } from "@/lib/sanitize-html";
 import type { AiListingDraftRow, ChannelListingRow, ProductDetailRow } from "./types";
 
 function formatJpy(value: number): string {
@@ -62,7 +63,7 @@ export function DraftComparisonPanel({ product, draft, ebayListing }: DraftCompa
           </div>
           <div>
             <dt>商品説明</dt>
-            <dd dangerouslySetInnerHTML={{ __html: draft.descriptionHtmlEn }} />
+            <dd dangerouslySetInnerHTML={{ __html: sanitizeDraftHtml(draft.descriptionHtmlEn) }} />
           </div>
         </dl>
         {ebayPreviewUrl && (
