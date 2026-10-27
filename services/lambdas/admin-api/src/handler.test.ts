@@ -98,7 +98,7 @@ vi.mock("@ai-ec/db", () => ({
   inventoryMaster: {},
   syncErrors: { createdAt: "createdAt" },
   syncJobs: {},
-  auditLog: { createdAt: "createdAt" },
+  auditLog: { createdAt: "createdAt", tenantId: "tenantId" },
   orders: {},
   aiListingDraft: { createdAt: "createdAt" },
   oauthConnections: { updatedAt: "updatedAt" },
@@ -3281,9 +3281,13 @@ describe("admin-api handler", () => {
           expect.objectContaining({ kind: "AdminDeleteUser", input: { UserPoolId: "us-east-2_pool", Username: "c@example.com" } }),
         );
         expect(deletePendingTenantMock).toHaveBeenCalledWith(fakeDb, "tenant-c");
+        // Recorded with tenantId: null, not "tenant-c" -- that tenant row no longer exists by
+        // this point, and audit_log.tenant_id has no ON DELETE CASCADE (see handler.ts's own
+        // comment on this route), so an FK'd tenantId here would fail the same way the delete
+        // itself would without first clearing this tenant's own audit_log rows.
         expect(recordAuditLogMock).toHaveBeenCalledWith(
           fakeDb,
-          expect.objectContaining({ tenantId: "tenant-c", action: "pending_tenant_deleted" }),
+          expect.objectContaining({ tenantId: null, entityId: "tenant-c", action: "pending_tenant_deleted" }),
         );
       });
 

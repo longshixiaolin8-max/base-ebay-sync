@@ -3524,9 +3524,17 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         }
       }
 
+      // audit_log.tenant_id references tenants.id with no ON DELETE CASCADE (confirmed live:
+      // deletePendingTenant's raw DELETE 500'd with a foreign-key violation on the
+      // "terms_accepted" row confirmSignup always writes) -- clear this tenant's own history
+      // first. The deletion's own audit entry is recorded with tenantId: null afterward
+      // (recordAuditLog's tenantId is nullable precisely for this), since inserting it with
+      // a tenantId that no longer exists would hit the identical constraint; entityId keeps
+      // the deleted tenant's id in the record regardless.
+      await db.delete(auditLog).where(eq(auditLog.tenantId, opsTenantId));
       await deletePendingTenant(db, opsTenantId);
       await recordAuditLog(db, {
-        tenantId: opsTenantId,
+        tenantId: null,
         actor: `operator:${actorFromEvent(event)}`,
         action: "pending_tenant_deleted",
         entityType: "tenant",
