@@ -499,6 +499,28 @@ importers:
         specifier: ^3.2.6
         version: 3.2.7(@types/node@20.19.43)
 
+  services/lambdas/oauth-shopify:
+    dependencies:
+      '@ai-ec/adapter-shopify':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/shopify
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.6
+        version: 3.2.7(@types/node@20.19.43)
+
   services/lambdas/product-fetch:
     dependencies:
       '@ai-ec/adapter-base':
@@ -563,6 +585,9 @@ importers:
       '@ai-ec/adapter-ebay':
         specifier: workspace:*
         version: link:../../../packages/adapters/ebay
+      '@ai-ec/adapter-shopify':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/shopify
       '@ai-ec/core':
         specifier: workspace:*
         version: link:../../../packages/core
@@ -584,6 +609,34 @@ importers:
       stripe:
         specifier: ^22.6.1
         version: 22.6.1(@types/node@20.19.43)
+    devDependencies:
+      '@types/aws-lambda':
+        specifier: ^8.10.145
+        version: 8.10.162
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.6
+        version: 3.2.7(@types/node@20.19.43)
+
+  services/lambdas/shopify-sync-worker:
+    dependencies:
+      '@ai-ec/adapter-shopify':
+        specifier: workspace:*
+        version: link:../../../packages/adapters/shopify
+      '@ai-ec/core':
+        specifier: workspace:*
+        version: link:../../../packages/core
+      '@ai-ec/db':
+        specifier: workspace:*
+        version: link:../../../packages/db
+      '@ai-ec/lambda-shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@aws-sdk/client-rds-data@3.1120.0)
     devDependencies:
       '@types/aws-lambda':
         specifier: ^8.10.145

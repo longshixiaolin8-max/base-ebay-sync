@@ -1,4 +1,5 @@
 import type { ChannelAdapter, IdempotencyStore, SaleEvent } from "@ai-ec/core";
+import type { ApplySaleWithOutboxResult } from "@ai-ec/db";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const applySaleWithOutboxMock = vi.fn();
@@ -75,8 +76,8 @@ describe("runPhaseA", () => {
     recordSyncErrorMock.mockClear();
   });
 
-  it("calls applySaleWithOutbox with the sale's own channel as the `channel` and the other channel", async () => {
-    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" });
+  it("calls applySaleWithOutbox with the sale's own channel as the `channel` and every other implemented channel", async () => {
+    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] });
 
     await runPhaseA(createFakeDb([[]]), TENANT_ID, "product-1", sale);
 
@@ -84,12 +85,12 @@ describe("runPhaseA", () => {
       channel: "base",
       sequenceAt: sale.occurredAt,
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay", "shopify"],
     });
   });
 
   it("records an order for a genuine (non-duplicate) sale, snapshotting the product's cost", async () => {
-    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" });
+    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] });
 
     await runPhaseA(createFakeDb([[{ costJpy: 3000 }]]), TENANT_ID, "product-1", sale);
 
@@ -100,17 +101,17 @@ describe("runPhaseA", () => {
   });
 
   it("never lets an order-bookkeeping failure block or fail the sale processing", async () => {
-    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" });
+    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] });
     upsertOrderReceivedMock.mockRejectedValue(new Error("boom"));
 
     const result = await runPhaseA(createFakeDb([[]]), TENANT_ID, "product-1", sale);
 
-    expect(result.outboxJobId).toBe("job-1");
+    expect(result.outboxJobs).toEqual([{ channel: "ebay", jobId: "job-1" }]);
     expect(recordSyncErrorMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ errorCode: "order_record_failed" }));
   });
 
   it("still records the order when this sale lost the double-sell race", async () => {
-    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobId: null });
+    applySaleWithOutboxMock.mockResolvedValue({ sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobs: [] });
 
     await runPhaseA(createFakeDb([[{ costJpy: 3000 }]]), TENANT_ID, "product-1", sale);
 
@@ -135,7 +136,7 @@ describe("dispatchPhaseB", () => {
   it("does nothing when there is no outbox job (no listing published on the other channel)", async () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: null };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [] };
 
     await dispatchPhaseB(createFakeDb([]), TENANT_ID, adapters as never, "product-1", sale, phaseA);
 
@@ -145,7 +146,7 @@ describe("dispatchPhaseB", () => {
   it("records a possible-double-sale error and does not dispatch when the sale lost the race (alreadyZero)", async () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobId: null };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobs: [] };
 
     await dispatchPhaseB(createFakeDb([]), TENANT_ID, adapters as never, "product-1", sale, phaseA);
 
@@ -159,7 +160,7 @@ describe("dispatchPhaseB", () => {
   it("skips dispatch when the outbox job was already marked completed (concurrent/earlier attempt)", async () => {
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await dispatchPhaseB(
       createFakeDb([[{ id: "job-1", status: "completed", attempts: 0 }]]), // sync_jobs lookup
@@ -176,7 +177,7 @@ describe("dispatchPhaseB", () => {
   it("zeroes out the other channel's published listing exactly once when a sale drove stock to zero", async () => {
     const setInventory = vi.fn().mockResolvedValue(undefined);
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await dispatchPhaseB(
       createFakeDb([
@@ -198,7 +199,7 @@ describe("dispatchPhaseB", () => {
   it("pushes the freshly-reduced available quantity immediately on a partial decrement", async () => {
     const setInventory = vi.fn().mockResolvedValue(undefined);
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await dispatchPhaseB(
       createFakeDb([
@@ -226,7 +227,7 @@ describe("dispatchPhaseB", () => {
     listConnectedAccountIdsMock.mockResolvedValueOnce([]);
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await expect(
       dispatchPhaseB(
@@ -246,7 +247,7 @@ describe("dispatchPhaseB", () => {
     listConnectedAccountIdsMock.mockResolvedValueOnce([]);
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await expect(
       dispatchPhaseB(
@@ -268,7 +269,7 @@ describe("dispatchPhaseB", () => {
   it("marks the outbox job failed and rethrows when setInventory itself fails", async () => {
     const setInventory = vi.fn().mockRejectedValue(new Error("eBay API error 500: boom"));
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 4, soldOut: false, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await expect(
       dispatchPhaseB(
@@ -301,7 +302,7 @@ describe("dispatchPhaseB", () => {
     });
     const setInventory = vi.fn();
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
-    const phaseA = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobId: "job-1" };
+    const phaseA: ApplySaleWithOutboxResult = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
 
     await expect(
       dispatchPhaseB(
@@ -317,6 +318,58 @@ describe("dispatchPhaseB", () => {
     expect(setInventory).not.toHaveBeenCalled();
     expect(listConnectedAccountIdsMock).not.toHaveBeenCalled();
     expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "other_channel_isolated_skip" }));
+  });
+
+  it("N-channel fan-out: dispatches every other channel independently -- one channel's failure doesn't block another's success", async () => {
+    const setInventoryEbay = vi.fn().mockRejectedValue(new Error("eBay API error 500: boom"));
+    const setInventoryShopify = vi.fn().mockResolvedValue(undefined);
+    const adapters = {
+      base: {},
+      ebay: { setInventory: setInventoryEbay },
+      shopify: { setInventory: setInventoryShopify },
+    } as unknown as Record<string, ChannelAdapter>;
+    const phaseA: ApplySaleWithOutboxResult = {
+      sale: { quantity: 3, soldOut: false, alreadyZero: false },
+      outboxJobs: [
+        { channel: "ebay", jobId: "job-ebay" },
+        { channel: "shopify", jobId: "job-shopify" },
+      ],
+    };
+
+    await expect(
+      dispatchPhaseB(
+        createFakeDb([
+          // ebay (fails): sync_jobs, otherListing, product_master, inventory_master
+          [{ id: "job-ebay", status: "pending", attempts: 0 }],
+          [{ status: "published", externalId: "ebay-sku-1" }],
+          [{ sourceChannel: "base" }],
+          [{ quantity: 3, safetyStockBuffer: 1 }],
+          // shopify (succeeds): same 4-query sequence
+          [{ id: "job-shopify", status: "pending", attempts: 0 }],
+          [{ status: "published", externalId: "shopify-sku-1" }],
+          [{ sourceChannel: "base" }],
+          [{ quantity: 3, safetyStockBuffer: 1 }],
+        ]),
+        TENANT_ID,
+        adapters as never,
+        "product-1",
+        sale,
+        phaseA,
+      ),
+    ).rejects.toThrow(/boom/);
+
+    // Shopify's push still happened and succeeded despite eBay's failing first in the loop.
+    expect(setInventoryEbay).toHaveBeenCalledTimes(1);
+    expect(setInventoryShopify).toHaveBeenCalledTimes(1);
+    expect(setInventoryShopify).toHaveBeenCalledWith("token-123", "shopify-sku-1", 2);
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "inventory_immediate_sync_after_sale", after: expect.objectContaining({ syncedChannel: "shopify" }) }),
+    );
+    expect(recordSyncErrorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ errorCode: "channel_inventory_push_failed", jobId: "job-ebay" }),
+    );
   });
 });
 
@@ -357,9 +410,9 @@ describe("handler (end-to-end idempotency, using a real in-memory IdempotencySto
         return stock;
       },
       apply: vi.fn(async (_db: unknown, _tenantId: string, _productId: string, quantitySold: number) => {
-        if (stock <= 0) return { sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobId: null };
+        if (stock <= 0) return { sale: { quantity: 0, soldOut: true, alreadyZero: true }, outboxJobs: [] };
         stock = Math.max(0, stock - quantitySold);
-        return { sale: { quantity: stock, soldOut: stock === 0, alreadyZero: false }, outboxJobId: "job-1" };
+        return { sale: { quantity: stock, soldOut: stock === 0, alreadyZero: false }, outboxJobs: [{ channel: "ebay", jobId: "job-1" }] };
       }),
     };
   }

@@ -1,5 +1,5 @@
 import type { ChannelType } from "@ai-ec/core";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Database } from "./client.js";
 import { channelListings, inventoryEvents, inventoryMaster, productMaster, syncJobs } from "./schema.js";
 
@@ -105,10 +105,11 @@ export async function applySale(
 
 export interface ApplySaleWithOutboxResult {
   sale: ApplySaleResult;
-  /** Non-null exactly when the other channel has a published listing that needs its
-   *  quantity pushed. Null when there's nothing to sync (no other listing, or this sale
-   *  lost the double-sell race and alreadyZero is true). */
-  outboxJobId: string | null;
+  /** One entry per other channel that has a published listing needing its quantity pushed.
+   *  Empty when there's nothing to sync (no other channel published, or this sale lost the
+   *  double-sell race and alreadyZero is true) -- never partial: every published other
+   *  channel gets its own outbox row in the same transaction as the decrement, or none do. */
+  outboxJobs: { channel: ChannelType; jobId: string }[];
 }
 
 /**
@@ -139,13 +140,18 @@ export interface ApplySaleWithOutboxResult {
  * against ever inserting two outbox rows for the same sale, on top of withIdempotency's own
  * app-level guard -- belt and suspenders, not a substitute for it (see applySale's own
  * docstring on why CAS alone was never enough).
+ *
+ * N-channel fan-out (docs/adding-a-channel.md's "Step 4", resolved once a 3rd channel
+ * existed): `otherChannels` is a list, not a single channel, and gets one outbox row per
+ * published listing among them, each with the target channel folded into its own
+ * idempotency key -- never one shared row that only the first channel inserted would win.
  */
 export async function applySaleWithOutbox(
   db: Database,
   tenantId: string,
   productId: string,
   quantitySold: number,
-  options: ApplySaleOptions & { otherChannel: ChannelType },
+  options: ApplySaleOptions & { otherChannels: ChannelType[] },
 ): Promise<ApplySaleWithOutboxResult> {
   return db.transaction(async (tx) => {
     const sale = await applySale(tx, tenantId, productId, quantitySold, options);
@@ -157,48 +163,55 @@ export async function applySaleWithOutbox(
       await tx.update(productMaster).set({ status: "sold_out", updatedAt: new Date() }).where(eq(productMaster.id, productId));
     }
 
-    if (sale.alreadyZero) {
-      return { sale, outboxJobId: null };
+    if (sale.alreadyZero || options.otherChannels.length === 0) {
+      return { sale, outboxJobs: [] };
     }
 
-    const [otherListing] = await tx
+    const otherListings = await tx
       .select()
       .from(channelListings)
-      .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, options.otherChannel)))
-      .limit(1);
+      .where(and(eq(channelListings.productId, productId), inArray(channelListings.channel, options.otherChannels)));
+    const publishedOtherChannels = otherListings
+      .filter((l) => l.status === "published" && l.externalId)
+      .map((l) => l.channel as ChannelType);
 
-    if (otherListing?.status !== "published" || !otherListing.externalId) {
-      return { sale, outboxJobId: null };
+    const outboxJobs: { channel: ChannelType; jobId: string }[] = [];
+    for (const otherChannel of publishedOtherChannels) {
+      // Target channel is folded into the key (not just channel/externalEventId/productId) --
+      // otherwise a sale with 2+ other published channels would insert its 2nd+ row under the
+      // exact same key as the 1st, silently dropping every other channel's outbox row via
+      // onConflictDoNothing below.
+      const idempotencyKey = `channel_inventory_push:${options.channel}:${options.externalEventId ?? "unknown"}:${productId}:${otherChannel}`;
+      const [inserted] = await tx
+        .insert(syncJobs)
+        .values({
+          tenantId,
+          type: "channel_inventory_push",
+          idempotencyKey,
+          productId,
+          payload: { soldChannel: options.channel, otherChannel, soldOut: sale.soldOut },
+          status: "pending",
+        })
+        .onConflictDoNothing({ target: [syncJobs.tenantId, syncJobs.idempotencyKey] })
+        .returning({ id: syncJobs.id });
+
+      let jobId = inserted?.id;
+      if (!jobId) {
+        // onConflictDoNothing means a row for this exact (sale, target channel) already
+        // existed -- shouldn't happen given withIdempotency's own gate around this whole
+        // function, but cheap insurance costs one extra read rather than dropping this
+        // channel's dispatch entirely.
+        const [existing] = await tx
+          .select({ id: syncJobs.id })
+          .from(syncJobs)
+          .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.idempotencyKey, idempotencyKey)))
+          .limit(1);
+        jobId = existing?.id;
+      }
+      if (jobId) outboxJobs.push({ channel: otherChannel, jobId });
     }
 
-    const idempotencyKey = `channel_inventory_push:${options.channel}:${options.externalEventId ?? "unknown"}:${productId}`;
-    const [inserted] = await tx
-      .insert(syncJobs)
-      .values({
-        tenantId,
-        type: "channel_inventory_push",
-        idempotencyKey,
-        productId,
-        payload: { soldChannel: options.channel, otherChannel: options.otherChannel, soldOut: sale.soldOut },
-        status: "pending",
-      })
-      .onConflictDoNothing({ target: [syncJobs.tenantId, syncJobs.idempotencyKey] })
-      .returning({ id: syncJobs.id });
-
-    let outboxJobId = inserted?.id ?? null;
-    if (!outboxJobId) {
-      // onConflictDoNothing means a row for this exact sale already existed -- shouldn't
-      // happen given withIdempotency's own gate around this whole function, but cheap
-      // insurance costs one extra read rather than leaving the caller with no job to dispatch.
-      const [existing] = await tx
-        .select({ id: syncJobs.id })
-        .from(syncJobs)
-        .where(and(eq(syncJobs.tenantId, tenantId), eq(syncJobs.idempotencyKey, idempotencyKey)))
-        .limit(1);
-      outboxJobId = existing?.id ?? null;
-    }
-
-    return { sale, outboxJobId };
+    return { sale, outboxJobs };
   });
 }
 

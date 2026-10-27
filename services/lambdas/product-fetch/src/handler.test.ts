@@ -28,6 +28,7 @@ const { upsertProduct, dispatchPendingOutboxJobs } = await import("./handler.js"
 const queues = {
   aiGenerate: "ai-generate-url",
   ebaySync: "ebay-sync-url",
+  shopifySync: "shopify-sync-url",
   inventorySync: "inv-url",
   ebayPlatformNotificationPoll: "poll-url",
 };

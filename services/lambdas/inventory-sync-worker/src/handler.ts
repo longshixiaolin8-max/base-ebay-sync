@@ -29,27 +29,6 @@ interface SaleDetectedMessage {
 }
 
 /**
- * The sale-application transaction below (applySaleWithOutbox, in @ai-ec/db) and this file's
- * own dispatchPhaseB are still built around exactly one "other channel" per sale: one outbox
- * sync_jobs row, one idempotency key with no target-channel component, one setInventory call.
- * Deriving "the other channel" from the N-safe otherChannels() core helper -- instead of the
- * old `channel === "base" ? "ebay" : "base"` ternary -- means a 3rd channel added to
- * IMPLEMENTED_CHANNELS fails loudly right here instead of silently syncing to only one of two
- * other channels (or the wrong one). See docs/adding-a-channel.md for what real N-channel
- * fan-out here would require (a per-target-channel idempotency key and one outbox job per
- * other channel, not one) before lifting this guard.
- */
-function singleOtherChannel(channel: ChannelType): ChannelType {
-  const others = otherChannels(channel);
-  if (others.length !== 1) {
-    throw new Error(
-      `inventory-sync-worker's sale pipeline only supports exactly 2 implemented channels today; otherChannels(${channel}) returned [${others.join(", ")}]. See docs/adding-a-channel.md before adding a 3rd channel to IMPLEMENTED_CHANNELS.`,
-    );
-  }
-  return others[0]!;
-}
-
-/**
  * Marks a failure that already happened *inside* dispatchPhaseB, which has already recorded
  * its own sync_error (with a jobId the admin retry UI can act on) and updated the sync_jobs
  * row before rethrowing to get this SQS message retried. Rethrown so the handler's own
@@ -156,7 +135,7 @@ export async function runPhaseA(
     channel: sale.channel,
     sequenceAt: sale.occurredAt,
     externalEventId: sale.externalOrderId,
-    otherChannel: singleOtherChannel(sale.channel),
+    otherChannels: otherChannels(sale.channel),
   });
 
   // Item #1 of the commercial-features round ("正式なOrderモデルを追加"). A bookkeeping
@@ -198,11 +177,14 @@ export async function runPhaseA(
 }
 
 /**
- * Phase B: dispatch the outbox row applySaleWithOutbox left behind (if any) by actually
- * pushing the freshly-reduced quantity to the other channel. Re-reads sync_jobs' own status
- * first and skips if another (concurrent or already-succeeded) attempt already completed it
- * -- SQS's at-least-once delivery means this can legitimately run more than once for the
- * same message.
+ * Phase B: dispatch every outbox row applySaleWithOutbox left behind (one per other channel
+ * with a published listing) by actually pushing the freshly-reduced quantity to that channel.
+ * Dispatches each channel's job independently -- one channel's failure (a flaky external API
+ * call) must never block another channel's successful push, so every job in the list is
+ * attempted before this function decides whether to throw. Re-throws (via PhaseBDispatchError)
+ * only if at least one channel's dispatch failed, to get this SQS message retried; a retry
+ * naturally skips whichever channels already succeeded, since dispatchToChannel re-reads each
+ * job's own status first and skips an already-"completed" one.
  */
 export async function dispatchPhaseB(
   db: ReturnType<typeof getDb>,
@@ -215,8 +197,8 @@ export async function dispatchPhaseB(
   if (phaseA.sale.alreadyZero) {
     // Another event already drove this to zero first — the double-sell guard stops a second
     // decrement, but the order recorded in Phase A is a real, already-paid sale that this
-    // product can't actually fulfill. Nothing left to zero out (both channels already read
-    // 0), so the only useful action left is making sure a human notices fast.
+    // product can't actually fulfill. Nothing left to zero out (every other channel already
+    // reads 0), so the only useful action left is making sure a human notices fast.
     await recordSyncError(db, {
       tenantId,
       channel: sale.channel,
@@ -228,12 +210,35 @@ export async function dispatchPhaseB(
     return;
   }
 
-  if (!phaseA.outboxJobId) return; // no other channel published — nothing to dispatch
+  if (phaseA.outboxJobs.length === 0) return; // no other channel published — nothing to dispatch
 
-  const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, phaseA.outboxJobId)).limit(1);
+  let firstError: Error | null = null;
+  for (const { channel: otherChannel, jobId } of phaseA.outboxJobs) {
+    try {
+      await dispatchToChannel(db, tenantId, adapters, productId, sale, phaseA, otherChannel, jobId);
+    } catch (err) {
+      // Keep going -- a 2nd/3rd channel's push must still be attempted even if an earlier
+      // one in this same loop just failed. Each dispatchToChannel call has already recorded
+      // its own sync_error and marked its own job "failed" before this catch runs.
+      firstError ??= err as Error;
+    }
+  }
+  if (firstError) throw new PhaseBDispatchError(firstError);
+}
+
+async function dispatchToChannel(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  adapters: Partial<Record<ChannelType, ChannelAdapter>>,
+  productId: string,
+  sale: SaleEvent,
+  phaseA: ApplySaleWithOutboxResult,
+  otherChannel: ChannelType,
+  outboxJobId: string,
+): Promise<void> {
+  const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, outboxJobId)).limit(1);
   if (!job || job.status === "completed") return; // already dispatched by a concurrent/earlier attempt
 
-  const otherChannel = singleOtherChannel(sale.channel);
   const [otherListing] = await db
     .select()
     .from(channelListings)
@@ -274,8 +279,8 @@ export async function dispatchPhaseB(
     }
     const adapter = adapters[otherChannel];
     if (!adapter) {
-      // Can't actually happen today -- singleOtherChannel() already throws before this point
-      // for any channel outside IMPLEMENTED_CHANNELS, and loadImplementedChannelAdapters()
+      // Can't actually happen today -- otherChannel always comes from otherChannels(), which
+      // only ever returns channels in IMPLEMENTED_CHANNELS, and loadImplementedChannelAdapters()
       // covers exactly IMPLEMENTED_CHANNELS. Guarded anyway so a future gap between those two
       // fails loudly here rather than crashing on a bare undefined a few lines down.
       throw new Error(`No ChannelAdapter wired for "${otherChannel}" -- loadImplementedChannelAdapters() is out of sync with IMPLEMENTED_CHANNELS`);
@@ -329,6 +334,10 @@ export async function dispatchPhaseB(
       errorMessage: error.message,
       payload: { externalOrderId: sale.externalOrderId },
     });
-    throw new PhaseBDispatchError(error);
+    // Plain rethrow, not PhaseBDispatchError -- dispatchPhaseB's own loop (the only place that
+    // needs to distinguish "a Phase B dispatch already recorded its own sync_error" from a
+    // fresh Phase A failure) is what wraps this into PhaseBDispatchError, once, after every
+    // other channel in the same sale has also had its own chance to dispatch.
+    throw error;
   }
 }

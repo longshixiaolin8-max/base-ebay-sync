@@ -13,6 +13,7 @@
   "dependencies": {
     "@ai-ec/adapter-base": "workspace:*",
     "@ai-ec/adapter-ebay": "workspace:*",
+    "@ai-ec/adapter-shopify": "workspace:*",
     "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
     "@aws-sdk/client-secrets-manager": "^3.687.0",

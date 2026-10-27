@@ -1,17 +1,19 @@
 # base-ebay-sync — AI EC運営プラットフォーム
 
-BASEに登録した商品を、AWS上の中央「商品マスター/在庫マスター」を経由してeBayへ自動出品し、価格・在庫・売却を双方向に同期するプラットフォーム。**BASEとeBayは直接通信しない** — 両者は常にAWS上のマスターを介して同期される。
+BASEに登録した商品を、AWS上の中央「商品マスター/在庫マスター」を経由してeBay・Shopifyへ自動出品し、価格・在庫・売却を双方向に同期するプラットフォーム。**各チャネルは互いに直接通信しない** — 全チャネルは常にAWS上のマスターを介して同期される。
 
 ```text
                  AWS Product Master / Inventory Master
                               │
-                ┌─────────────┴─────────────┐
-                ↓                           ↓
-              BASE                        eBay
-     (ChannelAdapter実装)          (ChannelAdapter実装)
+                ┌─────────────┼─────────────┐
+                ↓              ↓              ↓
+              BASE            eBay          Shopify
+     (ChannelAdapter実装) (ChannelAdapter実装) (ChannelAdapter実装)
 ```
 
-将来チャネルを追加する場合、候補は思いつきではなく実在の競合サービス(ネクストエンジン/CROSS MALL/GoQSystemなどのEC一元管理ツール)が実際に対応しているモールに絞ってある: Amazon・楽天市場・Yahoo!ショッピング(国内「御三家」、上記3ツール共通の標準対応)、Shopify(モールではなくBASE同様のカート型だが、CROSS MALL運営元がShopify Experts認定を受けるなど実需が確認できる)。アダプタ自体は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。接続管理まわり(OAuth接続/切断ルート・管理画面の接続カード・ワーカーのアダプタ生成)は`docs/adding-a-channel.md`の手順に沿えば自動的に拡張されるが、CDKインフラ(Secrets/Lambda/キュー)と、売却時の他チャネル反映(現状ちょうど1つの「他チャネル」を前提にした二重販売防止トランザクション)は依然として手作業での対応が必要 — 詳細と実装手順は`docs/adding-a-channel.md`を参照。
+Shopifyは本格的な3つ目の実チャネル(`IMPLEMENTED_CHANNELS`に実在)— AI生成済み英文ドラフトの承認・出品(`POST /admin/products/{id}/approve-shopify-listing`)、在庫の双方向反映(BASE/eBayどちらで売れてもShopify側も自動減算、その逆も)まで実装済み。既知の制約(Shopify側で直接売れた分はまだポーリング検知しない「プッシュ専用」である点など)は`packages/adapters/shopify/README.md`参照。
+
+将来さらにチャネルを追加する場合、候補は思いつきではなく実在の競合サービス(ネクストエンジン/CROSS MALL/GoQSystemなどのEC一元管理ツール)が実際に対応しているモールに絞ってある: Amazon・楽天市場・Yahoo!ショッピング(国内「御三家」、上記3ツール共通の標準対応)。アダプタ自体は `ChannelAdapter` interface (`packages/core/src/adapter.ts`) を実装するだけでよい設計。接続管理まわり(OAuth接続/切断ルート・管理画面の接続カード・ワーカーのアダプタ生成・売却時の他チャネル反映)は`docs/adding-a-channel.md`の手順に沿えば自動的に拡張される(Shopify自身がこの仕組みの実証)が、CDKインフラ(Secrets/Lambda/キュー)と各チャネル固有のOAuth・承認ルートは依然として手作業での対応が必要 — 詳細と実装手順は`docs/adding-a-channel.md`を参照。
 
 ## 現在の完成度
 
@@ -21,7 +23,7 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 | --- | --- |
 | モノレポ基盤 / 型定義 / Adapter抽象 | ✅ 完了・テスト済み |
 | DBスキーマ(Drizzle / Aurora Postgres Data API) | ✅ 完了(実DBに対する統合テストは未実施) |
-| BASE / eBay Adapter実装 | ✅ 完了・単体テスト済み(フィールド名は要・本番前に公式リファレンス突合) |
+| BASE / eBay / Shopify Adapter実装 | ✅ 完了・単体テスト済み(フィールド名は要・本番前に公式リファレンス突合。Shopifyは実ストアでの疎通未確認) |
 | AI生成サービス + 不確実情報ガードレール | ✅ 完了・単体テスト済み |
 | Lambda同期ワーカー一式(SQS+DLQ, 冪等性, 二重販売対策) | ✅ 完了(inventory-sync-workerはロジック単体テスト済み、他はビルド確認のみ) |
 | CDKインフラ一式 | ✅ 完了・`cdk synth`で8スタック全て合成成功(無認証情報でCI実行可能) |
@@ -33,12 +35,12 @@ BASEに登録した商品を、AWS上の中央「商品マスター/在庫マス
 ## P0タスク(次にやること)
 
 1. **実AWSアカウントへの初回デプロイ**: 認証情報を受け取り次第、`cdk bootstrap` → `cdk deploy --all`。
-2. **BASE/eBay開発者アプリ登録**とフィールド名の実API突合(`packages/adapters/*/src/client.ts` のコメント参照)。
-3. Secrets Managerへ実クレデンシャル投入(`ai-ec-platform/app-credentials/{base,ebay,openai}`)。
+2. **BASE/eBay/Shopify開発者アプリ登録**とフィールド名の実API突合(`packages/adapters/*/src/client.ts` のコメント参照)。
+3. Secrets Managerへ実クレデンシャル投入(`ai-ec-platform/app-credentials/{base,ebay,shopify,openai}`)。
 4. Cognito管理者ユーザーの作成(セルフサインアップ不可のため)。
 5. Amplify Hostingとこのリポジトリの接続(コンソールから、GitHub Appトークンはコードに置かない)。
 6. `packages/db` のAurora実インスタンスに対するマイグレーション適用・統合テスト追加。
-7. Amazon/楽天市場/Yahoo!ショッピング/Shopify Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Shopify・Amazon・楽天市場は`packages/adapters/{shopify,amazon,rakuten}`に実アカウント未接続・未検証のテンプレート実装を用意済み(いずれも`IMPLEMENTED_CHANNELS`には未登録)。Yahoo!ショッピングのみ未着手。
+7. Amazon/楽天市場/Yahoo!ショッピング Adapter実装(将来タスク、優先度は`docs/adding-a-channel.md`参照)。Amazon・楽天市場は`packages/adapters/{amazon,rakuten}`に実アカウント未接続・未検証のテンプレート実装を用意済み(`IMPLEMENTED_CHANNELS`には未登録)。Yahoo!ショッピングのみ未着手。
 8. SESの送信元アドレス/ドメイン検証と`--context sesFromEmail=...`の設定(詳細は下の「請求関連メール通知(SES)」参照)。これをやらない限り`billingNotice`のメールは送信されない(エラーはキャッチ・ログのみでwebhook自体は正常応答する)。
 
 ## アーキテクチャ
