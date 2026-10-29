@@ -39,6 +39,16 @@ export function BoxIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function StoreIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M3 9 4 4h16l1 5" />
+      <path d="M4 9v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9" />
+      <path d="M3 9a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0" />
+    </Icon>
+  );
+}
+
 export function SyncIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Icon {...props}>

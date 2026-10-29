@@ -25,6 +25,7 @@ export interface SecretsStackProps extends cdk.StackProps {
 export class SecretsStack extends cdk.Stack {
   readonly baseAppCredentials: secretsmanager.Secret;
   readonly ebayAppCredentials: secretsmanager.Secret;
+  readonly shopifyAppCredentials: secretsmanager.Secret;
   readonly openAiApiKey: secretsmanager.Secret;
   readonly stripeAppCredentials: secretsmanager.Secret;
   readonly signupCredentials: secretsmanager.Secret;
@@ -62,6 +63,14 @@ export class SecretsStack extends cdk.Stack {
       secretName: `ai-ec-platform/${envSegment}app-credentials/ebay`,
       description:
         "eBay OAuth app clientId/clientSecret/ruName/merchantLocationKey. Fill in manually after deploy.",
+    });
+
+    // Shopify's own OAuth app clientId/clientSecret, used both to build the authorize URL
+    // (admin-api's GET /admin/oauth/shopify/authorize-url) and to sign/verify this platform's
+    // state param -- same role ebayAppCredentials.clientSecret plays for eBay's own flow.
+    this.shopifyAppCredentials = new secretsmanager.Secret(this, "ShopifyAppCredentials", {
+      secretName: `ai-ec-platform/${envSegment}app-credentials/shopify`,
+      description: "Shopify OAuth app clientId/clientSecret. Fill in manually after deploy.",
     });
 
     this.openAiApiKey = new secretsmanager.Secret(this, "OpenAiApiKey", {
@@ -121,6 +130,7 @@ export class SecretsStack extends cdk.Stack {
     for (const secret of [
       this.baseAppCredentials,
       this.ebayAppCredentials,
+      this.shopifyAppCredentials,
       this.openAiApiKey,
       this.stripeAppCredentials,
       this.signupCredentials,

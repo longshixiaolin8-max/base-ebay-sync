@@ -84,6 +84,7 @@ import {
 } from "@ai-ec/db";
 import {
   createEbayAdapter,
+  createShopifyAdapter,
   createStripeClient,
   deleteOAuthConnectionsForTenant,
   enqueue,
@@ -95,6 +96,7 @@ import {
   getQueueUrls,
   getValidAccessToken,
   listConnectedAccountIds,
+  normalizeShopDomain,
   recordAuditLog,
   recordSyncError,
   requireCloudFrontOrigin,
@@ -105,6 +107,7 @@ import {
   signState,
   signWebhookDestinationToken,
   type EbayAppCredentials,
+  type ShopifyAppCredentials,
   type StripeAppCredentials,
 } from "@ai-ec/lambda-shared";
 import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
@@ -944,6 +947,32 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         tenantId,
         actor: actorFromEvent(event),
         action: "ebay_listing_publish_approved",
+        entityType: "product",
+        entityId: id,
+      });
+
+      return json(202, { status: "publish_queued" });
+    }
+
+    if (method === "POST" && /^\/admin\/products\/[^/]+\/approve-shopify-listing$/.test(path)) {
+      const id = path.split("/")[3]!;
+      const [shopifyListing] = await db
+        .select()
+        .from(channelListings)
+        .where(
+          and(eq(channelListings.tenantId, tenantId), eq(channelListings.productId, id), eq(channelListings.channel, "shopify")),
+        )
+        .limit(1);
+      if (!shopifyListing) return json(404, { error: "no_shopify_draft_for_product" });
+      if (shopifyListing.status === "published") return json(409, { error: "already_published" });
+
+      const queues = getQueueUrls();
+      await enqueue(queues.shopifySync, { type: "shopify_publish", tenantId, productId: id }, `${tenantId}:shopify-publish:${id}`);
+
+      await recordAuditLog(db, {
+        tenantId,
+        actor: actorFromEvent(event),
+        action: "shopify_listing_publish_approved",
         entityType: "product",
         entityId: id,
       });
@@ -3187,6 +3216,26 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         const adapter = createEbayAdapter(creds);
         const state = signState(creds.clientSecret, tenantId);
         const url = adapter.getAuthorizationUrl(state, creds.ruName);
+        return json(200, { url });
+      }
+      if (channel === "shopify") {
+        // Unlike BASE/eBay, Shopify's own authorize URL is store-specific
+        // (https://{shop}.myshopify.com/admin/oauth/authorize) -- the tenant must tell us
+        // which store before we can build it. Validated the same way oauth-shopify's own
+        // callback validates its `shop` query param (SSRF-sensitive: used verbatim to build
+        // a URL this platform's servers then fetch).
+        const shop = event.queryStringParameters?.shop;
+        if (!shop) return json(400, { error: "missing_shop" });
+        let shopDomain: string;
+        try {
+          shopDomain = normalizeShopDomain(shop);
+        } catch {
+          return json(400, { error: "invalid_shop" });
+        }
+        const creds = await getAppCredentials<ShopifyAppCredentials>("shopify");
+        const adapter = createShopifyAdapter(creds, shopDomain);
+        const state = signState(creds.clientSecret, tenantId);
+        const url = adapter.getAuthorizationUrl(state, requireEnv("SHOPIFY_OAUTH_REDIRECT_URI"));
         return json(200, { url });
       }
       const creds = await getAppCredentials<{ clientId: string; clientSecret: string }>("base");

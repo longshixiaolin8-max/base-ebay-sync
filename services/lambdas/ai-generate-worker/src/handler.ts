@@ -1,5 +1,5 @@
 import { createAIModelClient, generateEbayListing } from "@ai-ec/ai";
-import { buildIdempotencyKey, getPlanLimits, withIdempotency } from "@ai-ec/core";
+import { buildIdempotencyKey, type ChannelType, getPlanLimits, otherChannels, withIdempotency } from "@ai-ec/core";
 import {
   aiListingDraft,
   channelListings,
@@ -96,10 +96,18 @@ export const handler: SQSHandler = async (event: SQSEvent) => {
             reviewNotes: listing.reviewNotes,
           });
 
-          await db
-            .insert(channelListings)
-            .values({ tenantId: message.tenantId, productId: product.id, channel: "ebay", status: "pending_approval" })
-            .onConflictDoNothing({ target: [channelListings.productId, channelListings.channel] });
+          // One pending_approval row per other implemented channel this draft could be
+          // published to -- not hardcoded to "ebay" any more. The same AI draft (English
+          // title/description/condition) is reused across every destination channel; nothing
+          // here is eBay-specific. See docs/adding-a-channel.md and otherChannels()'s own doc
+          // comment: this is already N-channel-safe, same fix applied to the sale-application
+          // outbox (applySaleWithOutbox).
+          for (const channel of otherChannels(product.sourceChannel as ChannelType)) {
+            await db
+              .insert(channelListings)
+              .values({ tenantId: message.tenantId, productId: product.id, channel, status: "pending_approval" })
+              .onConflictDoNothing({ target: [channelListings.productId, channelListings.channel] });
+          }
 
           await db.update(productMaster).set({ status: "ai_generated", updatedAt: new Date() }).where(eq(productMaster.id, product.id));
 

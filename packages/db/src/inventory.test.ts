@@ -241,24 +241,36 @@ describe("applySale", () => {
 function outboxFakeDb(options: {
   row: FakeInventoryRow;
   otherListing?: { status: string; externalId: string | null } | null;
+  /** N-channel fan-out: one row per other published channel. Takes precedence over the
+   *  single-listing `otherListing` sugar above when both would otherwise apply. */
+  otherListings?: { channel: string; status: string; externalId: string | null }[];
   /** Simulates onConflictDoNothing finding an existing row for this exact idempotency key. */
   existingOutboxJobId?: string;
 }) {
   const { row, otherListing = null, existingOutboxJobId } = options;
+  const otherListings = options.otherListings ?? (otherListing ? [{ ...otherListing, channel: "ebay" }] : []);
   const insertedSyncJobs: Array<{ tenantId: string; type: string; idempotencyKey: string; payload: unknown }> = [];
   const productMasterUpdates: unknown[] = [];
+  let nextJobId = 1;
 
   const db = {
     transaction: async (fn: (tx: unknown) => unknown) => fn(db),
     select: () => ({
       from: (table: unknown) => ({
-        where: () => ({
-          limit: async () => {
-            if (table === channelListings) return otherListing ? [otherListing] : [];
+        where: () => {
+          // channelListings is queried two ways by applySaleWithOutbox: with .limit(1) in
+          // older call sites, and directly awaited (no .limit()) for the N-channel
+          // otherListings lookup -- supporting both lets this one fake serve either.
+          const rows = () => {
+            if (table === channelListings) return otherListings;
             if (table === syncJobs) return existingOutboxJobId ? [{ id: existingOutboxJobId }] : [];
             return [row.select()]; // inventory_master
-          },
-        }),
+          };
+          return {
+            limit: async () => rows(),
+            then: (resolve: (v: unknown[]) => void) => resolve(rows()),
+          };
+        },
       }),
     }),
     update: (table: unknown) => {
@@ -275,7 +287,7 @@ function outboxFakeDb(options: {
               returning: async () => {
                 if (existingOutboxJobId) return []; // simulated conflict -- caller falls back to the read above
                 insertedSyncJobs.push(v);
-                return [{ id: "new-job-1" }];
+                return [{ id: `new-job-${nextJobId++}` }];
               },
             }),
           }),
@@ -305,11 +317,11 @@ describe("applySaleWithOutbox", () => {
     const first = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
     expect(first.sale).toEqual({ quantity: 4, soldOut: false, alreadyZero: false });
-    expect(first.outboxJobId).toBe("new-job-1");
+    expect(first.outboxJobs).toEqual([{ channel: "ebay", jobId: "new-job-1" }]);
     expect(row.quantity).toBe(4);
 
     // Stock stays at 4 no matter how many more times this exact function is invoked for the
@@ -318,7 +330,7 @@ describe("applySaleWithOutbox", () => {
       const retry = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
         channel: "base",
         externalEventId: "order-1",
-        otherChannel: "ebay",
+        otherChannels: ["ebay"],
       });
       // Each bare call to applySale-under-the-hood still decrements (this function has no
       // dedup of its own -- that's withIdempotency's job, exercised in the handler test
@@ -340,10 +352,10 @@ describe("applySaleWithOutbox", () => {
     const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
-    expect(result.outboxJobId).toBe("new-job-1");
+    expect(result.outboxJobs).toEqual([{ channel: "ebay", jobId: "new-job-1" }]);
     expect(db.insertedSyncJobs).toHaveLength(1);
     expect(db.insertedSyncJobs[0]).toMatchObject({ tenantId: "tenant-a", type: "channel_inventory_push" });
   });
@@ -355,10 +367,10 @@ describe("applySaleWithOutbox", () => {
     const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
-    expect(result.outboxJobId).toBeNull();
+    expect(result.outboxJobs).toEqual([]);
     expect(db.insertedSyncJobs).toHaveLength(0);
   });
 
@@ -369,11 +381,11 @@ describe("applySaleWithOutbox", () => {
     const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
     expect(result.sale.alreadyZero).toBe(true);
-    expect(result.outboxJobId).toBeNull();
+    expect(result.outboxJobs).toEqual([]);
     expect(db.insertedSyncJobs).toHaveLength(0);
   });
 
@@ -384,7 +396,7 @@ describe("applySaleWithOutbox", () => {
     await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
     expect(db.productMasterUpdates).toHaveLength(1);
@@ -401,11 +413,61 @@ describe("applySaleWithOutbox", () => {
     const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
       channel: "base",
       externalEventId: "order-1",
-      otherChannel: "ebay",
+      otherChannels: ["ebay"],
     });
 
-    expect(result.outboxJobId).toBe("already-there");
+    expect(result.outboxJobs).toEqual([{ channel: "ebay", jobId: "already-there" }]);
     expect(db.insertedSyncJobs).toHaveLength(0);
+  });
+
+  it("N-channel fan-out: inserts one outbox row per published other channel, each with its own channel-scoped idempotency key", async () => {
+    const row = new FakeInventoryRow(5);
+    const db = outboxFakeDb({
+      row,
+      otherListings: [
+        { channel: "ebay", status: "published", externalId: "ebay-sku-1" },
+        { channel: "shopify", status: "published", externalId: "shopify-sku-1" },
+      ],
+    });
+
+    const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
+      channel: "base",
+      externalEventId: "order-1",
+      otherChannels: ["ebay", "shopify"],
+    });
+
+    expect(result.outboxJobs).toEqual([
+      { channel: "ebay", jobId: "new-job-1" },
+      { channel: "shopify", jobId: "new-job-2" },
+    ]);
+    expect(db.insertedSyncJobs).toHaveLength(2);
+    // The target channel must be part of the key -- otherwise the 2nd insert below would
+    // collide with the 1st under onConflictDoNothing and silently never happen, which is
+    // exactly the bug this fan-out fix exists to close.
+    const keys = db.insertedSyncJobs.map((j) => j.idempotencyKey);
+    expect(new Set(keys).size).toBe(2);
+    expect(keys.every((k) => k.includes("order-1"))).toBe(true);
+    expect(keys.some((k) => k.endsWith(":ebay"))).toBe(true);
+    expect(keys.some((k) => k.endsWith(":shopify"))).toBe(true);
+  });
+
+  it("N-channel fan-out: skips a not-yet-published other channel but still dispatches the published one", async () => {
+    const row = new FakeInventoryRow(5);
+    const db = outboxFakeDb({
+      row,
+      otherListings: [
+        { channel: "ebay", status: "published", externalId: "ebay-sku-1" },
+        { channel: "shopify", status: "draft", externalId: null },
+      ],
+    });
+
+    const result = await applySaleWithOutbox(asDatabase(db as unknown as FakeDb), "tenant-a", "product-1", 1, {
+      channel: "base",
+      externalEventId: "order-1",
+      otherChannels: ["ebay", "shopify"],
+    });
+
+    expect(result.outboxJobs).toEqual([{ channel: "ebay", jobId: "new-job-1" }]);
   });
 });
 

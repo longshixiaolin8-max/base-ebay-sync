@@ -81,4 +81,5 @@ export interface ConnectionDetailLite {
 export interface ConnectionsResponseLite {
   base: ConnectionDetailLite;
   ebay: ConnectionDetailLite;
+  shopify: ConnectionDetailLite;
 }

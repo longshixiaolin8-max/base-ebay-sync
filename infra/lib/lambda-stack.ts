@@ -26,6 +26,7 @@ export interface LambdaStackProps extends cdk.StackProps {
   appCredentialSecrets: {
     base: secretsmanager.Secret;
     ebay: secretsmanager.Secret;
+    shopify: secretsmanager.Secret;
     openai: secretsmanager.Secret;
     stripe: secretsmanager.Secret;
     signup: secretsmanager.Secret;
@@ -42,12 +43,14 @@ export interface LambdaStackProps extends cdk.StackProps {
   queues: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
+    shopifySync: sqs.Queue;
     inventorySync: sqs.Queue;
     ebayPlatformNotificationPoll: sqs.Queue;
   };
   dlqs: {
     aiGenerate: sqs.Queue;
     ebaySync: sqs.Queue;
+    shopifySync: sqs.Queue;
     inventorySync: sqs.Queue;
     ebayPlatformNotificationPoll: sqs.Queue;
   };
@@ -66,11 +69,13 @@ export class LambdaStack extends cdk.Stack {
   readonly adminApiFn: nodejs.NodejsFunction;
   readonly oauthBaseCallbackFn: nodejs.NodejsFunction;
   readonly oauthEbayCallbackFn: nodejs.NodejsFunction;
+  readonly oauthShopifyCallbackFn: nodejs.NodejsFunction;
   readonly ebayWebhookFn: nodejs.NodejsFunction;
   readonly ebayPlatformNotificationDispatcherFn: nodejs.NodejsFunction;
   readonly productFetchFn: nodejs.NodejsFunction;
   readonly aiGenerateWorkerFn: nodejs.NodejsFunction;
   readonly ebaySyncWorkerFn: nodejs.NodejsFunction;
+  readonly shopifySyncWorkerFn: nodejs.NodejsFunction;
   readonly salesPollerFn: nodejs.NodejsFunction;
   readonly inventorySyncWorkerFn: nodejs.NodejsFunction;
   readonly inventoryDiffCheckFn: nodejs.NodejsFunction;
@@ -89,6 +94,7 @@ export class LambdaStack extends cdk.Stack {
       DB_NAME: props.databaseName,
       AI_GENERATE_QUEUE_URL: props.queues.aiGenerate.queueUrl,
       EBAY_SYNC_QUEUE_URL: props.queues.ebaySync.queueUrl,
+      SHOPIFY_SYNC_QUEUE_URL: props.queues.shopifySync.queueUrl,
       INVENTORY_SYNC_QUEUE_URL: props.queues.inventorySync.queueUrl,
       EBAY_PLATFORM_NOTIFICATION_POLL_QUEUE_URL: props.queues.ebayPlatformNotificationPoll.queueUrl,
       AI_PROVIDER: props.config.aiProvider,
@@ -171,8 +177,18 @@ export class LambdaStack extends cdk.Stack {
       { BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback` },
     );
     this.oauthEbayCallbackFn = makeFn("OauthEbayCallback", "services/lambdas/oauth-ebay/src/handler.ts", "callback");
+    // Shopify's own OAuth app has no fixed "RuName"-style redirect registration like eBay --
+    // this is purely a logging/clarity value (see oauth-shopify's own handler.ts doc comment:
+    // ShopifyAdapter.exchangeCodeForToken never actually sends redirect_uri to Shopify).
+    this.oauthShopifyCallbackFn = makeFn(
+      "OauthShopifyCallback",
+      "services/lambdas/oauth-shopify/src/handler.ts",
+      "callback",
+      { SHOPIFY_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/shopify/callback` },
+    );
     props.appCredentialSecrets.base.grantRead(this.oauthBaseCallbackFn);
     props.appCredentialSecrets.ebay.grantRead(this.oauthEbayCallbackFn);
+    props.appCredentialSecrets.shopify.grantRead(this.oauthShopifyCallbackFn);
 
     this.ebayWebhookFn = makeFn(
       "EbayWebhook",
@@ -268,6 +284,22 @@ export class LambdaStack extends cdk.Stack {
     // instead of pushing a possibly-stale listing.
     props.queues.aiGenerate.grantSendMessages(this.ebaySyncWorkerFn);
 
+    // Deliberately much simpler than EbaySyncWorker -- shopify-sync-worker's own publish()/
+    // update() have no business-policy/category-required-aspects/quota machinery to retry
+    // through (see docs/adding-a-channel.md), so no aiGenerate requeue grant is needed here.
+    this.shopifySyncWorkerFn = makeFn(
+      "ShopifySyncWorker",
+      "services/lambdas/shopify-sync-worker/src/handler.ts",
+      "handler",
+      {},
+      cdk.Duration.minutes(2),
+      10,
+    );
+    props.appCredentialSecrets.shopify.grantRead(this.shopifySyncWorkerFn);
+    this.shopifySyncWorkerFn.addEventSource(
+      new SqsEventSource(props.queues.shopifySync, { batchSize: 5, reportBatchItemFailures: true }),
+    );
+
     // --- Inventory sync (double-sell prevention) ---
     this.salesPollerFn = makeFn(
       "SalesPoller",
@@ -304,6 +336,7 @@ export class LambdaStack extends cdk.Stack {
     );
     props.appCredentialSecrets.base.grantRead(this.inventorySyncWorkerFn);
     props.appCredentialSecrets.ebay.grantRead(this.inventorySyncWorkerFn);
+    props.appCredentialSecrets.shopify.grantRead(this.inventorySyncWorkerFn);
     this.inventorySyncWorkerFn.addEventSource(
       new SqsEventSource(props.queues.inventorySync, { batchSize: 1, reportBatchItemFailures: true }),
     );
@@ -317,6 +350,7 @@ export class LambdaStack extends cdk.Stack {
     );
     props.appCredentialSecrets.base.grantRead(this.inventoryDiffCheckFn);
     props.appCredentialSecrets.ebay.grantRead(this.inventoryDiffCheckFn);
+    props.appCredentialSecrets.shopify.grantRead(this.inventoryDiffCheckFn);
     new events.Rule(this, "InventoryDiffCheckSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
@@ -337,6 +371,7 @@ export class LambdaStack extends cdk.Stack {
     );
     props.appCredentialSecrets.base.grantRead(this.tenantOffboardingFn);
     props.appCredentialSecrets.ebay.grantRead(this.tenantOffboardingFn);
+    props.appCredentialSecrets.shopify.grantRead(this.tenantOffboardingFn);
     new events.Rule(this, "TenantOffboardingSchedule", {
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
       targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
@@ -519,6 +554,8 @@ export class LambdaStack extends cdk.Stack {
         // as of round 12's "public OAuth authorize routeを廃止") needs the same fixed
         // redirect URI BASE's own callback is registered against.
         BASE_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/base/callback`,
+        // Same role for GET /admin/oauth/shopify/authorize-url, Shopify's own entry point.
+        SHOPIFY_OAUTH_REDIRECT_URI: `${props.apiUrl}/oauth/shopify/callback`,
         // Phase 2's POST /admin/billing/portal-session needs a return_url for the Stripe
         // billing portal session it creates.
         ADMIN_APP_URL: props.adminAppUrl,
@@ -547,7 +584,7 @@ export class LambdaStack extends cdk.Stack {
     // SignupHandler, StripeWebhook, AiGenerateWorker and DlqRedrive must not
     // inherit the shared marketplace OAuth token permissions.
     // OAuth callbacks can create and rotate their own connections, not read or delete.
-    for (const fn of [this.oauthBaseCallbackFn, this.oauthEbayCallbackFn]) {
+    for (const fn of [this.oauthBaseCallbackFn, this.oauthEbayCallbackFn, this.oauthShopifyCallbackFn]) {
       fn.addToRolePolicy(tokenCreate);
     }
     // These handlers must fetch and refresh OAuth access tokens while syncing.
@@ -555,6 +592,7 @@ export class LambdaStack extends cdk.Stack {
       this.ebayPlatformNotificationDispatcherFn,
       this.productFetchFn,
       this.ebaySyncWorkerFn,
+      this.shopifySyncWorkerFn,
       this.salesPollerFn,
       this.inventorySyncWorkerFn,
       this.inventoryDiffCheckFn,
@@ -570,6 +608,7 @@ export class LambdaStack extends cdk.Stack {
 
     props.queues.aiGenerate.grantSendMessages(this.adminApiFn);
     props.queues.ebaySync.grantSendMessages(this.adminApiFn);
+    props.queues.shopifySync.grantSendMessages(this.adminApiFn);
     props.queues.inventorySync.grantSendMessages(this.adminApiFn);
     for (const dlq of [props.dlqs.aiGenerate, props.dlqs.ebaySync, props.dlqs.inventorySync]) {
       dlq.grant(this.adminApiFn, "sqs:GetQueueAttributes");
@@ -581,6 +620,9 @@ export class LambdaStack extends cdk.Stack {
     // Needed for GET /admin/base/product, a debugging aid that reads BASE app credentials
     // to fetch a single item's raw detail response (e.g. to compare against product_master).
     props.appCredentialSecrets.base.grantRead(this.adminApiFn);
+    // Needed for GET /admin/oauth/shopify/authorize-url (signs the OAuth state with
+    // Shopify's own clientSecret, same as the base/ebay routes already do with theirs).
+    props.appCredentialSecrets.shopify.grantRead(this.adminApiFn);
     // Needed for POST /admin/billing/portal-session (Phase 2 of the SaaS conversion).
     props.appCredentialSecrets.stripe.grantRead(this.adminApiFn);
     // Needed for the BASE shipping-notice email sent from POST /admin/orders/{id}/status --
