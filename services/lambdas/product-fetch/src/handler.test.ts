@@ -70,6 +70,10 @@ interface FakeJobRow {
 interface FakeDbOptions {
   existingProduct?: FakeProductRow | null;
   ebayListing?: { status: string } | null;
+  /** Defaults to "not published" (null), same as not having connected Shopify at all --
+   *  every existing test above this option's own introduction only ever asserted on eBay's
+   *  own propagation, so leaving this unset keeps their exact expected job counts. */
+  shopifyListing?: { status: string } | null;
   insertedProductId?: string;
   /** Shared across calls so tests can drive two upsertProduct/dispatchPendingOutboxJobs
    *  invocations against the same underlying outbox state (dedup, then dispatch). */
@@ -95,6 +99,14 @@ function createFakeDb(opts: FakeDbOptions) {
   const productUpdateCalls: Record<string, unknown>[] = [];
   let dispatchTargets: FakeJobRow[] = [];
   let dispatchCursor = 0;
+  // otherChannels("base") is ["ebay", "shopify"], in that exact order, every call -- the
+  // production code loops over it once per upsertProduct invocation (stock-only OR
+  // content-update, never both), so consuming this 2-entry sequence in real call order
+  // (wrapping for a 2nd upsertProduct call against this same db instance) reproduces exactly
+  // which channel each channelListings query was actually for, without needing to introspect
+  // the real drizzle `eq()`/`and()` condition objects the production code builds.
+  let channelListingsCallCount = 0;
+  const channelListingsSequence = [opts.ebayListing ?? null, opts.shopifyListing ?? null];
 
   function makeQueryable(pendingJobs: FakeJobRow[]) {
     return {
@@ -123,7 +135,9 @@ function createFakeDb(opts: FakeDbOptions) {
                   return productRow ? [productRow] : [];
                 }
                 if (table.__table === "channelListings") {
-                  return opts.ebayListing ? [opts.ebayListing] : [];
+                  const result = channelListingsSequence[channelListingsCallCount % channelListingsSequence.length];
+                  channelListingsCallCount += 1;
+                  return result ? [result] : [];
                 }
                 return [];
               },
@@ -292,6 +306,64 @@ describe("upsertProduct", () => {
       payload: { type: "ebay_update", tenantId: TENANT_ID, productId: "existing-id" },
     });
     expect(jobsStore[0]!.idempotencyKey).toBe(`${TENANT_ID}:ebay-update:existing-id:stock:${item.updatedAt.getTime()}`);
+  });
+
+  it("stock-only変更はShopifyにも伝播: a stock-only BASE change enqueues an update job for every other published channel, not just eBay", async () => {
+    const { contentHash } = await import("@ai-ec/core");
+    const hash = contentHash({ title: item.title, descriptionHtml: item.descriptionHtml, priceJpy: item.priceJpy, images: item.images });
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: hash },
+      ebayListing: { status: "published" },
+      shopifyListing: { status: "published" },
+      jobsStore,
+    });
+    applyBaseStockReportMock.mockResolvedValueOnce({ applied: true, quantity: 0 });
+
+    await upsertProduct(db, TENANT_ID, item, true);
+
+    expect(jobsStore).toHaveLength(2);
+    expect(jobsStore).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "ebay_update", idempotencyKey: `${TENANT_ID}:ebay-update:existing-id:stock:${item.updatedAt.getTime()}` }),
+        expect.objectContaining({ type: "shopify_update", idempotencyKey: `${TENANT_ID}:shopify-update:existing-id:stock:${item.updatedAt.getTime()}` }),
+      ]),
+    );
+  });
+
+  it("content変更はShopifyにも伝播: a BASE content edit enqueues an update job for every other published channel, not just eBay", async () => {
+    const jobsStore: FakeJobRow[] = [];
+    const db = createFakeDb({
+      existingProduct: { id: "existing-id", contentHash: "stale-hash" },
+      ebayListing: { status: "published" },
+      shopifyListing: { status: "published" },
+      jobsStore,
+    });
+
+    await upsertProduct(db, TENANT_ID, item, true);
+
+    expect(jobsStore).toHaveLength(2);
+    expect(jobsStore.map((j) => j.type).sort()).toEqual(["ebay_update", "shopify_update"]);
+  });
+
+  it("dispatches a shopify_update job to the Shopify sync queue", async () => {
+    const shopifyJob: FakeJobRow = {
+      id: "job-1",
+      tenantId: TENANT_ID,
+      type: "shopify_update",
+      idempotencyKey: `${TENANT_ID}:shopify-update:p1:hash`,
+      productId: "p1",
+      payload: { type: "shopify_update", tenantId: TENANT_ID, productId: "p1" },
+      status: "pending",
+      attempts: 0,
+    };
+    const jobsStore = [shopifyJob];
+    const db = createFakeDb({ existingProduct: null, jobsStore });
+
+    await dispatchPendingOutboxJobs(db, queues, TENANT_ID);
+
+    expect(enqueueMock).toHaveBeenCalledWith(queues.shopifySync, shopifyJob.payload, shopifyJob.idempotencyKey);
+    expect(shopifyJob.status).toBe("completed");
   });
 
   it("does not enqueue anything for a stock-only change when the eBay listing is still pending approval", async () => {

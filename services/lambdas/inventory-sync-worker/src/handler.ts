@@ -186,6 +186,33 @@ export async function runPhaseA(
  * naturally skips whichever channels already succeeded, since dispatchToChannel re-reads each
  * job's own status first and skips an already-"completed" one.
  */
+/**
+ * withIdempotency's own store never reclaims a "completed" record just because its TTL
+ * elapsed (see createDbIdempotencyStore's own tryClaim doc comment) -- a sale processed by
+ * the pre-N-channel-fan-out code this file used to have, any time before this change
+ * deployed, stays cached under its sale key forever. If that exact message is redelivered
+ * after deploy (SQS's at-least-once delivery makes this a real, expected case -- not
+ * hypothetical, see this file's own existing redelivery tests), withIdempotency replays that
+ * OLD cached result verbatim: `{sale, outboxJobId}`, not today's `{sale, outboxJobs}`. Phase
+ * A's decrement already happened and must never be re-run -- that is the entire point of
+ * withIdempotency -- so this only reshapes the cached result for Phase B, never touches
+ * Phase A. The legacy row's own `payload.otherChannel` field (unchanged by this migration,
+ * see applySaleWithOutbox's insert) is how the one pre-migration target channel is recovered.
+ */
+async function resolveOutboxJobs(
+  db: ReturnType<typeof getDb>,
+  phaseA: ApplySaleWithOutboxResult,
+): Promise<{ channel: ChannelType; jobId: string }[]> {
+  if (Array.isArray(phaseA.outboxJobs)) return phaseA.outboxJobs;
+
+  const legacy = phaseA as unknown as { outboxJobId?: string | null };
+  if (!legacy.outboxJobId) return [];
+  const [job] = await db.select().from(syncJobs).where(eq(syncJobs.id, legacy.outboxJobId)).limit(1);
+  const otherChannel = (job?.payload as { otherChannel?: ChannelType } | undefined)?.otherChannel;
+  if (!job || !otherChannel) return [];
+  return [{ channel: otherChannel, jobId: legacy.outboxJobId }];
+}
+
 export async function dispatchPhaseB(
   db: ReturnType<typeof getDb>,
   tenantId: string,
@@ -210,10 +237,11 @@ export async function dispatchPhaseB(
     return;
   }
 
-  if (phaseA.outboxJobs.length === 0) return; // no other channel published — nothing to dispatch
+  const outboxJobs = await resolveOutboxJobs(db, phaseA);
+  if (outboxJobs.length === 0) return; // no other channel published — nothing to dispatch
 
   let firstError: Error | null = null;
-  for (const { channel: otherChannel, jobId } of phaseA.outboxJobs) {
+  for (const { channel: otherChannel, jobId } of outboxJobs) {
     try {
       await dispatchToChannel(db, tenantId, adapters, productId, sale, phaseA, otherChannel, jobId);
     } catch (err) {

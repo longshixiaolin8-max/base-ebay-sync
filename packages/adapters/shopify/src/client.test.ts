@@ -33,7 +33,7 @@ describe("ShopifyAdapter", () => {
     expect(url.origin + url.pathname).toBe("https://my-store.myshopify.com/admin/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("cid");
     expect(url.searchParams.get("state")).toBe("state123");
-    expect(url.searchParams.get("scope")).toBe("read_products,write_products,read_orders,read_inventory,write_inventory");
+    expect(url.searchParams.get("scope")).toBe("read_products,write_products,read_orders,read_inventory,write_inventory,read_locations");
   });
 
   it("getAuthorizationUrl throws on the shared, shop-less singleton instance", () => {

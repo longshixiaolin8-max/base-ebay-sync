@@ -17,10 +17,12 @@ import {
 } from "@ai-ec/db";
 import {
   createShopifyAdapter,
+  enqueue,
   fetchFxRate,
   getAppCredentials,
   getDb,
   getIdempotencyStore,
+  getQueueUrls,
   getValidAccessToken,
   listConnectedAccountIds,
   recordAuditLog,
@@ -64,6 +66,48 @@ async function enforceChannelNotIsolated(db: ReturnType<typeof getDb>, tenantId:
 }
 
 /**
+ * Found by Codex review: publish() checked only that a draft existed, never that it still
+ * matched the product's *current* content -- unlike ebay-sync-worker's own
+ * enforceContentConsistency, which this mirrors exactly (including the "自動停止・再生成"
+ * block-and-regenerate behavior). Without it, a BASE title/description/price/image edit made
+ * after the draft was generated but before Shopify approval would publish that stale,
+ * possibly underpriced content with no warning. See ebay-sync-worker's own doc comment on
+ * this same function for the full rationale; duplicated rather than shared since these two
+ * workers have no other runtime dependency on each other.
+ */
+async function enforceContentConsistency(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  product: { id: string; contentHash: string },
+  draft: { sourceContentHash: string },
+): Promise<void> {
+  if (draft.sourceContentHash === product.contentHash) return;
+
+  const queues = getQueueUrls();
+  await enqueue(
+    queues.aiGenerate,
+    { type: "ai_generate", tenantId, productId: product.id },
+    `${tenantId}:ai-generate:${product.id}:${product.contentHash}`,
+  );
+
+  await recordAuditLog(db, {
+    tenantId,
+    actor: "system:shopify-sync-worker",
+    action: "ai_draft_stale_regeneration_triggered",
+    entityType: "product",
+    entityId: product.id,
+    before: { draftSourceContentHash: draft.sourceContentHash },
+    after: { currentContentHash: product.contentHash },
+  });
+
+  throw new Error(
+    `AI draft for product ${product.id} no longer matches the product's current content ` +
+      `(BASE title/description/price/images changed since the draft was generated). ` +
+      `Blocking this Shopify publish and enqueuing regeneration; retry once the new draft is approved.`,
+  );
+}
+
+/**
  * Deliberately much simpler than ebay-sync-worker's own publish()/update(): no business-
  * policy/category-required-aspects/sync-confidence/monthly-quota machinery -- none of that
  * hardening has a Shopify equivalent built yet (see docs/adding-a-channel.md). What it does
@@ -91,6 +135,7 @@ export async function publish(
     .orderBy(desc(aiListingDraft.createdAt))
     .limit(1);
   if (!draft) throw new Error(`no AI listing draft found for product ${productId}`);
+  await enforceContentConsistency(db, tenantId, product, draft);
 
   const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
   const availableQuantity = calculateChannelAvailableQuantity(
@@ -180,6 +225,26 @@ export async function update(
   }
 
   await adapter.updateListing(accessToken, externalId, updatePayload);
+
+  // Found by Codex review: this used to only ever push title/description/price, never
+  // quantity -- updateListing() itself deliberately never applies `input.quantity` (price
+  // lives on the variant, quantity needs the separate (inventory_item_id, location_id) call
+  // setInventory makes; see client.ts's own comment). That left a BASE stock-only change
+  // (restock, manual adjustment -- now routed here via product-fetch's own
+  // propagateStockOnlyChangeToOtherChannels) with nowhere to actually reach Shopify: this
+  // job type ran, "succeeded", and silently never touched inventory. Mirrors
+  // ebay-sync-worker's own update(), which re-syncs quantity on every content update too, not
+  // just at initial publish.
+  const [inventory] = await db.select().from(inventoryMaster).where(eq(inventoryMaster.productId, productId)).limit(1);
+  if (inventory) {
+    const availableQuantity = calculateChannelAvailableQuantity(
+      inventory.quantity,
+      inventory.safetyStockBuffer,
+      "shopify",
+      product.sourceChannel,
+    );
+    await adapter.setInventory(accessToken, externalId, availableQuantity);
+  }
 
   await db
     .update(channelListings)

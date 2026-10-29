@@ -18,6 +18,8 @@ const listConnectedAccountIdsMock = vi.fn().mockResolvedValue(["my-store"]);
 const getValidAccessTokenMock = vi.fn().mockResolvedValue("token");
 const recordSyncErrorMock = vi.fn().mockResolvedValue(undefined);
 const createShopifyAdapterMock = vi.fn();
+const enqueueMock = vi.fn().mockResolvedValue(undefined);
+const getQueueUrlsMock = vi.fn().mockReturnValue({ aiGenerate: "ai-generate-url" });
 vi.mock("@ai-ec/lambda-shared", () => ({
   recordAuditLog: (...args: unknown[]) => recordAuditLogMock(...args),
   fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
@@ -28,6 +30,8 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   getAppCredentials: vi.fn().mockResolvedValue({ clientId: "cid", clientSecret: "secret" }),
   getDb: vi.fn(),
   getIdempotencyStore: () => ({ claim: vi.fn(), complete: vi.fn() }),
+  enqueue: (...args: unknown[]) => enqueueMock(...args),
+  getQueueUrls: (...args: unknown[]) => getQueueUrlsMock(...args),
 }));
 
 const { publish, update } = await import("./handler.js");
@@ -112,6 +116,27 @@ describe("publish", () => {
     );
   });
 
+  it("refuses to publish a stale draft (sourceContentHash no longer matches the product's current contentHash) and enqueues regeneration instead", async () => {
+    enqueueMock.mockClear();
+    const createListingMock = vi.fn();
+    const adapter = { createListing: createListingMock } as never;
+    const staleDraft = { ...draft, sourceContentHash: "hash-OLD" };
+    const db = createFakeDb([[product], [staleDraft]]);
+
+    await expect(publish(db, TENANT_ID, adapter, "token-1", "p1")).rejects.toThrow(/no longer matches/);
+
+    expect(createListingMock).not.toHaveBeenCalled();
+    expect(enqueueMock).toHaveBeenCalledWith(
+      "ai-generate-url",
+      { type: "ai_generate", tenantId: TENANT_ID, productId: "p1" },
+      `${TENANT_ID}:ai-generate:p1:hash-1`,
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "ai_draft_stale_regeneration_triggered", entityId: "p1" }),
+    );
+  });
+
   it("refuses to publish and never calls the adapter when Shopify is currently isolated", async () => {
     isChannelIsolatedMock.mockResolvedValueOnce({ channel: "shopify", isolated: true, reasons: ["too many failures"], windowMinutes: 15 });
     const createListingMock = vi.fn();
@@ -141,10 +166,12 @@ describe("update", () => {
     isChannelIsolatedMock.mockClear().mockResolvedValue({ channel: "shopify", isolated: false, reasons: [], windowMinutes: 15 });
   });
 
-  it("sends only title/description/price to updateListing -- never quantity, which always goes through setInventory instead", async () => {
+  it("sends only title/description/price to updateListing -- never quantity, which goes through its own separate setInventory call instead", async () => {
     const updateListingMock = vi.fn().mockResolvedValue(undefined);
-    const adapter = { updateListing: updateListingMock } as never;
-    const db = createFakeDb([[product], [draft]]);
+    const setInventoryMock = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing: updateListingMock, setInventory: setInventoryMock } as never;
+    const inventory = { quantity: 10, safetyStockBuffer: 2, version: 1 };
+    const db = createFakeDb([[product], [draft], [inventory]]);
 
     await update(db, TENANT_ID, adapter, "token-1", "p1", "my-store::111");
 
@@ -155,6 +182,19 @@ describe("update", () => {
     });
     expect(db.setMock).toHaveBeenCalledWith(expect.objectContaining({ status: "published", lastSyncedPriceJpy: 10000 }));
     expect(recordAuditLogMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "shopify_listing_updated" }));
+  });
+
+  it("re-syncs the current available quantity via setInventory on every update -- found missing by Codex review: a BASE stock-only change routed here by product-fetch used to never actually reach Shopify's inventory", async () => {
+    const updateListingMock = vi.fn().mockResolvedValue(undefined);
+    const setInventoryMock = vi.fn().mockResolvedValue(undefined);
+    const adapter = { updateListing: updateListingMock, setInventory: setInventoryMock } as never;
+    const inventory = { quantity: 10, safetyStockBuffer: 2, version: 1 };
+    const db = createFakeDb([[product], [draft], [inventory]]);
+
+    await update(db, TENANT_ID, adapter, "token-1", "p1", "my-store::111");
+
+    // shopify !== product.sourceChannel ("base"), so the safety-stock buffer applies: 10 - 2.
+    expect(setInventoryMock).toHaveBeenCalledWith("token-1", "my-store::111", 8);
   });
 
   it("refuses to update when Shopify is currently isolated", async () => {

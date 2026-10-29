@@ -25,5 +25,18 @@ export const SHOPIFY_API_DEFAULT_VERSION = "2024-01";
  * this has NOT been confirmed against a live Shopify Partner app -- verify against Shopify's
  * current scope reference (shopify.dev/docs/api/usage/access-scopes) before requesting
  * these in a real OAuth app.
+ *
+ * read_locations is its own separate scope from read_inventory/write_inventory in Shopify's
+ * reference -- easy to miss since "inventory" sounds like it would cover "where is this
+ * inventory" too, but it doesn't. Without it, setInventory()'s own GET /locations.json call
+ * (see resolveDefaultLocationId in client.ts) 403s for every real connected store, which
+ * would otherwise have silently blocked every Shopify inventory push.
  */
-export const SHOPIFY_OAUTH_SCOPES = ["read_products", "write_products", "read_orders", "read_inventory", "write_inventory"] as const;
+export const SHOPIFY_OAUTH_SCOPES = [
+  "read_products",
+  "write_products",
+  "read_orders",
+  "read_inventory",
+  "write_inventory",
+  "read_locations",
+] as const;

@@ -174,6 +174,30 @@ describe("dispatchPhaseB", () => {
     expect(setInventory).not.toHaveBeenCalled();
   });
 
+  it("normalizes a legacy cached Phase A result (outboxJobId, singular) from before the N-channel fan-out migration, without re-running Phase A", async () => {
+    const setInventory = vi.fn().mockResolvedValue(undefined);
+    const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
+    // Exactly the shape withIdempotency would replay from a "completed" record cached by the
+    // pre-migration code -- no outboxJobs array at all.
+    const legacyPhaseA = { sale: { quantity: 0, soldOut: true, alreadyZero: false }, outboxJobId: "job-1" } as unknown as ApplySaleWithOutboxResult;
+
+    await dispatchPhaseB(
+      createFakeDb([
+        [{ id: "job-1", payload: { otherChannel: "ebay" } }], // resolveOutboxJobs' own legacy-row lookup
+        [{ id: "job-1", status: "pending", attempts: 0 }], // dispatchToChannel's own sync_jobs re-check
+        [{ status: "published", externalId: "ebay-sku-1" }], // otherListing
+      ]),
+      TENANT_ID,
+      adapters as never,
+      "product-1",
+      sale,
+      legacyPhaseA,
+    );
+
+    expect(setInventory).toHaveBeenCalledTimes(1);
+    expect(setInventory).toHaveBeenCalledWith("token-123", "ebay-sku-1", 0);
+  });
+
   it("zeroes out the other channel's published listing exactly once when a sale drove stock to zero", async () => {
     const setInventory = vi.fn().mockResolvedValue(undefined);
     const adapters = { base: {}, ebay: { setInventory } } as unknown as Record<string, ChannelAdapter>;
