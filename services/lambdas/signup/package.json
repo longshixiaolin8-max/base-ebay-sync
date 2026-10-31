@@ -12,7 +12,7 @@
     "@ai-ec/core": "workspace:*",
     "@ai-ec/db": "workspace:*",
     "@ai-ec/lambda-shared": "workspace:*",
-    "@aws-sdk/client-cognito-identity-provider": "^3.687.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1158.0",
     "stripe": "^22.6.1"
   },
   "devDependencies": {
