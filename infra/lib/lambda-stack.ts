@@ -322,7 +322,16 @@ export class LambdaStack extends cdk.Stack {
       // 1 minute is EventBridge's finest rate() granularity. Shortened from 5 minutes as the
       // practical near-real-time substitute for eBay's LISTING webhook, whose required
       // sell.listing[.read] scope this app's Sandbox keyset does not currently have access to.
-      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      //
+      // prod only, though: every invocation touches Aurora (listWorkerEligibleTenants), and a
+      // 1-minute gap is shorter than the cluster's own 5-minute auto-pause threshold
+      // (database-stack.ts), so on a 1-minute cadence the cluster can never actually pause --
+      // confirmed live as the AWS Budget forecast running ~4x over its $50 limit the same way
+      // the original fixed-0.5-ACU-floor bug did (see database-stack.ts's own comment on that
+      // incident). Dev has no real customers depending on near-real-time double-sell
+      // prevention yet, so it polls every 15 minutes instead -- the same cadence
+      // ProductFetchSchedule already uses safely alongside the same auto-pause setting.
+      schedule: events.Schedule.rate(cdk.Duration.minutes(props.config.envName === "prod" ? 1 : 15)),
       targets: [new targets.LambdaFunction(this.salesPollerFn)],
     });
 
