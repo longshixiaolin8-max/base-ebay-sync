@@ -1,0 +1,63 @@
+name: One-off - Diagnose eBay webhook 500
+
+# Temporary, one-off diagnostic workflow (same pattern as prior one-off diagnostic
+# workflows in this repo's history, e.g. diagnose-signup-email). The post-deploy smoke
+# test started getting HTTP 500 (expected 400) from GET /webhooks/ebay/notifications
+# after the first real deploy of PR #37's Shopify changes to dev. This pulls the actual
+# Lambda error from CloudWatch Logs so the real cause can be diagnosed. Delete this file
+# once it's served its purpose.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Find the EbayWebhook function name
+        run: |
+          set -euo pipefail
+          FN_NAME=$(aws lambda list-functions --query "Functions[?starts_with(FunctionName, 'AiEcPlatform-${{ inputs.environment }}-Lambdas-EbayWebhook')].FunctionName | [0]" --output text)
+          echo "FN_NAME=$FN_NAME" >> "$GITHUB_ENV"
+          echo "Function: $FN_NAME"
+
+      - name: Tail recent CloudWatch Logs
+        run: |
+          set -euo pipefail
+          aws logs tail "/aws/lambda/${FN_NAME}" --since 20m --format short || echo "No recent log events found."
+
+      - name: Re-invoke directly with a synthetic challenge request to capture the error
+        run: |
+          set -euo pipefail
+          aws lambda invoke \
+            --function-name "$FN_NAME" \
+            --payload '{"version":"2.0","routeKey":"GET /webhooks/ebay/notifications","rawPath":"/webhooks/ebay/notifications","rawQueryString":"","headers":{},"requestContext":{"http":{"method":"GET","path":"/webhooks/ebay/notifications"}},"queryStringParameters":null,"isBase64Encoded":false}' \
+            --cli-read-timeout 60 \
+            --log-type Tail \
+            /tmp/invoke-response.json > /tmp/invoke-meta.json
+          echo "--- Invoke metadata ---"
+          cat /tmp/invoke-meta.json
+          echo ""
+          echo "--- Response payload ---"
+          cat /tmp/invoke-response.json
+          echo ""
+          echo "--- Decoded tail logs ---"
+          jq -r '.LogResult' /tmp/invoke-meta.json | base64 -d
