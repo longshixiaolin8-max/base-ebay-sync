@@ -189,6 +189,19 @@ if (cloudfrontApi) {
   lambdas.addStackDependency(cloudfrontApi); // apiUrl may reference its domain name (config.apiEntrypoint === "cloudfront")
 }
 
+// Temporary deploy-ordering shim (2026-11-02): dev's live Secrets/Lambdas stacks predate
+// both this PR's ShopifyAppCredentials secret and the earlier signupCredentials ->
+// signupOtpCredentials swap, which neither stack has actually picked up yet. CloudFormation
+// refuses to remove a still-imported export in the SAME changeset that would otherwise also
+// add ShopifyAppCredentials ("Cannot delete export ... as it is in use by ...Lambdas"),
+// which blocks Secrets from updating at all -- and Lambdas can't update either, since IT
+// needs the new ShopifyAppCredentials export Secrets hasn't been able to create yet. Keeping
+// one live reference to the legacy secret here is enough to stop Secrets' changeset from
+// trying to drop that export this round, breaking the cycle so both stacks can update
+// together. Safe to delete (along with this comment) once a deploy after this one succeeds
+// cleanly -- at that point nothing blocks Secrets from dropping the legacy export for real.
+secrets.signupCredentials.grantRead(lambdas.adminApiFn);
+
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
   tags,
