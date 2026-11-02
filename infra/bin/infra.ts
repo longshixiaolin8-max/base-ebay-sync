@@ -102,24 +102,46 @@ const apiCore = new ApiCoreStack(app, `${stackPrefix}-ApiCore`, { env, tags, adm
 // what actually decides whether anything downstream (BASE_OAUTH_REDIRECT_URI, the eBay
 // webhook destinations, CLOUDFRONT_SHARED_SECRET) ever uses it -- see cloudfront-stack.ts
 // and config.ts's own doc comments, and README's runbook for the real cutover.
-const waf = new WafStack(app, `${stackPrefix}-Waf`, {
-  env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
-  tags,
-  crossRegionReferences: true,
-});
-const cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
-  env,
-  tags,
-  crossRegionReferences: true,
-  api: apiCore.api,
-  webAclArn: waf.webAcl.attrArn,
-  sharedSecret: secrets.cloudfrontSharedSecret,
-});
-cloudfrontApi.addStackDependency(apiCore);
-cloudfrontApi.addStackDependency(waf);
-cloudfrontApi.addStackDependency(secrets);
+//
+// Cost-emergency stop (user request, 2026-11-02): with apiEntrypoint staying "direct"
+// (the default -- nothing downstream has been cut over to CloudFront yet), this pair of
+// stacks was pure dead weight on the bill: WAF's fixed per-rule charge plus CloudFront's
+// own minimums showed up as a real line item ($16, AWS WAF) with zero functional benefit.
+// Defaults to NOT creating them at all now; pass `--context enableCloudFrontWaf=true` to
+// bring them back before ever flipping apiEntrypoint to "cloudfront" (see README's runbook).
+// Already-deployed Waf/CloudFrontApi stacks from a prior deploy aren't touched by removing
+// them here -- CDK only manages stacks present in the current synth -- so destroying the
+// old ones to actually stop that charge still needs one explicit `cdk destroy` (see the
+// commit message / PR description for the exact command and ordering).
+const enableCloudFrontWaf = app.node.tryGetContext("enableCloudFrontWaf") === "true";
+if (config.apiEntrypoint === "cloudfront" && !enableCloudFrontWaf) {
+  throw new Error(
+    "apiEntrypoint=cloudfront requires --context enableCloudFrontWaf=true (the stacks it points at would not exist otherwise).",
+  );
+}
+let cloudfrontApi: CloudFrontStack | undefined;
+if (enableCloudFrontWaf) {
+  const waf = new WafStack(app, `${stackPrefix}-Waf`, {
+    env: { account: env.account, region: "us-east-1" }, // WAFv2's CLOUDFRONT scope is us-east-1-only
+    tags,
+    crossRegionReferences: true,
+  });
+  cloudfrontApi = new CloudFrontStack(app, `${stackPrefix}-CloudFrontApi`, {
+    env,
+    tags,
+    crossRegionReferences: true,
+    api: apiCore.api,
+    webAclArn: waf.webAcl.attrArn,
+    sharedSecret: secrets.cloudfrontSharedSecret,
+  });
+  cloudfrontApi.addStackDependency(apiCore);
+  cloudfrontApi.addStackDependency(waf);
+  cloudfrontApi.addStackDependency(secrets);
+}
 
-const apiUrl = config.apiEntrypoint === "cloudfront" ? `https://${cloudfrontApi.distribution.domainName}` : apiCore.api.apiEndpoint;
+const apiUrl = config.apiEntrypoint === "cloudfront" && cloudfrontApi
+  ? `https://${cloudfrontApi.distribution.domainName}`
+  : apiCore.api.apiEndpoint;
 
 const lambdas = new LambdaStack(app, `${stackPrefix}-Lambdas`, {
   env,
@@ -163,7 +185,9 @@ lambdas.addStackDependency(queues);
 lambdas.addStackDependency(storage);
 lambdas.addStackDependency(apiCore);
 lambdas.addStackDependency(auth);
-lambdas.addStackDependency(cloudfrontApi); // apiUrl may reference its domain name (config.apiEntrypoint === "cloudfront")
+if (cloudfrontApi) {
+  lambdas.addStackDependency(cloudfrontApi); // apiUrl may reference its domain name (config.apiEntrypoint === "cloudfront")
+}
 
 const api = new ApiStack(app, `${stackPrefix}-Api`, {
   env,
