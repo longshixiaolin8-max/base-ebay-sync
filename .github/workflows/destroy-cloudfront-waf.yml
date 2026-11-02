@@ -1,0 +1,70 @@
+name: One-off - Destroy unused CloudFront/WAF stacks
+
+# Temporary, one-off workflow (same pattern as prior one-off ops workflows in this repo's
+# history). infra/bin/infra.ts no longer creates AiEcPlatform-<env>-CloudFrontApi /
+# -Waf by default (apiEntrypoint stays "direct" -- they were pure dead weight on the AWS
+# bill, confirmed live at $16/month for WAF alone with zero functional traffic ever routed
+# through them). Removing them from the CDK app does NOT delete the already-deployed
+# stacks -- cdk only manages stacks present in the current synth -- and CloudFrontApi's
+# still-live import of Secrets' CloudFrontSharedSecret export was additionally blocking an
+# unrelated Secrets/Lambdas deploy from updating at all. This workflow performs that one
+# explicit destroy. Delete this file once it's been run successfully.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  id-token: write # required for OIDC -- no static AWS keys are ever stored in GitHub
+  contents: read
+
+jobs:
+  destroy:
+    if: ${{ inputs.environment != 'prod' || github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Destroy CloudFrontApi and Waf stacks
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          # enableCloudFrontWaf=true brings these two stack constructs back into the
+          # synthesized app (bin/infra.ts no longer creates them by default) purely so
+          # `cdk destroy` can resolve them by name -- this does not redeploy or change
+          # either stack, only lets the CLI find what to delete.
+          npx cdk destroy \
+            "AiEcPlatform-${{ inputs.environment }}-CloudFrontApi" \
+            "AiEcPlatform-${{ inputs.environment }}-Waf" \
+            --context env=${{ inputs.environment }} \
+            --context region=${{ vars.AWS_REGION }} \
+            --context enableCloudFrontWaf=true \
+            --force
