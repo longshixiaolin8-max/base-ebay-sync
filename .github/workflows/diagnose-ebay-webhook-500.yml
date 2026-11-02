@@ -33,16 +33,17 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Find the EbayWebhook function name
+        # lambda:ListFunctions and logs:* are NOT granted to the deploy role (confirmed
+        # live: AccessDeniedException) -- cloudformation:DescribeStackResources is, since
+        # CDK deploy itself depends on broad CloudFormation read access.
         run: |
           set -euo pipefail
-          FN_NAME=$(aws lambda list-functions --query "Functions[?starts_with(FunctionName, 'AiEcPlatform-${{ inputs.environment }}-Lambdas-EbayWebhook')].FunctionName | [0]" --output text)
+          FN_NAME=$(aws cloudformation describe-stack-resources \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-Lambdas" \
+            --query "StackResources[?starts_with(LogicalResourceId, 'EbayWebhook') && ResourceType=='AWS::Lambda::Function'].PhysicalResourceId | [0]" \
+            --output text)
           echo "FN_NAME=$FN_NAME" >> "$GITHUB_ENV"
           echo "Function: $FN_NAME"
-
-      - name: Tail recent CloudWatch Logs
-        run: |
-          set -euo pipefail
-          aws logs tail "/aws/lambda/${FN_NAME}" --since 20m --format short || echo "No recent log events found."
 
       - name: Re-invoke directly with a synthetic challenge request to capture the error
         run: |
