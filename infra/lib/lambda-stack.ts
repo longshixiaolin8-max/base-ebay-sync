@@ -88,6 +88,16 @@ export class LambdaStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: LambdaStackProps) {
     super(scope, id, props);
 
+    // Cost-emergency stop (user request, 2026-11-02, following the AWS Budget forecast
+    // overrun): every background EventBridge schedule below is wired through this flag
+    // instead of being deleted, so spend goes to (near) zero without losing any deployed
+    // state -- the stacks, DB, secrets, Cognito users and S3 objects all stay intact, and
+    // flipping this back to `true` and redeploying resumes every background job exactly
+    // where it left off (SQS/outbox state isn't lost either). Flip back to `true` once the
+    // budget is under control and background sync (sales polling, AI draft dispatch, DLQ
+    // redrive, tenant offboarding) needs to run again.
+    const BACKGROUND_SCHEDULES_ENABLED = false;
+
     const commonEnv: Record<string, string> = {
       DB_CLUSTER_ARN: props.cluster.clusterArn,
       DB_SECRET_ARN: props.cluster.secret!.secretArn,
@@ -237,6 +247,7 @@ export class LambdaStack extends cdk.Stack {
     props.queues.aiGenerate.grantSendMessages(this.productFetchFn);
     props.queues.ebaySync.grantSendMessages(this.productFetchFn);
     new events.Rule(this, "ProductFetchSchedule", {
+      enabled: BACKGROUND_SCHEDULES_ENABLED,
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
       targets: [new targets.LambdaFunction(this.productFetchFn)],
     });
@@ -331,6 +342,7 @@ export class LambdaStack extends cdk.Stack {
       // incident). Dev has no real customers depending on near-real-time double-sell
       // prevention yet, so it polls every 15 minutes instead -- the same cadence
       // ProductFetchSchedule already uses safely alongside the same auto-pause setting.
+      enabled: BACKGROUND_SCHEDULES_ENABLED,
       schedule: events.Schedule.rate(cdk.Duration.minutes(props.config.envName === "prod" ? 1 : 15)),
       targets: [new targets.LambdaFunction(this.salesPollerFn)],
     });
@@ -361,6 +373,7 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.ebay.grantRead(this.inventoryDiffCheckFn);
     props.appCredentialSecrets.shopify.grantRead(this.inventoryDiffCheckFn);
     new events.Rule(this, "InventoryDiffCheckSchedule", {
+      enabled: BACKGROUND_SCHEDULES_ENABLED,
       schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       targets: [new targets.LambdaFunction(this.inventoryDiffCheckFn)],
     });
@@ -382,6 +395,7 @@ export class LambdaStack extends cdk.Stack {
     props.appCredentialSecrets.ebay.grantRead(this.tenantOffboardingFn);
     props.appCredentialSecrets.shopify.grantRead(this.tenantOffboardingFn);
     new events.Rule(this, "TenantOffboardingSchedule", {
+      enabled: BACKGROUND_SCHEDULES_ENABLED,
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
       targets: [new targets.LambdaFunction(this.tenantOffboardingFn)],
     });
@@ -429,6 +443,7 @@ export class LambdaStack extends cdk.Stack {
       queue.grant(this.dlqRedriveFn, "sqs:SendMessage");
     }
     new events.Rule(this, "DlqRedriveSchedule", {
+      enabled: BACKGROUND_SCHEDULES_ENABLED,
       schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       targets: [new targets.LambdaFunction(this.dlqRedriveFn)],
     });
