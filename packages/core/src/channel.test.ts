@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { IMPLEMENTED_CHANNELS, otherChannels } from "./channel.js";
 
 describe("otherChannels", () => {
-  it("returns every implemented channel except the one given, with today's 2 implemented channels", () => {
-    expect(otherChannels("base")).toEqual(["ebay"]);
-    expect(otherChannels("ebay")).toEqual(["base"]);
+  it("returns every implemented channel except the one given, with today's 3 implemented channels", () => {
+    expect(otherChannels("base")).toEqual(["ebay", "shopify"]);
+    expect(otherChannels("ebay")).toEqual(["base", "shopify"]);
+    expect(otherChannels("shopify")).toEqual(["base", "ebay"]);
   });
 
   it("defaults to IMPLEMENTED_CHANNELS when no explicit channel list is given", () => {

@@ -13,6 +13,7 @@ export interface ApiStackProps extends cdk.StackProps {
   adminApiFn: nodejs.NodejsFunction;
   oauthBaseCallbackFn: nodejs.NodejsFunction;
   oauthEbayCallbackFn: nodejs.NodejsFunction;
+  oauthShopifyCallbackFn: nodejs.NodejsFunction;
   ebayWebhookFn: nodejs.NodejsFunction;
   signupHandlerFn: nodejs.NodejsFunction;
   stripeWebhookFn: nodejs.NodejsFunction;
@@ -90,6 +91,13 @@ export class ApiStack extends cdk.Stack {
       apigwv2.HttpMethod.GET,
       "/oauth/ebay/callback",
       new HttpLambdaIntegration("OauthEbayCallbackIntegration", props.oauthEbayCallbackFn),
+      false,
+    );
+    addRoute(
+      "OauthShopifyCallback",
+      apigwv2.HttpMethod.GET,
+      "/oauth/shopify/callback",
+      new HttpLambdaIntegration("OauthShopifyCallbackIntegration", props.oauthShopifyCallbackFn),
       false,
     );
 

@@ -12,6 +12,12 @@ export interface ConnectionDetail {
 export interface ConnectionsResponse {
   base: ConnectionDetail;
   ebay: ConnectionDetail;
+  // The real GET /admin/sync/connections response now includes shopify too (see
+  // CHANNEL_META/DISPLAYED_CHANNELS) -- this page's own KPI cards/ConnectionCards/
+  // IsolationCard still only render base/ebay explicitly (a pre-existing, not-yet-
+  // array-driven duplicate of Settings > 接続; see docs/adding-a-channel.md), so shopify
+  // is typed here but intentionally unused by this page today.
+  shopify: ConnectionDetail;
 }
 
 export interface SyncJobRow {

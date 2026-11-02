@@ -49,6 +49,7 @@ const PRODUCT = {
   priceJpy: 3000,
   images: ["https://img.example/1.jpg"],
   contentHash: "hash-1",
+  sourceChannel: "base",
 };
 
 let fakeDb: ReturnType<typeof createFakeDb>;
@@ -131,6 +132,21 @@ describe("ai-generate-worker handler", () => {
     );
     // Not retryable until next month -- must not count as an SQS batch item failure.
     expect(result).toEqual({ batchItemFailures: [] });
+  });
+
+  it("inserts one pending_approval channel_listings row per other implemented channel, not just eBay", async () => {
+    const insertValuesMock = vi.fn(() => ({ onConflictDoNothing: async () => undefined }));
+    fakeDb.insert = vi.fn(() => ({ values: insertValuesMock }));
+
+    await handler(sqsEvent("tenant-a", "product-1"), {} as never, {} as never);
+
+    // otherChannels("base") against today's real IMPLEMENTED_CHANNELS (["base", "ebay"]) --
+    // this is the test that would catch a regression back to a single hardcoded
+    // `channel: "ebay"` insert once a real 3rd channel is added to that registry.
+    expect(insertValuesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: "ebay", status: "pending_approval", productId: "product-1" }),
+    );
+    expect(insertValuesMock).not.toHaveBeenCalledWith(expect.objectContaining({ channel: "base" }));
   });
 
   it("still generates when the reservation succeeds (just under the plan's monthly AI limit)", async () => {

@@ -1,5 +1,5 @@
 import { BaseAdapter } from "@ai-ec/adapter-base";
-import { contentHash, type ExternalProduct, getPlanLimits } from "@ai-ec/core";
+import { contentHash, type ChannelType, type ExternalProduct, getPlanLimits, otherChannels } from "@ai-ec/core";
 import {
   type ApplyBaseStockReportResult,
   applyBaseStockReport,
@@ -32,8 +32,13 @@ import { and, eq, inArray, sql } from "drizzle-orm";
  *  mirrors InventoryWriteDb in packages/db/src/inventory.ts's own Phase-4 outbox helper. */
 type OutboxTxDb = { insert: Database["insert"]; select: Database["select"] };
 
-type OutboxJobType = "ai_generate" | "ebay_update";
-const OUTBOX_JOB_TYPES: OutboxJobType[] = ["ai_generate", "ebay_update"];
+type OutboxJobType = "ai_generate" | `${ChannelType}_update`;
+// Found by Codex review: this used to be hardcoded to exactly ["ai_generate", "ebay_update"],
+// so a BASE-side stock or content change (restock, price/title edit) never reached Shopify
+// once it became a real channel -- only a sale event (inventory-sync-worker's own
+// applySaleWithOutbox/dispatchPhaseB fan-out) pushed to it. Built from otherChannels("base")
+// so a 5th channel picks this up with zero edits, same as that fan-out already does.
+const OUTBOX_JOB_TYPES: OutboxJobType[] = ["ai_generate", ...otherChannels("base").map((c) => `${c}_update` as const)];
 
 type SyncJobRow = typeof syncJobs.$inferSelect;
 
@@ -79,60 +84,72 @@ async function insertOutboxJob(
   return existing as SyncJobRow;
 }
 
-/** Shared by both upsertProduct branches that may need to enqueue an ebay_update job: only
- *  push to a listing a human has already approved & published -- a still-pending draft is
- *  left alone, matching the pending-approval flow's own ownership of that listing. */
-async function isEbayListingPublished(tx: OutboxTxDb, productId: string): Promise<boolean> {
-  const [ebayListing] = await tx
+/** Shared by both upsertProduct branches that may need to enqueue a `${channel}_update` job:
+ *  only push to a listing a human has already approved & published -- a still-pending draft
+ *  is left alone, matching the pending-approval flow's own ownership of that listing. */
+async function isListingPublished(tx: OutboxTxDb, productId: string, channel: ChannelType): Promise<boolean> {
+  const [listing] = await tx
     .select()
     .from(channelListings)
-    .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, "ebay")))
+    .where(and(eq(channelListings.productId, productId), eq(channelListings.channel, channel)))
     .limit(1);
-  return ebayListing?.status === "published";
+  return listing?.status === "published";
 }
 
 /**
  * A BASE stock-only change (restock, manual adjustment, or a sellout BASE never reports as
  * an "order") never touches contentHash, so upsertProduct's normal content-update path --
- * the one place that would otherwise enqueue an ebay_update job -- never runs for it. Left
- * unfixed, an already-published eBay listing keeps advertising stale (possibly oversold)
- * quantity indefinitely, until some unrelated field happens to change too. This is the
- * stock-only counterpart to that path: no product_master row changed, so there's nothing to
- * keep atomic with the outbox insert (a plain single-statement insert is already atomic on
- * its own), and the idempotency key is keyed on BASE's own sequenceAt rather than
- * contentHash -- contentHash is identical across every stock-only change by definition, so
- * reusing the content-update path's key shape here would make every change after the first
- * silently collide with (and never re-fire past) that first job.
+ * the one place that would otherwise enqueue a `${channel}_update` job -- never runs for it.
+ * Left unfixed, an already-published listing on another channel keeps advertising stale
+ * (possibly oversold) quantity indefinitely, until some unrelated field happens to change
+ * too. This is the stock-only counterpart to that path: no product_master row changed, so
+ * there's nothing to keep atomic with the outbox insert (a plain single-statement insert is
+ * already atomic on its own), and the idempotency key is keyed on BASE's own sequenceAt
+ * rather than contentHash -- contentHash is identical across every stock-only change by
+ * definition, so reusing the content-update path's key shape here would make every change
+ * after the first silently collide with (and never re-fire past) that first job.
  *
  * Known residual gap: this runs as a separate call right after applyBaseStockReport's own
  * commit, not inside the same transaction (applyBaseStockReport's CAS retry loop isn't
  * transaction-aware). A crash/timeout landing exactly between the two would leave the new
- * quantity reconciled in inventory_master but never propagated to eBay, and -- unlike the
- * out-of-order detection this same sequenceAt also drives -- there's no automatic retry for
- * it: the next poll of an unchanged BASE state reports the same sequenceAt and is correctly
- * treated as a no-op, not a reason to re-attempt this. Narrower than the bug this function
- * fixes (requires a crash in a specific few-millisecond window, not "any two stock changes
- * with no content edit between them"), and self-heals the moment any other field changes.
+ * quantity reconciled in inventory_master but never propagated to the other channels, and --
+ * unlike the out-of-order detection this same sequenceAt also drives -- there's no automatic
+ * retry for it: the next poll of an unchanged BASE state reports the same sequenceAt and is
+ * correctly treated as a no-op, not a reason to re-attempt this. Narrower than the bug this
+ * function fixes (requires a crash in a specific few-millisecond window, not "any two stock
+ * changes with no content edit between them"), and self-heals the moment any other field
+ * changes.
  */
-async function propagateStockOnlyChangeToEbay(
+async function propagateStockOnlyChangeToOtherChannels(
   db: Database,
   tenantId: string,
   productId: string,
   sequenceAt: Date,
 ): Promise<void> {
-  if (!(await isEbayListingPublished(db, productId))) return;
+  for (const channel of otherChannels("base")) {
+    if (!(await isListingPublished(db, productId, channel))) continue;
 
-  await insertOutboxJob(db, tenantId, "ebay_update", `${tenantId}:ebay-update:${productId}:stock:${sequenceAt.getTime()}`, productId, {
-    type: "ebay_update",
-    tenantId,
-    productId,
-  });
+    await insertOutboxJob(
+      db,
+      tenantId,
+      `${channel}_update`,
+      `${tenantId}:${channel}-update:${productId}:stock:${sequenceAt.getTime()}`,
+      productId,
+      { type: `${channel}_update`, tenantId, productId },
+    );
+  }
 }
 
 function queueUrlForJobType(queues: ReturnType<typeof getQueueUrls>, type: string): string | null {
   if (type === "ai_generate") return queues.aiGenerate;
   if (type === "ebay_update") return queues.ebaySync;
+  if (type === "shopify_update") return queues.shopifySync;
   return null;
+}
+
+function channelForJobType(type: string): string {
+  if (type === "ai_generate") return "base";
+  return type.replace(/_update$/, "");
 }
 
 /**
@@ -170,7 +187,7 @@ export async function dispatchPendingOutboxJobs(
       await recordSyncError(db, {
         tenantId,
         jobId: job.id,
-        channel: job.type === "ebay_update" ? "ebay" : "base",
+        channel: channelForJobType(job.type),
         productId: job.productId,
         errorCode: "product_fetch_dispatch_failed",
         errorMessage: (err as Error).message,
@@ -298,22 +315,24 @@ export async function upsertProduct(
 
   if (existing && existing.contentHash === hash) {
     // A stock-only change (contentHash doesn't cover quantity) just got written to
-    // inventory_master above, but nothing below this point would otherwise ever enqueue an
-    // ebay_update job for it -- an already-published eBay listing would then keep
-    // advertising stale (possibly oversold) quantity until some unrelated field happened to
-    // change too. Only do this when the report was actually applied (a real, new BASE
-    // state), never for an out-of-order/unchanged report that didn't move the needle.
+    // inventory_master above, but nothing below this point would otherwise ever enqueue a
+    // `${channel}_update` job for it -- an already-published listing on another channel
+    // would then keep advertising stale (possibly oversold) quantity until some unrelated
+    // field happened to change too. Only do this when the report was actually applied (a
+    // real, new BASE state), never for an out-of-order/unchanged report that didn't move
+    // the needle.
     if (stockReport?.applied) {
-      await propagateStockOnlyChangeToEbay(db, tenantId, existing.id, item.updatedAt);
+      await propagateStockOnlyChangeToOtherChannels(db, tenantId, existing.id, item.updatedAt);
     }
     return; // no other field changed since last import
   }
 
   if (existing) {
-    // The product-row update and the eBay-update outbox row it may need to enqueue commit
-    // in the same transaction -- see insertOutboxJob's own comment on why that atomicity is
-    // the actual fix here: a DB update succeeding while the follow-up enqueue silently fails
-    // used to mean this edit never reached eBay, with no trace that anything was missed.
+    // The product-row update and the `${channel}_update` outbox rows it may need to enqueue
+    // commit in the same transaction -- see insertOutboxJob's own comment on why that
+    // atomicity is the actual fix here: a DB update succeeding while the follow-up enqueue
+    // silently fails used to mean this edit never reached that channel, with no trace that
+    // anything was missed.
     await db.transaction(async (tx) => {
       await tx
         .update(productMaster)
@@ -327,9 +346,10 @@ export async function upsertProduct(
         })
         .where(eq(productMaster.id, existing.id));
 
-      if (await isEbayListingPublished(tx, existing.id)) {
-        await insertOutboxJob(tx, tenantId, "ebay_update", `${tenantId}:ebay-update:${existing.id}:${hash}`, existing.id, {
-          type: "ebay_update",
+      for (const channel of otherChannels("base")) {
+        if (!(await isListingPublished(tx, existing.id, channel))) continue;
+        await insertOutboxJob(tx, tenantId, `${channel}_update`, `${tenantId}:${channel}-update:${existing.id}:${hash}`, existing.id, {
+          type: `${channel}_update`,
           tenantId,
           productId: existing.id,
         });

@@ -13,23 +13,23 @@ import { z } from "zod";
  *     Next Engine ships a dedicated Shopify sync app, i.e. real, confirmed demand, not a
  *     speculative "everyone uses Shopify" guess.
  * Adding a new one here (and implementing ChannelAdapter) is the *starting* point, not the
- * whole job -- see docs/adding-a-channel.md at the repo root for what else needs to change
- * (some of it automatic as of this codebase's channel-registry pass, some of it still
- * manual: CDK infra, and the sale-application outbox's current single-other-channel
- * assumption in particular).
+ * whole job -- see docs/adding-a-channel.md at the repo root for what else needs to change.
+ * shopify is the proof this pipeline is genuinely N-channel-safe, not just 2-channel-safe
+ * dressed up as general: the sale-application outbox (applySaleWithOutbox/dispatchPhaseB)
+ * and the AI-draft pending-approval step (ai-generate-worker) both fan out to every entry in
+ * IMPLEMENTED_CHANNELS already, with zero further edits needed when shopify was added here.
  */
 export const ChannelType = z.enum(["base", "ebay", "shopify", "amazon", "rakuten", "yahoo_shopping"]);
 export type ChannelType = z.infer<typeof ChannelType>;
 
 /** Channels that are fully implemented in this codebase today. */
-export const IMPLEMENTED_CHANNELS: ChannelType[] = ["base", "ebay"];
+export const IMPLEMENTED_CHANNELS: ChannelType[] = ["base", "ebay", "shopify"];
 
 /**
- * Every implemented channel except `channel` itself. With exactly 2 implemented channels
- * this returns a single-element array (today's "the other channel" case), but unlike a
- * hardcoded `channel === "base" ? "ebay" : "base"` ternary, this stays correct once a 3rd
- * channel is added to IMPLEMENTED_CHANNELS -- a sale on channel A must notify every other
- * channel holding stock, not just one.
+ * Every implemented channel except `channel` itself. Unlike a hardcoded
+ * `channel === "base" ? "ebay" : "base"` ternary, this stays correct as channels are added to
+ * IMPLEMENTED_CHANNELS -- a sale on channel A must notify every other channel holding stock,
+ * not just one.
  */
 export function otherChannels(channel: ChannelType, allChannels: ChannelType[] = IMPLEMENTED_CHANNELS): ChannelType[] {
   return allChannels.filter((c) => c !== channel);

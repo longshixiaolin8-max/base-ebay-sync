@@ -118,8 +118,19 @@ export default function ConnectionsTab() {
   }, []);
 
   async function handleReconnect(channel: DisplayedChannel) {
+    // Unlike BASE/eBay, Shopify's own authorize URL is store-specific -- the tenant must
+    // tell us which store before admin-api can build it (see GET /admin/oauth/shopify/
+    // authorize-url's own missing_shop/invalid_shop responses). A prompt is a deliberately
+    // minimal UI for this one extra field rather than a dedicated form, consistent with how
+    // small a surface this platform otherwise builds for a single-field input.
+    let shopQuery = "";
+    if (channel === "shopify") {
+      const shop = window.prompt("あなたのShopifyストアのドメインを入力してください (例: my-store または my-store.myshopify.com)");
+      if (!shop) return;
+      shopQuery = `?shop=${encodeURIComponent(shop.trim())}`;
+    }
     try {
-      const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url`);
+      const res = await apiGet<{ url: string }>(`/admin/oauth/${channel}/authorize-url${shopQuery}`);
       if (!window.open(res.url, "_blank", "noopener,noreferrer")) {
         notify(`ポップアップがブロックされました。次のURLを手動で開いて連携してください: ${res.url}`);
       }
@@ -191,13 +202,13 @@ export default function ConnectionsTab() {
           <h2 style={{ fontSize: "0.95rem", margin: 0 }}>外部サービスを追加</h2>
         </div>
         <p className="settings-disabled-note">
-          このプラットフォームが対応する外部サービスは現在BASE・eBayの2つのみです。他サービスとの連携は未提供のため、追加ボタンは無効化しています。
+          このプラットフォームが対応する外部サービスは現在BASE・eBay・Shopifyの3つのみです。他サービスとの連携は未提供のため、追加ボタンは無効化しています。
         </p>
         <button
           type="button"
           className="secondary"
           disabled
-          title="このプラットフォームが対応する外部サービスは現在BASE・eBayの2つのみです。他サービスとの連携は未提供です"
+          title="このプラットフォームが対応する外部サービスは現在BASE・eBay・Shopifyの3つのみです。他サービスとの連携は未提供です"
           style={{ marginTop: "0.75rem" }}
         >
           外部サービスを追加(未提供)

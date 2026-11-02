@@ -27,6 +27,7 @@ function makeQueuePair(scope: Construct, name: string, visibilityTimeoutSeconds:
 export class QueueStack extends cdk.Stack {
   readonly aiGenerate: QueuePair;
   readonly ebaySync: QueuePair;
+  readonly shopifySync: QueuePair;
   readonly inventorySync: QueuePair;
   readonly ebayPlatformNotificationPoll: QueuePair;
 
@@ -38,6 +39,10 @@ export class QueueStack extends cdk.Stack {
     // function timeout so a message isn't redelivered mid-processing.
     this.aiGenerate = makeQueuePair(this, "AiGenerate", 12 * 60);
     this.ebaySync = makeQueuePair(this, "EbaySync", 12 * 60);
+    // shopify-sync-worker's own consumer timeout is 2 minutes too (see lambda-stack.ts) --
+    // same visibility-timeout sizing as ebaySync above, despite shopify-sync-worker's much
+    // simpler publish()/update() (no quota/category-aspect machinery to retry through).
+    this.shopifySync = makeQueuePair(this, "ShopifySync", 12 * 60);
     this.inventorySync = makeQueuePair(this, "InventorySync", 12 * 60);
     // Round 14 hardening ("eBay Platform Notification abuse対策"): decouples the public,
     // unauthenticated POST /webhooks/ebay/platform-notifications from the actual eBay poll

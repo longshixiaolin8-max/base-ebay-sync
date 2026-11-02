@@ -176,6 +176,7 @@ const recordAuditLogMock = vi.fn().mockResolvedValue(undefined);
 const getQueueUrlsMock = vi.fn(() => ({
   aiGenerate: "ai-generate-url",
   ebaySync: "ebay-sync-url",
+  shopifySync: "shopify-sync-url",
   inventorySync: "inventory-sync-url",
 }));
 let fakeDb: unknown;
@@ -240,6 +241,16 @@ const createEbayAdapterMock = vi.fn((..._args: unknown[]) => ({
   createShippingFulfillment: createShippingFulfillmentMock,
 }));
 
+const getAuthorizationUrlShopifyMock = vi.fn().mockReturnValue("https://my-store.myshopify.com/oauth?state=signed-state");
+const createShopifyAdapterMock = vi.fn((..._args: unknown[]) => ({
+  getAuthorizationUrl: getAuthorizationUrlShopifyMock,
+}));
+const normalizeShopDomainMock = vi.fn((raw: string) => {
+  const stripped = raw.trim().toLowerCase().replace(/\.myshopify\.com$/, "");
+  if (!/^[a-z0-9][a-z0-9-]{0,60}$/.test(stripped)) throw new Error(`Invalid Shopify shop domain: ${raw}`);
+  return stripped;
+});
+
 const fetchFxRateMock = vi.fn().mockResolvedValue({ fxRateUsdPerJpy: 0.0067, source: "test", fetchedAt: new Date() });
 const getDlqUrlsMock = vi.fn(() => {
   throw new Error("Missing required environment variable: AI_GENERATE_DLQ_URL");
@@ -262,6 +273,8 @@ vi.mock("@ai-ec/lambda-shared", () => ({
   listConnectedAccountIds: (...args: unknown[]) => listConnectedAccountIdsMock(...args),
   getValidAccessToken: (...args: unknown[]) => getValidAccessTokenMock(...args),
   createEbayAdapter: (...args: unknown[]) => createEbayAdapterMock(...args),
+  createShopifyAdapter: (...args: unknown[]) => createShopifyAdapterMock(...args),
+  normalizeShopDomain: (...args: [string]) => normalizeShopDomainMock(...args),
   fetchFxRate: (...args: unknown[]) => fetchFxRateMock(...args),
   getDlqUrls: () => getDlqUrlsMock(),
   getApproximateMessageCount: (...args: unknown[]) => getApproximateMessageCountMock(...args),
@@ -633,7 +646,7 @@ describe("admin-api handler", () => {
 
   describe("GET /admin/sync/connections", () => {
     it("reports disconnected channels with no expiry/last-synced when nothing has ever connected", async () => {
-      fakeDb = createFakeDb([[], []]); // base oauthConnections select, ebay oauthConnections select
+      fakeDb = createFakeDb([[], [], []]); // base, ebay, shopify oauthConnections selects
       computeChannelSyncStateMock.mockImplementation((..._args: unknown[]) => Promise.resolve({ channel: "base", state: "HEALTHY", reasons: [] }));
       getLatestSyncedAtMock.mockResolvedValue(null);
 
@@ -642,6 +655,7 @@ describe("admin-api handler", () => {
       const parsed = JSON.parse(res.body!);
       expect(parsed.base).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
       expect(parsed.ebay).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
+      expect(parsed.shopify).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
     });
 
     it("reports token expiry, last-synced time, and derived state per channel for a connected account", async () => {
@@ -650,8 +664,9 @@ describe("admin-api handler", () => {
       fakeDb = createFakeDb([
         [{ externalAccountId: "acct-base", expiresAt }], // base
         [], // ebay -- not connected
+        [], // shopify -- not connected
       ]);
-      // Argument-driven rather than call-order-driven, since both channels are looked up
+      // Argument-driven rather than call-order-driven, since every channel is looked up
       // concurrently via Promise.all -- this stays correct regardless of microtask ordering.
       computeChannelSyncStateMock.mockImplementation((_db: unknown, _tenantId: unknown, channel: string) =>
         Promise.resolve(channel === "base" ? { channel, state: "DEGRADED", reasons: ["low confidence"] } : { channel, state: "HEALTHY", reasons: [] }),
@@ -671,6 +686,7 @@ describe("admin-api handler", () => {
         reasons: ["low confidence"],
       });
       expect(parsed.ebay).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
+      expect(parsed.shopify).toEqual({ connected: false, externalAccountId: null, expiresAt: null, lastSyncedAt: null, state: "HEALTHY", reasons: [] });
     });
   });
 
@@ -849,6 +865,35 @@ describe("admin-api handler", () => {
     expect(recordAuditLogMock).toHaveBeenCalledWith(
       fakeDb,
       expect.objectContaining({ actor: "admin@example.com", action: "ebay_listing_publish_approved" }),
+    );
+  });
+
+  it("approve-shopify-listing returns 404 when there is no Shopify draft yet", async () => {
+    fakeDb = createFakeDb([[]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/approve-shopify-listing"));
+    expect(res.statusCode).toBe(404);
+    expect(enqueueMock).not.toHaveBeenCalled();
+  });
+
+  it("approve-shopify-listing returns 409 when already published", async () => {
+    fakeDb = createFakeDb([[{ status: "published" }]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/approve-shopify-listing"));
+    expect(res.statusCode).toBe(409);
+    expect(enqueueMock).not.toHaveBeenCalled();
+  });
+
+  it("approve-shopify-listing enqueues shopify_publish and records an audit log entry", async () => {
+    fakeDb = createFakeDb([[{ status: "pending_approval" }]]);
+    const res = await callHandler(makeEvent("POST", "/admin/products/p1/approve-shopify-listing"));
+    expect(res.statusCode).toBe(202);
+    expect(enqueueMock).toHaveBeenCalledWith(
+      "shopify-sync-url",
+      { type: "shopify_publish", tenantId: TENANT_A, productId: "p1" },
+      `${TENANT_A}:shopify-publish:p1`,
+    );
+    expect(recordAuditLogMock).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({ actor: "admin@example.com", action: "shopify_listing_publish_approved" }),
     );
   });
 
@@ -2715,9 +2760,38 @@ describe("admin-api handler", () => {
 
     it("returns 400 for a channel that isn't implemented yet, rather than falling through to a generic 404", async () => {
       fakeDb = createFakeDb([]);
-      const res = await callHandler(makeEvent("GET", "/admin/oauth/shopify/authorize-url"));
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/amazon/authorize-url"));
       expect(res.statusCode).toBe(400);
       expect(JSON.parse(res.body!)).toEqual({ error: "unknown_channel" });
+    });
+
+    it("requires a ?shop= query param for Shopify -- unlike BASE/eBay, its authorize URL is store-specific", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/shopify/authorize-url"));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "missing_shop" });
+      expect(getAppCredentialsMock).not.toHaveBeenCalledWith("shopify");
+    });
+
+    it("rejects a shop value that isn't a real Shopify subdomain before ever building a URL from it", async () => {
+      fakeDb = createFakeDb([]);
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/shopify/authorize-url", { shop: "evil.com/path" }));
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body!)).toEqual({ error: "invalid_shop" });
+    });
+
+    it("mints a signed state and builds the store-specific Shopify consent URL from a valid ?shop=", async () => {
+      fakeDb = createFakeDb([]);
+      signStateMock.mockClear();
+      getAppCredentialsMock.mockResolvedValueOnce({ clientId: "shopify-cid", clientSecret: "shopify-csecret" });
+
+      const res = await callHandler(makeEvent("GET", "/admin/oauth/shopify/authorize-url", { shop: "my-store.myshopify.com" }));
+
+      expect(res.statusCode).toBe(200);
+      expect(normalizeShopDomainMock).toHaveBeenCalledWith("my-store.myshopify.com");
+      expect(createShopifyAdapterMock).toHaveBeenCalledWith({ clientId: "shopify-cid", clientSecret: "shopify-csecret" }, "my-store");
+      expect(signStateMock).toHaveBeenCalledWith("shopify-csecret", TENANT_A);
+      expect(JSON.parse(res.body!)).toEqual({ url: "https://my-store.myshopify.com/oauth?state=signed-state" });
     });
   });
 
@@ -3383,7 +3457,7 @@ describe("admin-api handler", () => {
       process.env.OPERATOR_EMAIL = OPERATOR_EMAIL;
       fakeDb = createFakeDb([]);
 
-      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/shopify/clear"));
+      const res = await callHandler(opsEvent("POST", "/admin/ops/tenants/tenant-b/channel-isolation/amazon/clear"));
 
       expect(res.statusCode).toBe(400);
     });
