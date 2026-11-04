@@ -48,6 +48,11 @@ const lambdaConcurrencyLimitsEnabled = (app.node.tryGetContext("lambdaConcurrenc
 // See PlatformConfig.operatorEmail's own doc comment: unset by default (the /admin/ops/*
 // routes 403 for everyone) until passed here via `--context operatorEmail=you@example.com`.
 const operatorEmail = app.node.tryGetContext("operatorEmail") as string | undefined;
+// See PlatformConfig.enableSignupRouteThrottle's own doc comment: leave this false on an
+// environment's first-ever deploy of this stack (or any deploy where ApiCore/Api haven't
+// both successfully deployed together with the POST /signup Route already live), then pass
+// `--context enableSignupRouteThrottle=true` on a later deploy once that's confirmed.
+const enableSignupRouteThrottle = app.node.tryGetContext("enableSignupRouteThrottle") as string | undefined;
 
 const config = loadConfig(
   envName,
@@ -59,6 +64,7 @@ const config = loadConfig(
   sesFromEmail,
   lambdaConcurrencyLimitsEnabled,
   operatorEmail,
+  enableSignupRouteThrottle,
 );
 
 // Region is read from CDK context (`--context region=...`), not from
@@ -216,6 +222,7 @@ const api = new ApiStack(app, `${stackPrefix}-Api`, {
   signupHandlerFn: lambdas.signupHandlerFn,
   stripeWebhookFn: lambdas.stripeWebhookFn,
   enableEbayPlatformNotificationThrottle: config.ebayPlatformNotificationThrottleEnabled,
+  enableSignupRouteThrottle: config.enableSignupRouteThrottle,
 });
 api.addStackDependency(lambdas);
 api.addStackDependency(auth);

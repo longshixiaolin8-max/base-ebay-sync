@@ -44,6 +44,16 @@ export interface PlatformConfig {
    */
   ebayPlatformNotificationThrottleEnabled: boolean;
   /**
+   * Same two-phase-deploy gate as ebayPlatformNotificationThrottleEnabled just above, for
+   * the `POST /signup` route's own throttle -- confirmed live (2026-11-02) that an
+   * environment whose ApiCore/Api stacks hadn't both been successfully deployed together
+   * since this throttle was added hits the identical "Unable to find Route by key ...
+   * within the provided RouteSettings" failure. false (default) the first time so the
+   * Route is confirmed live with no throttle override; true on a later deploy once that's
+   * confirmed.
+   */
+  enableSignupRouteThrottle: boolean;
+  /**
    * The "From" address stripe-webhook's billing-notice emails (payment failed, subscription
    * canceled) are sent from via SES v2 -- see services/lambdas/shared/src/email.ts. Left
    * unset by default: sendEmail() throws (caught, logged, never fails the webhook response)
@@ -91,6 +101,7 @@ export function loadConfig(
   sesFromEmail?: string,
   lambdaConcurrencyLimitsEnabled?: string,
   operatorEmail?: string,
+  enableSignupRouteThrottle?: string,
 ): PlatformConfig {
   return {
     envName,
@@ -102,5 +113,6 @@ export function loadConfig(
     sesFromEmail,
     lambdaConcurrencyLimitsEnabled: lambdaConcurrencyLimitsEnabled === "true",
     operatorEmail,
+    enableSignupRouteThrottle: enableSignupRouteThrottle === "true",
   };
 }

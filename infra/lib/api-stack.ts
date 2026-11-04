@@ -20,6 +20,11 @@ export interface ApiStackProps extends cdk.StackProps {
   /** See PlatformConfig.ebayPlatformNotificationThrottleEnabled's doc comment: must stay
    *  false on an environment's first-ever deploy of the platform-notifications route. */
   enableEbayPlatformNotificationThrottle: boolean;
+  /** See PlatformConfig.enableSignupRouteThrottle's doc comment: must stay false on an
+   *  environment's first-ever deploy of this stack (or any deploy where ApiCoreStack's
+   *  Stage hasn't yet picked up a successful update with the POST /signup Route already
+   *  live on it). */
+  enableSignupRouteThrottle: boolean;
 }
 
 /**
@@ -159,16 +164,22 @@ export class ApiStack extends cdk.Stack {
     // README's "eBay Platform Notification abuse対策" section for the exact steps.
     const cfnStage = api.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
     if (cfnStage) {
-      // /signup is already present in every deployed environment, so this can safely be
-      // enforced in one deploy (unlike the first-ever platform-notification route rollout).
-      // Global 2 rps / burst 5 is intentionally conservative for a human signup form and
-      // bounds SES/DB abuse before the per-email 60s cooldown in the Lambda is even reached.
-      const signupRouteSettings = {
-        "POST /signup": {
-          ThrottlingRateLimit: 2,
-          ThrottlingBurstLimit: 5,
-        } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
-      };
+      // Confirmed live (2026-11-02, a dev deploy that had never actually carried this route
+      // through before): the "/signup is already present in every deployed environment"
+      // assumption below doesn't hold for an environment whose ApiCore/Api stacks haven't
+      // both been successfully deployed together since this route was added -- same
+      // ordering failure as the ebay platform-notifications route just below, so this gets
+      // the exact same two-phase gate. Global 2 rps / burst 5 is intentionally conservative
+      // for a human signup form and bounds SES/DB abuse before the per-email 60s cooldown in
+      // the Lambda is even reached.
+      const signupRouteSettings = props.enableSignupRouteThrottle
+        ? {
+            "POST /signup": {
+              ThrottlingRateLimit: 2,
+              ThrottlingBurstLimit: 5,
+            } as unknown as apigwv2.CfnStage.RouteSettingsProperty,
+          }
+        : {};
       const ebayRouteSettings = props.enableEbayPlatformNotificationThrottle
         ? {
             "POST /webhooks/ebay/platform-notifications/{token}": {

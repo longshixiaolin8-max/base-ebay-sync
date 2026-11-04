@@ -19,6 +19,16 @@ on:
         required: false
         type: boolean
         default: false
+      enableSignupRouteThrottle:
+        description: >-
+          Enable the per-route API Gateway throttle on POST /signup. Leave unchecked
+          (default) on a deploy where ApiCore/Api haven't both already successfully deployed
+          together with this route live -- it fails otherwise, the same way the eBay
+          platform-notifications throttle above does. Check it only on a LATER deploy, once
+          a first one without it has already succeeded.
+        required: false
+        type: boolean
+        default: false
       enableLambdaConcurrencyLimits:
         description: >-
           Apply each SQS-driven worker's reservedConcurrentExecutions cap. Confirmed live
@@ -203,6 +213,7 @@ jobs:
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --context enableSignupRouteThrottle=${{ inputs.enableSignupRouteThrottle }} \
               --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
               --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
@@ -215,6 +226,7 @@ jobs:
               --context sesFromEmail="${{ vars.SES_FROM_EMAIL }}" \
               --context apiEntrypoint="${API_ENTRYPOINT:-direct}" \
               --context ebayPlatformNotificationThrottleEnabled=${{ inputs.enableEbayPlatformNotificationThrottle }} \
+              --context enableSignupRouteThrottle=${{ inputs.enableSignupRouteThrottle }} \
               --context lambdaConcurrencyLimitsEnabled=${{ inputs.enableLambdaConcurrencyLimits }} \
               --context operatorEmail="${{ vars.OPERATOR_EMAIL }}" \
               --require-approval never
