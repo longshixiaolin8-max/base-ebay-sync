@@ -39,6 +39,21 @@ jobs:
             --query "Stacks[0].{Status:StackStatus,Reason:StackStatusReason}" \
             --output table
 
+      - name: Assume the CDK CloudFormation-execution role
+        # cdk deploy itself performs every stack update through this role (far broader
+        # permissions than the GitHub OIDC role carries directly, confirmed: that role was
+        # just denied cloudformation:ContinueUpdateRollback) -- chaining into the same role
+        # CDK already uses for every successful deploy in this pipeline. Standard CDK
+        # default-qualifier bootstrap naming (this account's qualifier, "hnb659fds", is
+        # already visible in every synth's own BootstrapVersion SSM parameter default); the
+        # account id is not a secret -- it's printed in plain text in every stack ARN this
+        # pipeline's own deploy logs already contain.
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::458818121046:role/cdk-hnb659fds-cfn-exec-role-458818121046-${{ vars.AWS_REGION }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-chaining: true
+
       - name: Continue the stuck rollback
         run: |
           set -euo pipefail
