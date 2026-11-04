@@ -1,0 +1,53 @@
+name: One-off - Recover ApiCore stack from UPDATE_ROLLBACK_FAILED
+
+# Temporary, one-off recovery workflow. AiEcPlatform-<env>-ApiCore got stuck in
+# UPDATE_ROLLBACK_FAILED after an earlier failed deploy (the POST /signup route-throttle
+# ordering bug, fixed in #42) failed to roll back cleanly. CloudFormation refuses any
+# further update to a stack in this state until an explicit ContinueUpdateRollback call
+# succeeds. Delete this file once it's served its purpose.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Inspect current stack status
+        run: |
+          set -euo pipefail
+          aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+            --query "Stacks[0].{Status:StackStatus,Reason:StackStatusReason}" \
+            --output table
+
+      - name: Continue the stuck rollback
+        run: |
+          set -euo pipefail
+          aws cloudformation continue-update-rollback \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore"
+          echo "ContinueUpdateRollback requested; waiting for it to settle..."
+          aws cloudformation wait stack-rollback-complete \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" || true
+          aws cloudformation describe-stacks \
+            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+            --query "Stacks[0].{Status:StackStatus,Reason:StackStatusReason}" \
+            --output table
