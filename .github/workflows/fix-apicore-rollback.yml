@@ -2,9 +2,16 @@ name: One-off - Recover ApiCore stack from UPDATE_ROLLBACK_FAILED
 
 # Temporary, one-off recovery workflow. AiEcPlatform-<env>-ApiCore got stuck in
 # UPDATE_ROLLBACK_FAILED after an earlier failed deploy (the POST /signup route-throttle
-# ordering bug, fixed in #42) failed to roll back cleanly. CloudFormation refuses any
-# further update to a stack in this state until an explicit ContinueUpdateRollback call
-# succeeds. Delete this file once it's served its purpose.
+# ordering bug, fixed in #42) failed to roll back cleanly. Earlier attempts in this
+# workflow tried to call cloudformation:ContinueUpdateRollback directly (denied: not
+# granted to the GitHub deploy role) and then tried manually chaining into CDK's
+# cfn-exec role (also denied: that role's trust policy only trusts CDK's own deploy-role,
+# not the raw GitHub Actions identity, as a direct AssumeRole principal). `cdk rollback`
+# (built into the CDK CLI since v2) is the right tool for this: it goes through the exact
+# same role-chaining machinery `cdk deploy` already uses successfully throughout this
+# pipeline (GitHub role -> CDK bootstrap deploy-role -> cfn-exec-role, all handled
+# internally by the CDK CLI's own credential-provider chain), rather than this workflow
+# trying to replicate that chain by hand. Delete this file once it's served its purpose.
 
 on:
   workflow_dispatch:
@@ -25,6 +32,23 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -39,34 +63,18 @@ jobs:
             --query "Stacks[0].{Status:StackStatus,Reason:StackStatusReason}" \
             --output table
 
-      - name: Assume the CDK CloudFormation-execution role
-        # cdk deploy itself performs every stack update through this role (far broader
-        # permissions than the GitHub OIDC role carries directly, confirmed: that role was
-        # just denied cloudformation:ContinueUpdateRollback) -- chaining into the same role
-        # CDK already uses for every successful deploy in this pipeline. Standard CDK
-        # default-qualifier bootstrap naming (this account's qualifier, "hnb659fds", is
-        # already visible in every synth's own BootstrapVersion SSM parameter default); the
-        # account id is not a secret -- it's printed in plain text in every stack ARN this
-        # pipeline's own deploy logs already contain.
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::458818121046:role/cdk-hnb659fds-cfn-exec-role-458818121046-${{ vars.AWS_REGION }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-chaining: true
-          # Confirmed live: the assume itself is allowed, but this action's default
-          # session-tagging call (sts:TagSession) is not -- CDK's own cfn-exec role trust
-          # policy wasn't written to expect a tagging caller. Skip it; plain AssumeRole is
-          # all this one-off call needs.
-          role-skip-session-tagging: true
-
-      - name: Continue the stuck rollback
+      - name: cdk rollback
+        working-directory: infra
         run: |
           set -euo pipefail
-          aws cloudformation continue-update-rollback \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore"
-          echo "ContinueUpdateRollback requested; waiting for it to settle..."
-          aws cloudformation wait stack-rollback-complete \
-            --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" || true
+          npx cdk rollback "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
+            --context env=${{ inputs.environment }} \
+            --context region=${{ vars.AWS_REGION }} \
+            --force
+
+      - name: Confirm final stack status
+        run: |
+          set -euo pipefail
           aws cloudformation describe-stacks \
             --stack-name "AiEcPlatform-${{ inputs.environment }}-ApiCore" \
             --query "Stacks[0].{Status:StackStatus,Reason:StackStatusReason}" \
