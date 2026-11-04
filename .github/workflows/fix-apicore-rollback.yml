@@ -53,6 +53,11 @@ jobs:
           role-to-assume: arn:aws:iam::458818121046:role/cdk-hnb659fds-cfn-exec-role-458818121046-${{ vars.AWS_REGION }}
           aws-region: ${{ vars.AWS_REGION }}
           role-chaining: true
+          # Confirmed live: the assume itself is allowed, but this action's default
+          # session-tagging call (sts:TagSession) is not -- CDK's own cfn-exec role trust
+          # policy wasn't written to expect a tagging caller. Skip it; plain AssumeRole is
+          # all this one-off call needs.
+          role-skip-session-tagging: true
 
       - name: Continue the stuck rollback
         run: |
