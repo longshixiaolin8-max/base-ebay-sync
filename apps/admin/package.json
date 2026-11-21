@@ -13,7 +13,7 @@
   "dependencies": {
     "@ai-ec/core": "workspace:*",
     "aws-amplify": "^6.6.6",
-    "dompurify": "^3.2.3",
+    "dompurify": "^3.4.18",
     "next": "^15.5.28",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
